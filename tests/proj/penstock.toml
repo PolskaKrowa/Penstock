@@ -1,0 +1,13 @@
+# tests/proj/penstock.toml — the project manifest build test (report §6.2)
+[project]
+name = "projtest"
+
+[target]
+type = "bin"
+src = ["main.fsh"]
+
+[build]
+opt = 2
+
+[modules]
+path = ["mods"]

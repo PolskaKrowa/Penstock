@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/PenstockTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/PenstockHelpers.cmake")
+
+# Stable convenience variable. Prefer the imported target in COMMAND clauses.
+set(Penstock_COMPILER Penstock::compiler)
+set(Penstock_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
+check_required_components(Penstock)

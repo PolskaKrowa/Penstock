@@ -1,0 +1,2 @@
+import nosuchmodule;
+fn main() { }
