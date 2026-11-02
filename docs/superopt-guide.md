@@ -53,7 +53,10 @@ superoptimisation engine, not yet a general-purpose Souper-equivalent
 synthesis search over arbitrary expression DAGs.
 
 Alive2 supports function-local transformations; the engine therefore changes
-one function at a time and does not attempt interprocedural rewrites.
+one function at a time and does not attempt interprocedural rewrites. Its LLVM
+utility and SMT initialisers are held in one process-wide session; the SMT
+context is reset between proofs and finalised only when Penstock exits. Proof
+calls are serialised because Alive2's state is process-global.
 
 ## Budgets and objectives
 

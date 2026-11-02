@@ -451,12 +451,23 @@ n_ilv=$(grep -c "interleave.count" "$TMP/va.ll")
 if [ "$n_annot" = "1" ] && [ "$n_ilv" = "0" ]; then
   ok "§5 @vectorize annotation: 1 annotated loop, no interleave count"
 else bad "§5 @vectorize IR (annotated=$n_annot interleave=$n_ilv, want 1/0)"; fi
-if $PEN tests/pos_vectorize.fsh -o "$TMP/va" 2>/dev/null; then
+# Preserve compiler stderr: this path runs both finite-domain rewriting and
+# embedded Alive2/Freshet superoptimisation at the default -O3. Hiding stderr
+# made native aborts appear only as an unhelpful shell "Aborted" line.
+vectorize_compile_log="$TMP/pos_vectorize.compile.stderr"
+if $PEN tests/pos_vectorize.fsh -o "$TMP/va" 2>"$vectorize_compile_log"; then
   got=$("$TMP/va" 2>/dev/null)
   base_want="5997000.00"
   if [ "$got" = "$base_want" ]; then ok "§5 @vectorize program output correct"
   else bad "§5 @vectorize output (got '$got' want '$base_want')"; fi
-else bad "§5 @vectorize compile"; fi
+else
+  if [ -s "$vectorize_compile_log" ]; then
+    echo "--- pos_vectorize compiler stderr ---" >&2
+    cat "$vectorize_compile_log" >&2
+    echo "--- end compiler stderr ---" >&2
+  fi
+  bad "§5 @vectorize compile"
+fi
 cat > "$TMP/fv.fsh" <<'FVEOF'
 fn main() {
     let n: i64 = 64;

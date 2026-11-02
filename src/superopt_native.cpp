@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -25,6 +26,7 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -98,6 +100,30 @@ static llvm::Function *getFunction(llvm::Module &module,
   return module.getFunction(name);
 }
 
+// Alive2 keeps process-global LLVM and SMT state. In particular,
+// smt_initializer::~smt_initializer() calls Z3_finalize_memory(). Creating
+// and destroying those initialisers for every candidate/function repeatedly
+// finalises and reinitialises Z3 inside one Penstock invocation. Alive2's own
+// driver instead initialises once for a module, reuses the session for every
+// check, and finalises once at process shutdown. Mirror that lifecycle here.
+// Serialise access because Alive2's SMT context and output/configuration are
+// process-global and are not safe for concurrent Verifier instances.
+struct Alive2Session {
+  std::mutex mutex;
+  std::ostringstream output;
+  // Declare the SMT initializer before the LLVM initializer so destruction
+  // follows Alive2's own order: LLVM utility state first, then Z3/SMT state.
+  std::unique_ptr<smt::smt_initializer> smtInit;
+  std::unique_ptr<llvm::DataLayout> dataLayoutObject;
+  std::unique_ptr<llvm_util::initializer> llvmInit;
+  std::string dataLayout;
+};
+
+static Alive2Session &alive2Session() {
+  static Alive2Session session;
+  return session;
+}
+
 // In-process Alive2 translation validation. compareFunctions()'s boolean is
 // not sufficient by itself: Alive2 can return true after a failed query, so
 // all four verifier counters are checked as well.
@@ -116,21 +142,46 @@ static bool alive2Compare(llvm::Module &before, llvm::Module &after,
     return false;
   }
 
-  std::ostringstream output;
+  Alive2Session &session = alive2Session();
+  std::lock_guard<std::mutex> lock(session.mutex);
+  const std::string layout = before.getDataLayoutStr();
+  const bool newSession = !session.llvmInit || !session.smtInit;
+  if (newSession) {
+    auto dataLayoutObject = std::make_unique<llvm::DataLayout>(
+        before.getDataLayout());
+    auto llvmInit = std::make_unique<llvm_util::initializer>(
+        session.output, *dataLayoutObject);
+    auto smtInit = std::make_unique<smt::smt_initializer>();
+    session.dataLayout = layout;
+    session.dataLayoutObject = std::move(dataLayoutObject);
+    session.llvmInit = std::move(llvmInit);
+    session.smtInit = std::move(smtInit);
+  } else if (session.dataLayout != layout) {
+    if (diagnostic)
+      *diagnostic = "Alive2 session already initialised for a different data layout";
+    return false;
+  }
+
+  // Keep diagnostics local to this comparison while retaining the stream
+  // object for the lifetime of Alive2's initializer.
+  session.output.str(std::string());
+  session.output.clear();
   const llvm::Triple triple(before.getTargetTriple());
   llvm::TargetLibraryInfoWrapperPass tli(triple);
-  llvm_util::initializer aliveInit(output, before.getDataLayout());
-  smt::smt_initializer smtInit;
+  // Alive2's command-line driver resets the SMT context between separate
+  // transformations. This releases per-query solver state without invoking
+  // Z3_finalize_memory() (which is reserved for the single session teardown).
+  if (!newSession) session.smtInit->reset();
   if (timeoutMs > 0) smt::set_query_timeout(std::to_string(timeoutMs));
 
-  llvm_util::Verifier verifier(tli, smtInit, output);
+  llvm_util::Verifier verifier(tli, *session.smtInit, session.output);
   verifier.always_verify = true;
   const bool apiResult = verifier.compareFunctions(*src, *dst);
   const bool proven = apiResult && verifier.num_correct == 1 &&
                       verifier.num_unsound == 0 && verifier.num_failed == 0 &&
                       verifier.num_errors == 0;
   if (!proven && diagnostic) {
-    *diagnostic = output.str();
+    *diagnostic = session.output.str();
     if (diagnostic->empty()) *diagnostic = "Alive2 did not report a clean proof";
   }
   return proven;
