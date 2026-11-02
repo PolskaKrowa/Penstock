@@ -1,8 +1,8 @@
 # Freshet / Penstock
 
 **Freshet** is a strictly-typed, strictly-checked HPC language with C++/Rust-like
-syntax and C-level control over data layout. **Penstock** is its compiler: a
-source-level loop-optimising, superoptimising pipeline that lowers Freshet to
+syntax and C-level control over data layout. **Penstock** is its official compiler:
+a source-level loop-optimising, superoptimising pipeline that lowers Freshet to
 LLVM IR, drives Clang as its backend, and treats *predictable* performance bugs
 as compile-time diagnostics.
 
