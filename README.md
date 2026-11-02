@@ -128,3 +128,12 @@ implemented and what is deliberately deferred (variadic `extern fn`, dynamic
 arrays beyond `String`, numeric text parsing, LSP completions/inlay hints):
 [docs/report-integration.md](docs/report-integration.md) and
 [docs/optimization-integration.md](docs/optimization-integration.md).
+
+
+### Static Z3 / Alive2 namespace isolation
+
+Z3 and Alive2 both define C++ symbols in `namespace smt`; their independent
+`context::init()` implementations collide when both projects are embedded as
+static libraries. Penstock compiles Alive2-owned targets and its native bridge
+with the private preprocessor remap `smt=penstock_alive2_smt`. Z3 is deliberately
+not compiled with that definition and retains its original ABI.

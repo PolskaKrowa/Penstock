@@ -608,6 +608,50 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
       "Alive2 did not expose the expected namespaced in-process library targets.")
   endif()
 
+  # Z3 and Alive2 both use the C++ namespace `smt`. In particular, Z3's
+  # static archive defines smt::context::init(), and Alive2's own SMT wrapper
+  # (smt/ctx.cpp) defines a different function with the exact same mangled
+  # name. Renaming the CMake targets above is not sufficient: with static
+  # linking the linker still sees duplicate C++ symbols. Compile every
+  # Alive2-owned target with a token-level namespace remap. This changes only
+  # Alive2 translation units and headers; Z3 is built without this definition
+  # and retains its original namespace and ABI. The Penstock bridge uses the
+  # same definition because it includes Alive2's public SMT headers.
+  set(_penstock_alive2_namespace_targets
+    ir penstock_alive2_smt tools penstock_alive2_util llvm_util
+    alive alive-jobserver alive-tv quick-fuzz alive-exec)
+  foreach(_penstock_alive2_target IN LISTS _penstock_alive2_namespace_targets)
+    if(TARGET ${_penstock_alive2_target})
+      target_compile_definitions(${_penstock_alive2_target} PRIVATE
+        smt=penstock_alive2_smt)
+    endif()
+  endforeach()
+
+  # IMPORTANT BUILD ORDER: LLVM is configured as a separate nested build
+  # (penstock_rtti_llvm), while find_package(LLVM) only imports its targets and
+  # include paths into this build. It does NOT make LLVM's generated headers
+  # prerequisites of Alive2's llvm_util sources. Without this explicit edge,
+  # `make -j` can compile llvm_util concurrently with the nested LLVM build;
+  # the first build then sees missing/stale generated LLVM headers and fails,
+  # while a second invocation succeeds after LLVM has finished. Serialize only
+  # the LLVM-dependent adapter; Z3 and Alive2's LLVM-independent libraries can
+  # still build in parallel.
+  if(PENSTOCK_RTTI_LLVM_IN_USE)
+    add_dependencies(llvm_util penstock_rtti_llvm)
+  endif()
+
+  # Alive2 creates its standalone CLI executables even when BUILD_TV=OFF as
+  # long as BUILD_LLVM_UTILS=ON. Penstock embeds the libraries and never runs
+  # these tools, so keep them out of the default build (and out of install).
+  # The `tools` static library above is still required by the in-process API.
+  foreach(_penstock_alive2_cli_target IN ITEMS
+      alive alive-jobserver alive-tv quick-fuzz alive-exec)
+    if(TARGET ${_penstock_alive2_cli_target})
+      set_property(TARGET ${_penstock_alive2_cli_target}
+        PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+  endforeach()
+
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
   include(AddLLVM)
   llvm_map_components_to_libnames(PENSTOCK_LLVM_COMPONENT_LIBS
@@ -637,6 +681,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   endif()
 
   add_library(penstock_superopt_core STATIC src/superopt_native.cpp)
+  # Keep the bridge's Alive2 declarations in the same private namespace as
+  # the Alive2 libraries, without renaming Z3's internal smt namespace.
+  target_compile_definitions(penstock_superopt_core PRIVATE
+    smt=penstock_alive2_smt)
   set_target_properties(penstock_superopt_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME penstock_superopt_core)

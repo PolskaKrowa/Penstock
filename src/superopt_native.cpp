@@ -35,6 +35,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -324,6 +325,16 @@ static CostVector moduleCost(const llvm::Module &module) {
     for (const llvm::BasicBlock &bb : fn) {
       for (const llvm::Instruction &inst : bb) {
         ++cost.instructions;
+        // Treat control-flow terminators with successors as branches for the
+        // cost model. This deliberately avoids naming concrete branch classes:
+        // newer LLVM revisions split BranchInst into CondBrInst and
+        // UncondBrInst, while older revisions expose BranchInst. The generic
+        // Instruction API works across both representations (and also covers
+        // switch/indirect control-flow terminators).
+        if (inst.isTerminator() && inst.getNumSuccessors() != 0) {
+          cost.latency += 2;
+          continue;
+        }
         switch (inst.getOpcode()) {
           case llvm::Instruction::Mul: cost.latency += 5; break;
           case llvm::Instruction::UDiv: cost.latency += 20; break;
@@ -337,8 +348,6 @@ static CostVector moduleCost(const llvm::Module &module) {
           case llvm::Instruction::And: cost.latency += 1; break;
           case llvm::Instruction::ICmp:
           case llvm::Instruction::Select: cost.latency += 2; break;
-          case llvm::Instruction::Br:
-          case llvm::Instruction::Switch: cost.latency += 2; break;
           default: cost.latency += 1; break;
         }
       }
