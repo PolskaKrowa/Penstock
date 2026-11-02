@@ -11,6 +11,21 @@ set(PENSTOCK_SOURCES
   src/evo.cpp    # SAT-guided evo search — driven from the CLI only
   src/main.cpp)
 
+# Stage A0: a deliberately non-superoptimising compiler.  CMake uses this
+# binary to compile src/superopt.fsh into an object before the final compiler
+# is linked.  It has the same frontend/runtime paths as the final compiler,
+# but no reference to the native Z3/Alive2 bridge or the Freshet optimiser.
+add_executable(penstock-bootstrap EXCLUDE_FROM_ALL ${PENSTOCK_SOURCES})
+target_include_directories(penstock-bootstrap PRIVATE src)
+target_compile_options(penstock-bootstrap PRIVATE -Wall -Wno-unused-function)
+target_compile_definitions(penstock-bootstrap PRIVATE
+  PENSTOCK_DEFAULT_LLVM_ROOT="${LLVM_ROOT}"
+  PENSTOCK_INSTALL_DATADIR="${CMAKE_INSTALL_DATADIR}/penstock"
+  PENSTOCK_SUPEROPT_BOOTSTRAP=1)
+set_target_properties(penstock-bootstrap PROPERTIES
+  OUTPUT_NAME "penstock-bootstrap"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+
 add_executable(penstock ${PENSTOCK_SOURCES})
 target_include_directories(penstock PRIVATE src)
 set_target_properties(penstock PROPERTIES EXPORT_NAME compiler)
@@ -86,6 +101,7 @@ add_custom_command(
 
 add_custom_target(rt_ir DEPENDS "${FRT_RT_CACHE}")
 add_dependencies(penstock rt_ir)
+add_dependencies(penstock-bootstrap rt_ir)
 
 # ----------------------------------------------- Stage E: language server
 # freshet-language-server: LSP 3.18 over stdio JSON-RPC (report §4).
@@ -99,6 +115,7 @@ set(LSP_SOURCES
   src/lsp/server.cpp)
 add_executable(freshet-language-server ${LSP_SOURCES})
 target_include_directories(freshet-language-server PRIVATE src)
+target_compile_definitions(freshet-language-server PRIVATE PENSTOCK_SUPEROPT_BOOTSTRAP=1)
 target_compile_options(freshet-language-server PRIVATE -Wall -Wno-unused-function)
 # Same output dir as penstock so editors can find both binaries together.
 set_target_properties(freshet-language-server PROPERTIES

@@ -54,10 +54,11 @@ unbounded algebraic loop transformations. A future SAT/SMT algorithm-synthesis
 stage would need to derive a symbolic relation, constrain the desired output,
 synthesise a replacement, and then discharge equivalence with Alive2.
 
-Required tools are `alive-tv` from Alive2 and `timeout`. The standalone LLVM
+The verifier is linked in-process from Alive2; no `alive-tv` executable is
+required. The bounded evaluator still uses `timeout`, and the standalone LLVM
 `opt` binary is optional because Clang provides the conservative
-canonicalisation fallback. Tool paths can be configured with
-`PENSTOCK_ALIVE_TV`, `PENSTOCK_TIMEOUT`, and `PENSTOCK_OPT`.
+canonicalisation fallback. The evaluator tool paths can be configured with
+`PENSTOCK_TIMEOUT` and `PENSTOCK_OPT`; Alive2 itself is called in-process.
 
 ---
 

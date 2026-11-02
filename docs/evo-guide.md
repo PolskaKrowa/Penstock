@@ -1,8 +1,9 @@
 # Penstock `-O4` — verified superoptimisation and optional runtime tuning
 
 `-O4` runs the deterministic `-O3` pipeline, then attempts a wider SAT/SMT-backed
-LLVM instruction rewrite. Souper proposes a smaller equivalent expression and
-Alive2 must verify the candidate before it can replace the IR. See
+LLVM instruction rewrite. The Freshet-hosted engine proposes bounded integer
+strength reductions; Z3 and embedded Alive2 must verify each candidate before
+it can replace the IR. See
 [`docs/superopt-guide.md`](superopt-guide.md) for tool setup, size limits, and
 verification details.
 

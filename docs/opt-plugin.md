@@ -3,7 +3,8 @@
 Penstock can expose its LLVM-IR-compatible `-O4` stages as a loadable LLVM new
 Pass Manager plugin. This lets projects that already emit LLVM IR use the
 Penstock pipeline without translating their code through the Penstock/Freshet
-source language.
+source language. The plugin shares the compiler's Freshet superoptimiser and
+in-process Z3/Alive2 libraries.
 
 ## Build
 
@@ -38,7 +39,11 @@ cmake --install build --prefix "$HOME/.local"
 
 The installed path is `${prefix}/lib/penstock/plugins/PenstockOptPlugin.so`.
 On systems with a multiarch `CMAKE_INSTALL_LIBDIR`, replace `lib` with that
-configured directory.
+configured directory. When the embedded superoptimiser had to build a private
+RTTI-enabled LLVM, the matching `opt` host is also installed at
+`${prefix}/lib/penstock/embedded/bin/opt`; use that executable with the plugin,
+not the original system `opt`. Its matching `libLLVM` is installed alongside
+it under `embedded/lib`.
 
 If the automatic download is disabled or unavailable and CMake cannot find
 `LLVMConfig.cmake`, `AddLLVM.cmake`, `opt`, and the LLVM C++ headers, the normal
@@ -75,7 +80,11 @@ For a complete Penstock-style O4 pipeline (LLVM's target-neutral O3 pipeline,
 then Penstock's verified IR rewrites):
 
 ```sh
-/usr/lib/llvm-20/bin/opt \
+# Use the system opt only when the plugin was built against that SDK.
+# With the automatic private RTTI LLVM fallback, use the matching installed opt:
+# OPT="$HOME/.local/lib/penstock/embedded/bin/opt"
+OPT=/usr/lib/llvm-20/bin/opt
+"$OPT" \
   -load-pass-plugin="$HOME/.local/lib/penstock/plugins/PenstockOptPlugin.so" \
   -passes=penstock-o4 -verify-each \
   input.ll -S -o output.ll
@@ -86,26 +95,25 @@ Penstock rewrite stages, use `-passes=penstock-o4-rewrites` instead. Input and
 output can be LLVM textual IR or bitcode as supported by that version of `opt`;
 `-S` makes the output textual IR.
 
-### Optional solver tools
+### Embedded solver and verifier
 
-The plugin reuses Penstock's bounded precomputation and Souper/Alive2 verified
-superoptimisation engines. Stock LLVM optimisation still runs if these optional
-external tools are not available; Penstock rewrites simply skip themselves.
+The plugin uses the same embedded superoptimiser as the Penstock compiler.
+CMake builds a Freshet search loop, statically links Z3, and links Alive2's
+in-process IR/refinement libraries. It does not load Souper or launch
+`alive-tv`/`z3` executables.
 
-For the instruction superoptimizer, configure the version-matched Souper pass
-and proof tools using the environment variables recognised by the compiler:
+The optional O4 controls are:
 
-- `PENSTOCK_SOUPER_PASS`: path to the Souper LLVM pass plugin built for this
-  LLVM version.
-- `PENSTOCK_ALIVE_TV`: path to Alive2's `alive-tv` executable.
-- `PENSTOCK_Z3`: path to `z3`.
-- `PENSTOCK_TIMEOUT`: path to GNU-compatible `timeout`.
-- `PENSTOCK_OPT`: override the `opt` executable used for the Souper sub-pass.
+- `PENSTOCK_O4_BUDGET`: solver and proof budget in seconds (default 10,
+  maximum 300).
+- `PENSTOCK_O4_DISABLE_PRECOMPUTE=1`: disable finite-domain precomputation.
+- `PENSTOCK_O4_DISABLE_SUPEROPT=1`: disable the Freshet superoptimiser.
+- `PENSTOCK_O4_KEEP_IR=1`: preserve intermediate IR and diagnostic logs.
 
-The plugin uses `PENSTOCK_O4_BUDGET` as the solver/precompute verification
-budget in seconds (default 10, maximum 300). Set `PENSTOCK_O4_DISABLE_PRECOMPUTE=1`
-or `PENSTOCK_O4_DISABLE_SUPEROPT=1` to disable either custom stage. Set
-`PENSTOCK_O4_KEEP_IR=1` to preserve intermediate IR and diagnostic logs.
+`PENSTOCK_TIMEOUT` is still used by the bounded evaluator to limit its
+compile/run subprocesses. `PENSTOCK_OPT` optionally selects the LLVM `opt`
+binary used for conservative precomputation canonicalisation; neither is
+used to run the instruction superoptimiser or Alive2 verifier.
 
 ## What this pipeline can and cannot do
 
@@ -116,9 +124,9 @@ Penstock's two stages that can operate on LLVM IR directly:
    Penstock exhaustively evaluates the bounded input domain, proposes a
    constant lookup body (including inverse-search mappings), and installs it
    only when Alive2 verifies it.
-2. **SMT-backed instruction superoptimisation.** Souper proposes a shorter
-   instruction sequence; Alive2 must verify the candidate before it is
-   accepted.
+2. **Embedded Freshet instruction superoptimisation.** The Freshet control
+   loop processes bounded strength-reduction candidates; Z3 proves the
+   bit-vector identity and Alive2 validates LLVM refinement before acceptance.
 
 Penstock's AST-level loop fusion, source-level unrolling decisions, and
 cross-lane branch specialisation happen before IR generation. Arbitrary LLVM IR

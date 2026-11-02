@@ -11,24 +11,46 @@ penstock_bootstrap_step("6" "OPT PLUGIN CONFIGURATION"
 # When the selected clang prefix is compiler-only, download the official SDK
 # for the same LLVM major rather than silently dropping the plugin target.
 set(PENSTOCK_OPT_PLUGIN_BUILT FALSE)
-set(PENSTOCK_PLUGIN_LLVM_ROOT "")
+# When Alive2 needed a private RTTI-enabled LLVM build, use its opt binary as
+# the plugin host but retain LLVM_ROOT for the matching clang backend.
+if(PENSTOCK_RTTI_LLVM_IN_USE)
+  set(PENSTOCK_PLUGIN_LLVM_ROOT "${LLVM_ROOT}")
+else()
+  set(PENSTOCK_PLUGIN_LLVM_ROOT "")
+endif()
 set(PENSTOCK_OPT_EXECUTABLE "")
 if(PENSTOCK_BUILD_OPT_PLUGIN AND UNIX)
-  # Must run before LLVMConfig.cmake imports LLVMExports.cmake; the latter
-  # references zstd::libzstd_static in LLVMSupport's link interface.
-  penstock_prepare_llvm_zstd_dependency()
-
-  find_package(LLVM CONFIG QUIET
-    HINTS
-      "${LLVM_ROOT}/lib/cmake/llvm"
-      "${LLVM_ROOT}/lib64/cmake/llvm"
-      "${LLVM_ROOT}/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm"
-      "/usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm")
+  # When the embedded-superopt stage has not already loaded LLVM, prepare
+  # zstd before LLVMConfig imports its exported LLVMSupport link interface.
+  if(NOT LLVM_FOUND)
+    penstock_prepare_llvm_zstd_dependency()
+    find_package(LLVM CONFIG QUIET
+      HINTS
+        "${LLVM_ROOT}/lib/cmake/llvm"
+        "${LLVM_ROOT}/lib64/cmake/llvm"
+        "${LLVM_ROOT}/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm"
+        "/usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm")
+  endif()
 
   set(_penstock_llvm_sdk_ok FALSE)
   set(_penstock_llvm_include_root "")
   set(_penstock_llvm_opt "")
-  if(LLVM_FOUND)
+  if(PENSTOCK_RTTI_LLVM_IN_USE AND LLVM_FOUND)
+    # The private SDK has not been built yet, so opt's output is expected to
+    # appear during the penstock_rtti_llvm build target. The plugin is compiled
+    # against this exact SDK and loaded by this exact opt executable.
+    foreach(_include_dir IN LISTS LLVM_INCLUDE_DIRS)
+      penstock_has_pass_plugin_header("${_include_dir}" _include_has_pass_plugin_header)
+      if(_include_has_pass_plugin_header)
+        set(_penstock_llvm_include_root "${_include_dir}")
+        break()
+      endif()
+    endforeach()
+    set(_penstock_llvm_opt "${PENSTOCK_ALIVE2_LLVM_BUILD_DIR}/bin/opt")
+    if(_penstock_llvm_include_root AND EXISTS "${LLVM_CMAKE_DIR}/AddLLVM.cmake")
+      set(_penstock_llvm_sdk_ok TRUE)
+    endif()
+  elseif(LLVM_FOUND)
     string(REGEX MATCH "^[0-9]+" _penstock_llvm_package_major "${LLVM_PACKAGE_VERSION}")
     if("${_penstock_llvm_package_major}" STREQUAL "${LLVM_MAJOR}"
        AND EXISTS "${LLVM_CMAKE_DIR}/AddLLVM.cmake")
@@ -109,7 +131,9 @@ if(PENSTOCK_BUILD_OPT_PLUGIN AND UNIX)
     # the host opt process. Linking static LLVM component archives embeds a
     # second copy of LLVM and can register cl::Options twice at dlopen time.
     set(_penstock_llvm_link "")
-    if(TARGET LLVM)
+    if(PENSTOCK_RTTI_LLVM_IN_USE AND TARGET LLVM)
+      set(_penstock_llvm_link LLVM)
+    elseif(TARGET LLVM)
       get_target_property(_penstock_llvm_target_type LLVM TYPE)
       if(_penstock_llvm_target_type STREQUAL "SHARED_LIBRARY")
         set(_penstock_llvm_link LLVM)
@@ -159,10 +183,28 @@ if(PENSTOCK_BUILD_OPT_PLUGIN AND UNIX)
     target_compile_features(PenstockOptPlugin PRIVATE cxx_std_17)
     target_compile_definitions(PenstockOptPlugin PRIVATE
       "PENSTOCK_PLUGIN_LLVM_ROOT=\"${PENSTOCK_PLUGIN_LLVM_ROOT}\""
-      "PENSTOCK_PLUGIN_CLANG=\"${PENSTOCK_PLUGIN_LLVM_ROOT}/bin/clang\"")
+      "PENSTOCK_PLUGIN_CLANG=\"${LLVM_ROOT}/bin/clang\"")
     set_target_properties(PenstockOptPlugin PROPERTIES
       OUTPUT_NAME "PenstockOptPlugin"
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins/opt")
+    if(PENSTOCK_RTTI_LLVM_IN_USE)
+      add_dependencies(PenstockOptPlugin penstock_rtti_llvm)
+      if(APPLE)
+        set_property(TARGET PenstockOptPlugin APPEND PROPERTY INSTALL_RPATH "@loader_path/../embedded/lib")
+      else()
+        set_property(TARGET PenstockOptPlugin APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../embedded/lib")
+      endif()
+    endif()
+    # The plugin is configured after the superoptimiser so it can reuse the
+    # same Freshet object, native bridge, Alive2 libraries and Z3 instance.
+    if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT AND TARGET penstock_superopt_core)
+      add_dependencies(PenstockOptPlugin penstock_superopt_freshet)
+      target_sources(PenstockOptPlugin PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/freshet-superopt${CMAKE_C_OUTPUT_EXTENSION}")
+      target_link_libraries(PenstockOptPlugin PRIVATE penstock_superopt_core)
+      target_compile_definitions(PenstockOptPlugin PRIVATE
+        PENSTOCK_HAS_FSH_SUPEROPT=1 PENSTOCK_HAS_ALIVE2=1)
+    endif()
     set(PENSTOCK_OPT_PLUGIN_BUILT TRUE)
     penstock_bootstrap_ok("Penstock O4 pass plugin configured for LLVM ${LLVM_PACKAGE_VERSION}")
     message(STATUS

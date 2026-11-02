@@ -58,6 +58,23 @@ static std::vector<std::string> tokenizeSimple(const std::string& s) {
   while (i < s.size()) {
     if (isspace((unsigned char)s[i])) { ++i; continue; }
     size_t j = i;
+    if (s[i] == '"') {
+      // FLUME PATCH (upstream bug): string literals must survive macro
+      // re-tokenization as ONE token — the historical tokenizer split them
+      // into quote/word/word/quote tokens, so re-joining with single
+      // spaces corrupted interiors (multi-space collapsing) and any
+      // macro-using line that also contained `::` was re-emitted as
+      // `: :`, which the parser rejects.
+      j = i + 1;
+      while (j < s.size() && s[j] != '"') {
+        if (s[j] == '\\' && j + 1 < s.size()) ++j;
+        ++j;
+      }
+      if (j < s.size()) ++j;               // include the closing quote
+      out.push_back(s.substr(i, j - i));
+      i = j;
+      continue;
+    }
     if (isalpha((unsigned char)s[i]) || s[i] == '_') {
       while (j < s.size() && (isalnum((unsigned char)s[j]) || s[j] == '_')) ++j;
     } else if (isdigit((unsigned char)s[i])) {
@@ -65,8 +82,12 @@ static std::vector<std::string> tokenizeSimple(const std::string& s) {
              s[j] == '_')) ++j;
     } else {
       ++j;
-      // multi-char puncts
-      static const char* two[] = {"..","==","!=","<=",">=","&&","||","+=","-=","*=","/=","%=","->","<<",">>"};
+      // multi-char puncts (FLUME PATCH: :: => &= |= ^= were missing and
+      // got split into single chars, breaking qualified names on
+      // macro-expanded lines)
+      static const char* two[] = {"..","::","=>","==","!=","<=",">=","&&","||",
+                                  "+=","-=","*=","/=","%=","->","<<",">>",
+                                  "&=","|=","^="};
       if (i + 1 < s.size()) {
         std::string two2 = s.substr(i, 2);
         for (auto t : two) if (two2 == t) { j = i + 2; break; }

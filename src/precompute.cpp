@@ -36,6 +36,14 @@
 #include <vector>
 
 namespace freshet {
+
+#if !defined(PENSTOCK_SUPEROPT_BOOTSTRAP) && defined(PENSTOCK_HAS_ALIVE2)
+struct FshStrView { const char *p; int64_t len; };
+extern "C" int64_t penstock_alive2_verify_files(FshStrView before,
+                                                  FshStrView after,
+                                                  int64_t timeoutMs);
+#endif
+
 namespace {
 
 static std::string trimPC(const std::string& s) {
@@ -710,17 +718,21 @@ static std::string makeProbeCanonicalizationInputPC(
   return decorated;
 }
 
-static bool verifyAlivePC(const std::string& alive, const std::string& timeout,
-                          const std::string& before, const std::string& after,
+static bool verifyAlivePC(const std::string& before, const std::string& after,
                           const std::string& log, int seconds) {
-  const std::string cmd = shellQuotePC(timeout) + " " + std::to_string(seconds) + "s " +
-      shellQuotePC(alive) + " " + shellQuotePC(before) + " " + shellQuotePC(after) +
-      " > " + shellQuotePC(log) + " 2>&1";
-  const bool rc = runOkPC(cmd);
-  const std::string text = readTextPC(log);
-  return rc && text.find("Transformation seems to be correct!") != std::string::npos &&
-         text.find("Transformation doesn't verify!") == std::string::npos &&
-         text.find("ERROR:") == std::string::npos;
+#if !defined(PENSTOCK_SUPEROPT_BOOTSTRAP) && defined(PENSTOCK_HAS_ALIVE2)
+  const FshStrView beforeView{before.c_str(), static_cast<int64_t>(before.size())};
+  const FshStrView afterView{after.c_str(), static_cast<int64_t>(after.size())};
+  const bool proven = penstock_alive2_verify_files(
+      beforeView, afterView, static_cast<int64_t>(seconds) * 1000) != 0;
+  std::ofstream out(log, std::ios::binary | std::ios::trunc);
+  out << (proven ? "embedded Alive2: Transformation seems to be correct!\n"
+                 : "embedded Alive2: proof failed or was inconclusive\n");
+  return proven;
+#else
+  (void)before; (void)after; (void)log; (void)seconds;
+  return false;
+#endif
 }
 
 } // namespace
@@ -742,10 +754,9 @@ bool runPrecomputeRewriter(const std::string& clang,
   }
 
   const std::string opt = resolveCommandPC("PENSTOCK_OPT", "opt", llvmRoot);
-  const std::string alive = resolveCommandPC("PENSTOCK_ALIVE_TV", "alive-tv");
   const std::string timeout = resolveCommandPC("PENSTOCK_TIMEOUT", "timeout");
-  if (alive.empty() || timeout.empty()) {
-    fprintf(stderr, "precompute: skipped — exhaustive mapping requires Alive2's alive-tv and timeout; IR unchanged\n");
+  if (timeout.empty()) {
+    fprintf(stderr, "precompute: skipped — the bounded evaluator still requires the system timeout utility; IR unchanged\n");
     return false;
   }
 
@@ -922,7 +933,7 @@ bool runPrecomputeRewriter(const std::string& clang,
     const std::string trial = installTablePC(accepted, c.name, tag, f.retWidth, values);
     if (trial.empty()) continue;
     if (!writeTextPC(aliveBefore, accepted) || !writeTextPC(aliveAfter, trial)) continue;
-    if (!verifyAlivePC(alive, timeout, aliveBefore, aliveAfter, aliveLog, verifyBudgetSec)) {
+    if (!verifyAlivePC(aliveBefore, aliveAfter, aliveLog, verifyBudgetSec)) {
       fprintf(stderr, "precompute: rejected '%s' — Alive2 did not prove the mapping rewrite\n",
               c.name.c_str());
       if (g_opts.keepIr) fprintf(stderr, "precompute: verifier log kept at %s\n", aliveLog.c_str());

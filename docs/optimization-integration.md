@@ -284,13 +284,13 @@ boundary clamping.
 - **Cost-vector acceptance** (`--superopt-objective=latency|size|balanced`,
   default latency): instruction count alone no longer accepts a rewrite —
   the decision uses (instructions, weighted latency, memOps, branchOps)
-  with per-opcode weights (documented static approximation; no linkable
-  TargetTransformInfo in the external-clang architecture).  A shorter
+  with per-opcode weights (documented static approximation; target-specific
+  scheduling costs are not yet queried from LLVM's TargetTransformInfo). A shorter
   sequence that introduces a divide or extra load is rejected under the
   latency objective; the +25% code-growth cap guards register pressure.
 - **Bounded minimum extraction** (§7.2): acceptance is now phrased as
-  minimum-cost over the verified candidate list {incumbent, Souper} — the
-  C++ mirror of the Lean kernel's `selectMinCost` — and emits a
+  minimum-cost over the verified candidate list {incumbent, Freshet candidate}
+  — the C++ mirror of the Lean kernel's `selectMinCost` — and emits a
   `--proof-log` certificate line with both cost vectors.
 - **Precompute profitability** (§7.4): a VERIFIED mapping is installed
   only when it is expected to pay (≥ 8 instructions in the original body;

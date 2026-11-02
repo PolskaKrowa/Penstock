@@ -1,8 +1,8 @@
 // Penstock -O4 pass plugin for LLVM's new pass manager.
 //
 // `penstock-o4` runs LLVM's target-neutral O3 pipeline followed by Penstock's
-// existing bounded finite-domain rewriter and Souper/Alive2-verified
-// superoptimizer.  The AST-only source transformations in Penstock's compiler
+// bounded finite-domain rewriter and embedded Freshet/Z3/Alive2 superoptimiser.
+// The AST-only source transformations in Penstock's compiler
 // are not repeated here because arbitrary LLVM IR no longer carries that AST.
 #include "common.h"
 
@@ -207,8 +207,8 @@ public:
     }
 
     // The existing file-based engines are reused here rather than forked into
-    // separate plugin implementations. Their contracts are conservative:
-    // evaluator failures/timeouts or missing proof tools do not install a
+    // separate plugin implementations. The verifier and instruction optimiser
+    // are linked in-process; evaluator failures/timeouts never install a
     // candidate. These settings are isolated to this plugin's DSO.
     freshet::g_opts.optLevel = 4;
     freshet::g_opts.superoptBudgetSec = solverBudgetSeconds();

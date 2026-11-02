@@ -617,7 +617,7 @@ struct Options {
   int evoBudgetSec = 10;          // optional legacy -O4 runtime tuning budget
   unsigned evoSeed = 0;           // R3: 0 = derived from time+pid
   int superoptBudgetSec = 0;      // 0 = level-dependent default (2s -O3, 10s -O4)
-  bool noSuperopt = false;        // --no-superopt disables solver-backed IR rewriting
+  bool noSuperopt = false;        // --no-superopt disables embedded IR rewriting
   bool noPrecompute = false;      // --no-precompute disables verified finite-domain LUT rewriting
   bool evoRuntimeTune = false;    // opt-in legacy execute-and-time runtime tuning
   bool noLoopOpts = false;        // R4: --no-loop-opts disables fusion/unroll/lane passes
@@ -850,8 +850,8 @@ struct EvoWinner {
 bool evoOptimize(const std::string& clangBin, const std::string& finalLl,
                  const std::string& outBinary, int budgetSec, unsigned seed,
                  EvoWinner* out);
-// Verified solver-backed superoptimisation: Souper proposes a smaller LLVM IR
-// candidate; Alive2 must prove it before it can replace finalLl.
+// Verified superoptimisation: the Freshet engine proposes bounded LLVM IR
+// rewrites; embedded Z3 and Alive2 must prove each rewrite before installation.
 bool runVerifiedSuperoptimizer(const std::string& llvmRoot,
                                const std::string& finalLl, int optLevel,
                                int budgetSec);

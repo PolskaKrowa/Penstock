@@ -22,9 +22,11 @@ penstock [options] input.fsh [more.fsh ...]
 - **`parfor` with deterministic reductions.** Work-stealing ring-buffer worker
   pool; `[reduction(+:acc)]` regions are order-independent by construction;
   `@reproducible` builds are bit-identical across thread counts.
-- **Verified superoptimisation.** At `-O3`/`-O4` Penstock asks Souper + Z3 for
-  cheaper equivalent IR and installs a rewrite only when Alive2 proves
-  refinement — see [docs/superopt-guide.md](docs/superopt-guide.md).
+- **Embedded Freshet superoptimisation.** CMake bootstraps a no-superopt
+  compiler, uses it to compile the Freshet optimisation loop, then links that
+  loop with static Z3 and in-process Alive2 into the final executable. No
+  Souper, `alive-tv`, or `z3` runtime executable is required — see
+  [docs/superopt-guide.md](docs/superopt-guide.md).
 - **Observability.** `--report` merges [static]/[backend]/[runtime] layers;
   `--opt-remarks`, `--emit-final-ir` and `--save-temps` expose exactly what
   the backend did.
@@ -79,7 +81,7 @@ Backend pinning (`-DLLVM_ROOT=/path/to/llvm-20`), offline builds, installation
 | Guide | Contents |
 |---|---|
 | [language-spec.md](docs/language-spec.md) | Language reference — types, attributes, structs, memory model, `parfor`, diagnostics index, loop passes, modules, FFI, `fsh` stdlib |
-| [superopt-guide.md](docs/superopt-guide.md) | `-O3`/`-O4` SAT/SMT superoptimisation: budgets, tool setup, cost-vector acceptance |
+| [superopt-guide.md](docs/superopt-guide.md) | `-O3`/`-O4` embedded Freshet/Z3/Alive2 superoptimisation: bootstrap, scope, budgets and cost-vector acceptance |
 | [pgo-guide.md](docs/pgo-guide.md) | Profile-guided optimisation (custom counters + LLVM IR PGO) |
 | [proof-guide.md](docs/proof-guide.md) | Verification layers: Lean kernel, `--proof-log` premises, Alive2 |
 | [evo-guide.md](docs/evo-guide.md) | Legacy `-O4` runtime tuner (opt-in `--evo-runtime-tune`) |

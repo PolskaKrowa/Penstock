@@ -1,113 +1,138 @@
-# Penstock SAT/SMT-backed superoptimisation
+# Penstock's embedded Freshet superoptimiser
 
-Penstock now has a verified LLVM IR superoptimisation stage at `-O3` and
-`-O4`. It is separate from benchmark-driven runtime tuning.
+Penstock's instruction optimiser is built into the compiler. It does not load
+Souper, invoke `opt -souper`, launch `alive-tv`, or find a `z3` executable.
+The `-O3` and `-O4` pipelines call a Freshet control loop linked into the
+compiler; native library bindings provide LLVM IR operations, Z3 bit-vector
+queries, and Alive2 translation validation.
 
 ```sh
 bin/penstock -O3 program.fsh -o app
-bin/penstock -O4 --superopt-budget=20 program.fsh -o app
+bin/penstock -O4 --superopt-budget=10 program.fsh -o app
 ```
 
-## Candidate generation and correctness gate
+## Build stages
 
-The pass uses the Souper LLVM pass to ask an SMT solver for cheaper equivalent
-instruction expressions. It then invokes Alive2 on the exact input and
-candidate LLVM modules. A candidate is installed only when all of these hold:
+CMake deliberately uses a three-stage bootstrap:
 
-1. Souper and `opt` return success and produce parseable IR.
-2. The candidate has fewer LLVM instructions than the original module.
-3. `alive-tv` explicitly reports `Transformation seems to be correct!`.
+1. `penstock-bootstrap` is built from the normal compiler sources with
+   superoptimisation disabled.
+2. That bootstrap compiler compiles `src/superopt.fsh` to a native object.
+3. The final `penstock` executable links the Freshet object, the native LLVM
+   bridge, Alive2's static libraries, and static Z3.
 
-A timeout, missing tool, failed parse, non-improving candidate, counterexample,
-or inconclusive Alive2 result leaves the original module untouched. Penstock
-never treats execution-time measurements or random testing as proof of
-semantic equivalence. Alive2 is translation validation for LLVM IR; it does
-not prove arbitrary interprocedural algorithm rewrites, so this stage only
-accepts the local-equivalence transformations Souper proposes.
+The final executable therefore contains the Freshet optimiser, Alive2 verifier
+and Z3 solver. The build also installs the corresponding static archives,
+headers and licence files for downstream CMake consumers. The compiler still
+uses the selected Clang/LLVM toolchain as its normal code-generation backend;
+that is separate from the embedded superoptimiser.
 
-## Scope and budgets
+## What the current search covers
 
-| Level | Maximum combined-module size | Maximum instruction count | Default solver budget |
-|---|---:|---:|---:|
-| `-O3` | 256 KiB | 2,400 | 2 seconds |
-| `-O4` | 4 MiB | 24,000 | 10 seconds |
+The current bounded candidate generator focuses on integer strength-reduction
+idioms in LLVM IR: multiplication by zero, one or a power of two; unsigned
+division by one or a power of two; and unsigned remainder by a power of two.
+It does not rewrite overflow-flagged or exact operations. The candidate set is
+intentionally conservative and is capped at 500 candidates for `-O3` and
+4,000 for `-O4`. Widths above 64 bits are skipped.
 
-`--superopt-budget=<sec>` overrides the per-invocation timeout. `-O3` is kept
-small so solver cost is bounded for normal builds; `-O4` enables the broader
-module scope. The solver runs on loop bodies as well as straight-line code, so
-it can simplify expressions in hot kernels without instrumenting or timing the
-program. The usual LLVM `-O3` vectoriser runs after the verified candidate is
-accepted, allowing it to use any newly exposed simplifications.
+For each proposed rewrite:
 
-## Optional toolchain integration
+1. Z3 checks the corresponding fixed-width bit-vector identity by asking
+   whether a counterexample exists. Only `unsat` is accepted.
+2. Penstock materialises the candidate in a cloned LLVM module and runs the
+   LLVM verifier.
+3. Alive2 checks the changed function's refinement against the current
+   accepted module.
+4. The configured cost objective must improve before the rewrite is retained.
 
-Souper's LLVM pass is optional and must match the selected LLVM toolchain.
-Penstock does not silently download or build external tools. Install/build
-Souper, Z3 and Alive2, then set paths as needed:
+Each accepted rewrite becomes the incumbent for the next candidate. The
+compiler writes the final module atomically; any parse, SMT, validation, budget
+or write failure leaves the previous IR intact. This is a bounded local
+superoptimisation engine, not yet a general-purpose Souper-equivalent
+synthesis search over arbitrary expression DAGs.
 
-| Variable | Purpose | Default discovery |
+Alive2 supports function-local transformations; the engine therefore changes
+one function at a time and does not attempt interprocedural rewrites.
+
+## Budgets and objectives
+
+`--superopt-budget=<sec>` sets the per-compilation budget (default 2 seconds at
+`-O3`, 10 seconds at `-O4`). `-O3` is capped at 256 KiB of input IR and 500
+candidates; `-O4` allows 4 MiB and 4,000 candidates.
+
+`--superopt-objective=` selects the acceptance rule:
+
+| Objective | Acceptance rule |
+|---|---|
+| `latency` | Lower weighted latency, with no more than 25% instruction growth |
+| `size` | Fewer instructions and no latency regression |
+| `balanced` | Either of the two improvements above |
+
+`--no-superopt` disables the Freshet stage. `--keep-ir` preserves the normal
+compiler's intermediate IR and diagnostic artefacts.
+
+## CMake options and dependencies
+
+| Option | Default | Purpose |
 |---|---|---|
-| `PENSTOCK_OPT` | LLVM `opt` executable | `$LLVM_ROOT/bin/opt`, then `PATH` |
-| `PENSTOCK_Z3` | Z3 executable | `PATH` |
-| `PENSTOCK_ALIVE_TV` | Alive2 verifier | `PATH` |
-| `PENSTOCK_SOUPER_PASS` | Souper LLVM pass plugin (`.so`) | common `lib/` locations |
-| `PENSTOCK_TIMEOUT` | process timeout utility | `PATH` (`timeout`) |
+| `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Build the Freshet engine and embedded solver/verifier |
+| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision, statically linked |
+| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and linked into Penstock |
+| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master |
+| `PENSTOCK_FETCH_LLVM` | `ON` | Fetch a matching LLVM development SDK when necessary |
+| `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them |
+| `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | empty | Use an existing `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
+| `PENSTOCK_ALIVE2_LLVM_BUILD_DIR` | `build/_deps/penstock-alive2-llvm-build` | Private LLVM build directory used by the verifier |
+| `PENSTOCK_RTTI_LLVM_TARGETS_TO_BUILD` | `Native` | LLVM code-generation backends built in the private SDK |
 
-A missing or incompatible tool is a safe no-op and emits a `superopt:` notice.
-`--no-superopt` disables the stage. `--keep-ir` also keeps diagnostic artefacts
-when Souper or Alive2 rejects a candidate.
+The build requires a matching LLVM development SDK for Penstock's selected
+Clang backend. Alive2's LLVM adapter requires RTTI and exception handling, and
+its development branch tracks LLVM `main` rather than necessarily the latest
+numbered LLVM release. By default CMake therefore fetches
+`PENSTOCK_ALIVE2_LLVM_GIT_TAG` (default `main`) and builds it privately with
+both RTTI and exceptions enabled, even when the backend SDK already has those
+features. The private build supplies the LLVM headers/libraries for the
+in-process verifier and the matching `opt` host when the optional O4 plugin is
+enabled. Penstock's normal `LLVM_ROOT` and Clang backend remain unchanged.
 
-## Why the general SAT-preimage idea is bounded
+Z3 and Alive2 are fetched and built as static libraries. Z3's internal
+`opt` component is namespaced in the fetched build tree because LLVM already
+exports an imported executable target with that name; its API component
+reference is updated at the same time. Alive2's `smt` and `util` targets are
+likewise namespaced as `penstock_alive2_smt` and `penstock_alive2_util`, since
+Z3 already owns the unqualified target names in the shared CMake build. The
+Alive2 dependency list and Penstock link/install rules are updated with those
+names. Alive2 is pointed at the in-tree `z3::libz3` target through a small
+config package, avoiding a configure-time probe for an archive that has not
+been built yet. The private verifier LLVM's shared library
+and (when enabled) matching `opt` host are installed under
+`lib/penstock/embedded`, with relative runtime search paths. Use that installed
+`opt` with Penstock's plugin; do not load the plugin into the unrelated system
+`opt`. The build-time `re2c` tool is not a runtime dependency.
 
-Instruction superoptimisation solves a well-defined objective: find a cheaper
-sequence with the same semantics. Automatically replacing an arbitrary
-algorithm by a precomputed input-to-output map is a different synthesis
-problem: it needs a finite input domain or a user-specified output/property,
-a cost model for the replacement algorithm, and a sound proof that the map
-covers the relevant inputs. Penstock does not invent such a specification.
-The current SAT/SMT stage safely delivers equivalent instruction-sequence
-rewrites; whole-algorithm inverse synthesis and automatic lookup-table
-precomputation remain future work rather than being approximated with unsafe
-runtime sampling.
-
-## Legacy runtime tuning
-
-The earlier `-O4` genetic runtime tuner — execute-and-time search over
-thread count, chunk size, affinity and codegen flags, opt-in via
-`--evo-runtime-tune` — is documented in
-[`docs/evo-guide.md`](evo-guide.md) (search space, algorithm, gates). It
-is orthogonal to verified instruction superoptimisation, which is
-attempted first.
-
----
-
-## Cost-vector acceptance (optimisation-audit §7.1/§7.2)
-
-A shorter, Alive2-verified instruction sequence is no longer accepted on
-length alone — a rewrite that is provably equivalent can still be
-SLOWER.  The acceptance metric is now a cost vector:
-
-```
-(instructions, weighted latency, memOps, branchOps)
+```sh
+cmake -S . -B build -DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=ON
+cmake --build build --parallel
+cmake --install build
 ```
 
-with per-opcode latency weights (sdiv/udiv/fdiv 20, srem/urem 26, mul 5,
-call 12, load/store 4, gep/icmp/fcmp/select/br 2, other 1) — a documented
-static approximation of an out-of-order x86-64 core (Penstock drives an
-external Clang, so LLVM's TargetTransformInfo is not linkable here;
-TTI/scheduling-model integration is the noted upgrade path).
+To use a local LLVM source checkout instead of having CMake fetch the
+configured Alive2-compatible LLVM revision (by default `main`):
 
-`--superopt-objective=` selects the decision rule:
+```sh
+cmake -S . -B build \
+  -DPENSTOCK_RTTI_LLVM_SOURCE_DIR=/path/to/llvm-project
+```
 
-- `latency` (default): weighted latency must strictly improve; code
-  growth capped at +25% (register pressure / i-cache guard);
-- `size`: instruction count must strictly improve and latency must not
-  regress (no divide creep for shorter code);
-- `balanced`: either of the above.
+The private LLVM build is substantial: it builds the LLVM shared library and,
+when the O4 plugin is enabled, the matching `opt` executable. Disable it with
+`-DPENSTOCK_BUILD_RTTI_LLVM=OFF` only when `LLVM_DIR` points at a checkout
+whose C++ API revision matches the selected Alive2 revision as well as having
+RTTI and exception handling enabled. The default `main` plus `master` pairing
+should normally be left together.
 
-Acceptance is phrased as **minimum-cost extraction over the verified
-candidate list {incumbent, Souper candidate}** — the C++ mirror of the
-Lean kernel's `selectMinCost` (see `docs/proof-guide.md` and
-`lean/PenstockProofs.lean`).  With `--proof-log` enabled, every accepted
-rewrite emits a certificate line carrying both cost vectors and the
-Alive2 verdict, and rejections print the vectors that lost.
+No `PENSTOCK_SOUPER_PASS`, `PENSTOCK_Z3`, or `PENSTOCK_ALIVE_TV` environment
+variables are used. The bounded finite-domain precomputation stage also calls
+the embedded Alive2 API; its evaluator still uses the selected Clang backend
+and the system `timeout` utility to limit evaluator compilation/execution.

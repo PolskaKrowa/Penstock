@@ -18,8 +18,8 @@ never present one layer's evidence as another's.
                + --proof-log premise records
         |
         v
-  [ Layer 3 ]  LLVM translation validation  src/superopt.cpp, src/precompute.cpp
-               (Alive2 must print "Transformation seems to be correct!")
+  [ Layer 3 ]  LLVM translation validation  src/superopt_native.cpp, src/precompute.cpp
+               (in-process Alive2 counters must show a clean proof)
 ```
 
 ## Layer 1 — the Lean kernel (`lean/PenstockProofs.lean`)
@@ -42,7 +42,7 @@ Dependency-light Lean 4 (core only, no Mathlib):
   semantic-validity proof; `selectMinCost` extracts the minimum-cost
   member of a finite candidate list, with membership and minimum-cost
   theorems.  The C++ superoptimiser's acceptance is the mirror of this
-  selection over `{incumbent, Souper candidate}`.
+  selection over `{incumbent, Freshet-generated candidate}`.
 - **§5.2 premise contracts**: `FusionPremises` / `UnswitchPremises`
   name exactly what the C++ passes must establish.
 
@@ -95,13 +95,15 @@ acceptance:
   Alive2 proves the whole-module rewrite, and now additionally reports
   **"verified but NOT profitable"** separately from "not verified"
   (§7.4).
-- `src/superopt.cpp` accepts a Souper candidate only when Alive2 proves
-  it AND it wins on the selected cost vector
-  (`--superopt-objective=latency|size|balanced`, §7.1).  Instruction
-  count alone can no longer accept a slower rewrite.
+- `src/superopt.fsh` drives the embedded bounded candidate loop.
+  `src/superopt_native.cpp` asks Z3 to prove each fixed-width identity,
+  checks the materialised LLVM module, and accepts it only when in-process
+  Alive2 reports a clean refinement proof and the selected cost objective
+  improves (`--superopt-objective=latency|size|balanced`, §7.1).
 
-Solver failure, timeout, or a missing tool always means **keep the
-incumbent** (fail-closed).
+Solver failure, timeout, or a failed/inconclusive proof always means
+**keep the incumbent** (fail-closed). The compiler does not require Souper,
+`alive-tv`, or a Z3 command-line executable at runtime.
 
 ## What this design deliberately does NOT claim
 

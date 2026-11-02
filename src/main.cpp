@@ -44,7 +44,7 @@ static const char* USAGE =
     "  -O<0..4>           optimization level (default 3; 4 = wider SAT/SMT\n"
     "                    superoptimisation scope)\n"
     "  --superopt-budget=<s> solver budget (default 2s -O3, 10s -O4)\n"
-    "  --no-superopt      disable Souper + Alive2 verified IR rewriting\n"
+    "  --no-superopt      disable embedded Freshet/Z3/Alive2 verified IR rewriting\n"
     "  --no-precompute    disable finite-domain mapping / algorithm rewriting\n"
     "  --evo-runtime-tune opt into the legacy execute-and-time -O4 tuner\n"
     "  -march=<target>    CPU target (default native)\n"
@@ -1317,12 +1317,11 @@ int main(int argc, char** argv) {
       writeFile(combinedOutPath, readFile(finalLl));
   }
 
-  // Stage 6.5: SAT/SMT-backed instruction superoptimisation. Souper proposes
-  // shorter equivalent IR expressions; Alive2 translation-validates the
-  // candidate against the exact combined module before we install it. -O3
-  // is deliberately bounded to small modules; -O4 permits a wider scope and
-  // a larger solver budget. Missing or incompatible optional tools are a
-  // safe no-op, never a reason for a normal build to fail.
+  // Stage 6.5: Freshet-hosted, in-process instruction superoptimisation.
+  // The Freshet control loop is compiled during the CMake bootstrap; its
+  // native bridge uses embedded Z3 for bit-vector obligations and Alive2 for
+  // LLVM refinement validation. No Souper pass or alive-tv executable is
+  // required at runtime.
   if (g_opts.optLevel >= 3 && !g_opts.profile && !g_opts.noSuperopt) {
     bool changed = runVerifiedSuperoptimizer(
         llvmRoot, finalLl, g_opts.optLevel, g_opts.superoptBudgetSec);

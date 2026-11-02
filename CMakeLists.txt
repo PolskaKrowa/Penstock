@@ -20,9 +20,10 @@
 #   LLVM_ROOT=/path/to/llvm-19 cmake -B build     # or the environment
 #   cmake -B build -ULLVM_ROOT                    # unpin -> autodetection/download
 #
-# Penstock itself links no LLVM libraries (the backend clang is driven as a
-# subprocess); the host C++ compiler defaults to the backend's clang++ and
-# can be overridden via the usual CMAKE_CXX_COMPILER mechanisms.
+# The core compiler still drives the Clang backend as a subprocess. Its
+# embedded superoptimiser is the exception: the CMake bootstrap builds the
+# Freshet control loop with penstock-bootstrap and statically links Z3/Alive2
+# plus the LLVM IR adapter into the final compiler.
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -137,6 +138,10 @@ set(FRONTEND_SOURCES
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockTargets.cmake")
 
+# Resolve/build the RTTI+EH LLVM used by Alive2 before configuring the opt
+# plugin, so the plugin host, bridge and standalone compiler share one LLVM ABI.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockSuperopt.cmake")
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockOptPlugin.cmake")
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockTests.cmake")
@@ -152,6 +157,10 @@ message(STATUS "    Backend          : LLVM ${LLVM_FULL} (${LLVM_ROOT})")
 message(STATUS "    Compiler check   : ${PENSTOCK_SMOKE_OK}")
 message(STATUS "    Host C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "    Penstock binary  : ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock")
+if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
+  message(STATUS "    Bootstrap binary: ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock-bootstrap")
+  message(STATUS "    Superopt source : src/superopt.fsh (compiled during final link)")
+endif()
 if(PENSTOCK_OPT_PLUGIN_BUILT)
   message(STATUS "    O4 opt plugin    : ${CMAKE_CURRENT_BINARY_DIR}/plugins/opt/PenstockOptPlugin.so")
 else()

@@ -592,7 +592,7 @@ void IrGen::emitFooter() {
     int line = std::max(1, f->loc.line);
     out << "!" << id << " = distinct !DISubprogram(name: \""
         << irFnSymbol(f) << "\", scope: !" << fileId << ", file: !"
-        << fileId << ", line: " << line << ", type: !940, scopeLine: "
+        << fileId << ", line: " << line << ", type: !2950, scopeLine: "
         << line << ", unit: !900, spFlags: DISPFlagDefinition)\n";
   }
   // DIFiles are emitted AFTER the subprogram loop: dbgFileId() allocates
@@ -600,12 +600,17 @@ void IrGen::emitFooter() {
   for (auto& [path, id] : dbgFiles)
     out << "!" << id << " = !DIFile(filename: \"" << path
         << "\", directory: \".\")\n";
-  out << "!940 = !DISubroutineType(types: !941)\n";
-  out << "!941 = !{null}\n";
-  out << "!950 = !{i32 7, !\"Dwarf Version\", i32 4}\n";
-  out << "!951 = !{i32 2, !\"Debug Info Version\", i32 3}\n";
+  // FLUME PATCH (upstream bug): the fixed subroutine-type and module-flag
+  // nodes used to sit at !940/!941/!950/!951 — INSIDE the dynamic DISubprogram
+  // range that starts at !902, so any program with >= 39 functions emitted
+  // duplicate metadata ids and clang rejected the module.  They now live
+  // above the DIFile range (files: 1902..2899, guard 2900).
+  out << "!2950 = !DISubroutineType(types: !2951)\n";
+  out << "!2951 = !{null}\n";
+  out << "!2955 = !{i32 7, !\"Dwarf Version\", i32 4}\n";
+  out << "!2956 = !{i32 2, !\"Debug Info Version\", i32 3}\n";
   out << "!llvm.dbg.cu = !{!900}\n";
-  out << "!llvm.module.flags = !{!950, !951}\n";
+  out << "!llvm.module.flags = !{!2955, !2956}\n";
   out << "\n";
 }
 

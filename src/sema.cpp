@@ -722,7 +722,13 @@ bool semaProgram(Program* p) {
   }
   // 5. function bodies (generic templates are checked per instantiation)
   bool hasMain = S->fnMap.count("main");
-  if (!hasMain)
+  // Executable builds need an entry point. Compile-only modes (-S / -c)
+  // and library targets intentionally accept a module without `main`;
+  // requiring a dummy entry point here would make it impossible to build
+  // reusable Freshet modules into a static archive or another executable.
+  const bool executableOutput = !g_opts.emitObj && g_opts.irOut.empty() &&
+                                g_opts.projectTarget == "bin";
+  if (!hasMain && executableOutput)
     diag(Diag::Error, Code::Main, "no 'fn main()' found", p->file, 0, 0);
 
   for (auto* f : p->fns) {

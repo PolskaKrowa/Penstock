@@ -13,6 +13,14 @@ LLVM 23.1.4 SDK automatically (including `clang`, `clang++`, `opt` and the
 plugin development files). To use a system toolchain instead, for example
 LLVM 20 at `/usr/lib/llvm-20`:
 
+The default CMake build also fetches Z3 and Alive2, builds them as static
+libraries, and embeds them in Penstock. The selected backend needs a matching
+LLVM development SDK (headers, `LLVMConfig.cmake` and libraries); CMake fetches
+a same-major SDK when the local Clang installation does not include one.
+Alive2's source build also needs `re2c` at build time. `re2c` is not used by
+the installed compiler. Set `-DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=OFF` only when
+building a compiler without the embedded superoptimiser.
+
 ```sh
 cmake -S . -B build -DLLVM_ROOT=/usr/lib/llvm-20 \
   -DCMAKE_BUILD_TYPE=Release \
@@ -36,6 +44,13 @@ local LLVM installation and prevent downloads.
 | `PENSTOCK_LLVM_VERSION` | `23.1.4` | LLVM release to fetch when no local toolchain exists |
 | `PENSTOCK_LLVM_DOWNLOAD_DIR` | `build/_deps` | Download/extraction cache directory |
 | `PENSTOCK_BUILD_OPT_PLUGIN` | `ON` | Build the loadable `opt` pass plugin (a matching SDK is fetched if the local clang lacks development files) |
+| `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Bootstrap and embed Freshet superoptimisation with static Z3 and Alive2 |
+| `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them |
+| `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | empty | Use a local `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
+| `PENSTOCK_ALIVE2_LLVM_BUILD_DIR` | `build/_deps/penstock-alive2-llvm-build` | Private LLVM build directory used by the verifier |
+| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision fetched and statically linked |
+| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and statically linked |
+| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master |
 | `PENSTOCK_FETCH_ZSTD` | `ON` | Fetch and build zstd when the selected LLVM SDK requires it and no system library is available |
 | `PENSTOCK_ZSTD_VERSION` | `1.5.7` | Pinned zstd release for the fallback build |
 

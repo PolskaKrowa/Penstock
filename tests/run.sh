@@ -143,9 +143,8 @@ if grep -q "@frt_soa_new" "$TMP/sa.ll" && grep -q "@frt_soa_free" "$TMP/sa.ll"; 
 else bad "soa=auto IR missing soa runtime calls"; fi
 
 echo "== finite-domain algorithm precomputation =="
-# This evaluates every u8 input. With Alive2 available, the compiler may
-# replace scramble(x) by a verified constant mapping; without external solver
-# tools, the exact original algorithm must remain as a safe fallback.
+# This evaluates every u8 input. CMake builds use embedded Alive2 to validate
+# any replacement; non-CMake/bootstrap builds retain the original algorithm.
 run_ok "u8 input/output map preserves all-domain checksum" tests/pos_precompute.fsh "8781696"
 run_ok "finite inverse search returns the exact preimage" tests/pos_precompute_inverse.fsh "42"
 if $PEN --no-precompute tests/pos_precompute.fsh -o "$TMP/precompute-off" 2>"$TMP/precompute-off.err" \
@@ -154,12 +153,13 @@ if $PEN --no-precompute tests/pos_precompute.fsh -o "$TMP/precompute-off" 2>"$TM
   ok "--no-precompute disables mapping stage"
 else bad "--no-precompute switch"; sed -n '1,4p' "$TMP/precompute-off.err"; fi
 
-echo "== SAT/SMT superoptimisation integration =="
-# Optional verifier/toolchain components must never make ordinary builds fail.
+echo "== embedded Freshet/Z3/Alive2 superoptimisation integration =="
+# The CMake-built compiler uses in-process Z3/Alive2; bootstrap-only builds
+# safely leave this stage disabled rather than depending on external tools.
 if $PEN -O3 tests/pos_basics.fsh -o "$TMP/so" 2>"$TMP/so.err" && \
    [ "$("$TMP/so" 2>/dev/null)" = "$(printf '10.00\nhi')" ]; then
-  ok "SAT/SMT superopt gracefully falls back when optional tools are absent"
-else bad "SAT/SMT superopt fallback compile/run"; sed -n '1,4p' "$TMP/so.err"; fi
+  ok "embedded superoptimiser preserves program output"
+else bad "embedded Freshet superopt compile/run"; sed -n '1,4p' "$TMP/so.err"; fi
 
 echo "== R3: -O4 solver-first default =="
 if $PEN -O4 tests/pos_o4.fsh -o "$TMP/o4" 2>"$TMP/o4.err" \

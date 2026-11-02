@@ -705,39 +705,34 @@ output or semantics, it only converts wins the analysis can prove.
 On the sweep benchmark the auto transform measures 85 ms →
 12 ms (~7×), matching the hand-written SoA version.
 
-## 13. SAT/SMT-backed superoptimisation (`-O3` / `-O4`)
+## 13. Embedded Freshet superoptimisation (`-O3` / `-O4`)
 
-At `-O3`, Penstock attempts a bounded solver-backed LLVM IR rewrite for small
-combined modules; `-O4` raises the size budget to allow a wider whole-module
-search. Souper asks an SMT solver to synthesise cheaper equivalent instruction
-expressions. The output is treated as untrusted: Penstock accepts it only if
-it has a strictly lower LLVM instruction count and Alive2 explicitly proves
-refinement against the original combined IR. Missing tools, timeouts,
-non-improving results or failed/inconclusive proofs leave the original IR
-unchanged.
+At `-O3` and `-O4`, Penstock runs a bounded instruction superoptimiser whose
+control loop is written in Freshet and linked into the compiler. CMake builds a
+non-superoptimising bootstrap compiler, compiles `src/superopt.fsh` with it,
+then links that object into the final compiler alongside static Z3 and
+in-process Alive2 libraries. Runtime execution does not require Souper,
+`alive-tv`, or the `z3` command-line tool.
 
-Scope limits, tool environment variables and the cost-vector acceptance
-rule are documented in [`docs/superopt-guide.md`](superopt-guide.md) —
-the single source of truth for superoptimisation budgets. In short,
-`-O3` searches a bounded scope (256 KiB / 2,400 instructions / 2 s per
-tool) and `-O4` a wider whole-module scope (4 MiB / 24,000 / 10 s).
+The current candidate generator handles a deliberately conservative set of
+integer strength reductions (multiplication by zero, one or a power of two;
+unsigned division by one or a power of two; and unsigned remainder by a power
+of two). Z3 must show that the fixed-width bit-vector miter is unsatisfiable;
+Alive2 must then prove LLVM refinement; and the cost objective must improve.
+Only verified candidates are retained. Unsupported instructions, failed or
+inconclusive proofs, budget exhaustion and output failures leave the current
+IR unchanged. It does not yet search arbitrary expression DAGs or synthesize
+new algorithms from input/output samples.
 
-`--superopt-budget=<sec>` overrides the default and `--no-superopt` disables
-the stage. The optional tools are selected by `PENSTOCK_OPT`, `PENSTOCK_Z3`,
-`PENSTOCK_ALIVE_TV`, `PENSTOCK_SOUPER_PASS`, and `PENSTOCK_TIMEOUT`; see
-`docs/superopt-guide.md` for setup details.
+`--superopt-budget=<sec>` controls the solver/verification budget (default 2 s
+at `-O3`, 10 s at `-O4`); `--superopt-objective=latency|size|balanced` selects
+the cost rule; and `--no-superopt` disables the stage. CMake options and
+candidate scope are documented in [`docs/superopt-guide.md`](superopt-guide.md).
 
-This is sequence-level superoptimisation, not unrestricted synthesis of a new
-algorithm from an inverse input/output query. General algorithmic preimage
-synthesis needs an explicit desired output/property and a bounded domain or
-other completeness contract; Penstock will not infer those semantics from a
-sampled execution.
-
-The earlier genetic runtime tuner remains available separately via
-`--evo-runtime-tune --evo-budget=<sec>`. It executes the program and measures
-runtime configurations, so it is opt-in rather than the default `-O4`
-superoptimisation mechanism. It skips `--profile` builds and retains its
-checksum/median revalidation gates. See `docs/evo-guide.md`.
+This is instruction-level optimisation, not unrestricted synthesis of a new
+algorithm from an inverse input/output query. The finite-domain precomputation
+stage remains separate and also uses the embedded Alive2 verifier. The legacy
+genetic runtime tuner remains separately opt-in via `--evo-runtime-tune`.
 
 ## 14. Source-level loop optimisation
 
