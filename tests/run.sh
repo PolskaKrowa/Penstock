@@ -6,7 +6,8 @@ cd "$(dirname "$0")/.."
 PEN=bin/penstock
 PEN_LSP=bin/freshet-language-server
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+safe_marker="penstock-shell-injection-marker-$$"
+trap 'rm -f "$safe_marker"; rm -rf "$TMP"' EXIT
 pass=0; fail=0
 
 ok()   { pass=$((pass+1)); echo "  PASS  $1"; }
@@ -63,7 +64,10 @@ run_okf() {
 echo "== driver process safety =="
 # Output paths are passed as one argv element. Shell metacharacters in a path
 # must remain literal and must never execute a second command.
-safe_marker="$TMP/penstock-shell-injection-marker"
+# Keep the injected marker name relative: a slash inside the output basename
+# would turn it into a nested path and make the test fail for filesystem reasons
+# before it can distinguish argv execution from shell interpretation.
+rm -f "$safe_marker"
 safe_output="$TMP/program; touch $safe_marker; #"
 if "$PEN" -O0 --no-superopt --no-precompute tests/pos_basics.fsh \
     -o "$safe_output" 2>"$TMP/shell-safe.err"; then
