@@ -30,6 +30,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,14 +54,68 @@ static std::string trimPC(const std::string& s) {
   return s.substr(a, b - a + 1);
 }
 
-static std::string shellQuotePC(const std::string& s) {
-  std::string q = "'";
-  for (char c : s) {
-    if (c == '\'') q += "'\\''";
-    else q += c;
+static std::string findExecutablePC(const std::string& name) {
+  if (name.empty()) return {};
+  auto executable = [](const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+           access(path.c_str(), X_OK) == 0;
+  };
+  if (name.find('/') != std::string::npos)
+    return executable(name) ? name : std::string();
+  const char* pathEnv = std::getenv("PATH");
+  if (!pathEnv) return {};
+  const std::string path(pathEnv);
+  size_t begin = 0;
+  for (;;) {
+    const size_t end = path.find(':', begin);
+    const std::string dir = path.substr(begin,
+        end == std::string::npos ? std::string::npos : end - begin);
+    const std::string candidate = (dir.empty() ? "." : dir) + "/" + name;
+    if (executable(candidate)) return candidate;
+    if (end == std::string::npos) break;
+    begin = end + 1;
   }
-  q += '\'';
-  return q;
+  return {};
+}
+
+static bool runOkPC(const std::vector<std::string>& command,
+                    const std::string& stdoutPath = {},
+                    bool mergeStderr = false,
+                    bool discardStderr = false) {
+  if (command.empty() || command.front().empty()) return false;
+  std::vector<char*> argv;
+  argv.reserve(command.size() + 1);
+  for (const auto& arg : command)
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  if (pid < 0) return false;
+  if (pid == 0) {
+    if (!stdoutPath.empty()) {
+      const int fd = open(stdoutPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+      if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0) _exit(126);
+      if (fd != STDOUT_FILENO) close(fd);
+    }
+    if (mergeStderr) {
+      if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0) _exit(126);
+    } else if (discardStderr) {
+      const int fd = open("/dev/null", O_WRONLY);
+      if (fd < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(126);
+      if (fd != STDERR_FILENO) close(fd);
+    }
+    execvp(command.front().c_str(), argv.data());
+    _exit(errno == ENOENT ? 127 : 126);
+  }
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) continue;
+    return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static std::string readTextPC(const std::string& p) {
@@ -93,38 +148,12 @@ static bool readBinaryPC(const std::string& p, std::vector<uint8_t>& bytes) {
 static std::string resolveCommandPC(const char* envName, const std::string& fallback,
                                     const std::string& llvmRoot = {}) {
   const char* e = std::getenv(envName);
-  if (e && *e) {
-    std::string p(e);
-    if (access(p.c_str(), X_OK) == 0) return p;
-    if (p.find('/') == std::string::npos) {
-      FILE* fp = popen(("command -v " + shellQuotePC(p) + " 2>/dev/null").c_str(), "r");
-      if (fp) {
-        char b[2048];
-        std::string got;
-        if (fgets(b, sizeof b, fp)) got = trimPC(b);
-        pclose(fp);
-        if (!got.empty() && access(got.c_str(), X_OK) == 0) return got;
-      }
-    }
-    return {};
-  }
+  if (e && *e) return findExecutablePC(e);
   if (!llvmRoot.empty()) {
     const std::string p = llvmRoot + "/bin/" + fallback;
     if (access(p.c_str(), X_OK) == 0) return p;
   }
-  FILE* fp = popen(("command -v " + shellQuotePC(fallback) + " 2>/dev/null").c_str(), "r");
-  if (!fp) return {};
-  char b[2048];
-  std::string got;
-  if (fgets(b, sizeof b, fp)) got = trimPC(b);
-  pclose(fp);
-  return (!got.empty() && access(got.c_str(), X_OK) == 0) ? got : std::string();
-}
-
-static bool runOkPC(const std::string& cmd) {
-  fflush(nullptr);
-  const int rc = std::system(cmd.c_str());
-  return rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+  return findExecutablePC(fallback);
 }
 
 struct PCArg {
@@ -774,18 +803,16 @@ bool runPrecomputeRewriter(const std::string& clang,
   const int optSeconds = wide ? 15 : 8;
   bool optOk = false;
   if (!opt.empty()) {
-    std::string optCmd = shellQuotePC(timeout) + " " + std::to_string(optSeconds) + "s " +
-        shellQuotePC(opt) + " -S -passes=mem2reg,instcombine,simplifycfg " +
-        shellQuotePC(optIn) + " -o " + shellQuotePC(canonical) + " > " +
-        shellQuotePC(optLog) + " 2>&1";
-    optOk = runOkPC(optCmd);
+    std::vector<std::string> optCmd{
+        timeout, std::to_string(optSeconds) + "s", opt, "-S",
+        "-passes=mem2reg,instcombine,simplifycfg", optIn, "-o", canonical};
+    optOk = runOkPC(optCmd, optLog, true);
     if (!optOk) {
       unlink(canonical.c_str());
-      optCmd = shellQuotePC(timeout) + " " + std::to_string(optSeconds) + "s " +
-          shellQuotePC(opt) + " -S -mem2reg -instcombine -simplifycfg " +
-          shellQuotePC(optIn) + " -o " + shellQuotePC(canonical) + " > " +
-          shellQuotePC(optLog) + " 2>&1";
-      optOk = runOkPC(optCmd);
+      optCmd = {timeout, std::to_string(optSeconds) + "s", opt, "-S",
+                "-mem2reg", "-instcombine", "-simplifycfg", optIn,
+                "-o", canonical};
+      optOk = runOkPC(optCmd, optLog, true);
     }
   }
   std::string canonicalText = optOk ? readTextPC(canonical) : std::string();
@@ -798,11 +825,11 @@ bool runPrecomputeRewriter(const std::string& clang,
     const std::string probe = makeProbeCanonicalizationInputPC(original, rawFunctions);
     const std::string probeSeconds = std::to_string(wide ? 18 : 10);
     if (writeTextPC(probeInput, probe)) {
-      const std::string canonCmd = shellQuotePC(timeout) + " " + probeSeconds + "s " +
-          shellQuotePC(clang) + " -O1 -fno-inline -fno-unroll-loops -S -emit-llvm "
-          "-Wno-override-module " + shellQuotePC(probeInput) + " -o " +
-          shellQuotePC(canonical) + " > " + shellQuotePC(optLog) + " 2>&1";
-      if (runOkPC(canonCmd)) canonicalText = readTextPC(canonical);
+      const std::vector<std::string> canonCmd{
+          timeout, probeSeconds + "s", clang, "-O1", "-fno-inline",
+          "-fno-unroll-loops", "-S", "-emit-llvm", "-Wno-override-module",
+          probeInput, "-o", canonical};
+      if (runOkPC(canonCmd, optLog, true)) canonicalText = readTextPC(canonical);
     }
     if (canonicalText.empty()) {
       fprintf(stderr, "precompute: could not canonicalise IR with opt or Clang; no changes made\n");
@@ -892,20 +919,18 @@ bool runPrecomputeRewriter(const std::string& clang,
     unlink(runnerBin.c_str()); unlink(runnerOut.c_str());
 
     const int compileSeconds = wide ? 12 : 5;
-    const std::string compileCmd = shellQuotePC(timeout) + " " +
-        std::to_string(compileSeconds) + "s " + shellQuotePC(clang) +
-        " -O0 -Wno-override-module " + shellQuotePC(runnerLl) + " -o " +
-        shellQuotePC(runnerBin) + " > " + shellQuotePC(compileLog) + " 2>&1";
-    if (!runOkPC(compileCmd)) {
+    const std::vector<std::string> compileCmd{
+        timeout, std::to_string(compileSeconds) + "s", clang, "-O0",
+        "-Wno-override-module", runnerLl, "-o", runnerBin};
+    if (!runOkPC(compileCmd, compileLog, true)) {
       fprintf(stderr, "precompute: skipped '%s' — evaluator compilation failed\n", c.name.c_str());
       continue;
     }
 
     const int evalSeconds = wide ? 10 : 2;
-    const std::string evalCmd = shellQuotePC(timeout) + " " +
-        std::to_string(evalSeconds) + "s " + shellQuotePC(runnerBin) +
-        " > " + shellQuotePC(runnerOut) + " 2>/dev/null";
-    if (!runOkPC(evalCmd)) {
+    const std::vector<std::string> evalCmd{
+        timeout, std::to_string(evalSeconds) + "s", runnerBin};
+    if (!runOkPC(evalCmd, runnerOut, false, true)) {
       fprintf(stderr, "precompute: skipped '%s' — mapping evaluation timed out or failed\n", c.name.c_str());
       continue;
     }

@@ -77,6 +77,36 @@ struct Ind {
   double fitness = -1;   // ms; -1 unevaluated
 };
 
+// Run compiler tools with an argv vector, never through a shell. Paths and
+// target options therefore remain data even when they contain shell syntax.
+static int runCompiler(const std::vector<std::string>& command) {
+  if (command.empty() || command.front().empty()) return 127;
+  std::vector<char*> argv;
+  argv.reserve(command.size() + 1);
+  for (const auto& arg : command)
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) return 127;
+  if (pid == 0) {
+    const int nullFd = open("/dev/null", O_WRONLY);
+    if (nullFd < 0 || dup2(nullFd, STDERR_FILENO) < 0) _exit(126);
+    if (nullFd != STDERR_FILENO) close(nullFd);
+    execvp(command.front().c_str(), argv.data());
+    _exit(errno == ENOENT ? 127 : 126);
+  }
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) continue;
+    return 127;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 127;
+}
+
 struct Engine {
   std::string clang, finalLl, outBin, tmpDir;
   std::vector<int> optLevels{3, 2};
@@ -113,15 +143,18 @@ struct Engine {
     std::string path = tmpDir + "/evo_cand_" + std::to_string(getpid()) + "_" +
                        std::to_string(optLevels[g.optIdx]) + "_" + marches[g.marchIdx] +
                        (g.veclib ? "_vl" : "");
-    std::string cmd = clang + " -O" + std::to_string(optLevels[g.optIdx]) +
-                      " -march=" + marches[g.marchIdx] +
-                      (g.veclib ? " -fveclib=libmvec -fno-math-errno" : "") +
-                      " " + finalLl +
-                      " -o " + path + " -lm -lpthread 2>/dev/null";
+    std::vector<std::string> command{
+        clang, "-O" + std::to_string(optLevels[g.optIdx]),
+        "-march=" + marches[g.marchIdx]};
+    if (g.veclib) {
+      command.push_back("-fveclib=libmvec");
+      command.push_back("-fno-math-errno");
+    }
+    command.insert(command.end(), {finalLl, "-o", path, "-lm", "-lpthread"});
     ++compiles;
     fflush(nullptr);
-    int rc = system(cmd.c_str());
-    std::string res = (WEXITSTATUS(rc) == 0) ? path : std::string();
+    const int rc = runCompiler(command);
+    std::string res = (rc == 0) ? path : std::string();
     if (!res.empty() && access(res.c_str(), X_OK) != 0) res.clear();
     binCache[key] = res;
     return res;

@@ -8,6 +8,8 @@
 #include "loop_transforms.h"
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <cstdio>
@@ -15,6 +17,10 @@
 #include <cerrno>
 #include <algorithm>
 #include <fstream>
+#include <vector>
+#include <utility>
+#include <sstream>
+#include <cstring>
 
 using namespace freshet;
 
@@ -128,11 +134,138 @@ static const char* USAGE =
     "  --project <f>     explicit project manifest (default: penstock.toml in\n"
     "                    the entry directory)\n";
 
-// run a command, return exit code; stderr passes through
-static int runCmd(const std::string& cmd) {
-  fflush(stdout);
-  int rc = system(cmd.c_str());
-  return WEXITSTATUS(rc);
+// Launch a program without a shell.  Every item after argv[0] is passed as
+// one literal argument, so source paths, output paths, triples and linker
+// options can never become shell syntax.
+enum class ChildStderr { Inherit, MergeToStdout, Discard };
+
+static int runCmd(const std::vector<std::string>& command,
+                  ChildStderr stderrMode = ChildStderr::Inherit,
+                  const std::vector<std::pair<std::string, std::string>>& env = {}) {
+  if (command.empty() || command.front().empty()) return 127;
+  fflush(nullptr);
+
+  std::vector<char*> argv;
+  argv.reserve(command.size() + 1);
+  for (const auto& arg : command)
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    fprintf(stderr, "penstock: fork failed: %s\n", strerror(errno));
+    return 127;
+  }
+  if (pid == 0) {
+    if (stderrMode == ChildStderr::MergeToStdout) {
+      if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0) _exit(126);
+    } else if (stderrMode == ChildStderr::Discard) {
+      const int nullFd = open("/dev/null", O_WRONLY);
+      if (nullFd < 0 || dup2(nullFd, STDERR_FILENO) < 0) _exit(126);
+      if (nullFd != STDERR_FILENO) close(nullFd);
+    }
+    for (const auto& item : env) {
+      if (setenv(item.first.c_str(), item.second.c_str(), 1) != 0) _exit(126);
+    }
+    execvp(command.front().c_str(), argv.data());
+    const int execError = errno;
+    dprintf(STDERR_FILENO, "penstock: cannot execute '%s': %s\n",
+            command.front().c_str(), strerror(execError));
+    _exit(execError == ENOENT ? 127 : 126);
+  }
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) continue;
+    fprintf(stderr, "penstock: waitpid failed: %s\n", strerror(errno));
+    return 127;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 127;
+}
+
+// Capture stdout from a directly-executed program.  stderr can be inherited
+// or discarded; no shell or command-string parsing is involved.
+static int captureCmd(const std::vector<std::string>& command,
+                      std::string& output,
+                      ChildStderr stderrMode = ChildStderr::Discard) {
+  output.clear();
+  if (command.empty() || command.front().empty()) return 127;
+  int pipeFds[2];
+  if (pipe(pipeFds) != 0) return 127;
+
+  std::vector<char*> argv;
+  argv.reserve(command.size() + 1);
+  for (const auto& arg : command)
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    close(pipeFds[0]);
+    close(pipeFds[1]);
+    return 127;
+  }
+  if (pid == 0) {
+    close(pipeFds[0]);
+    if (dup2(pipeFds[1], STDOUT_FILENO) < 0) _exit(126);
+    close(pipeFds[1]);
+    if (stderrMode == ChildStderr::Discard) {
+      const int nullFd = open("/dev/null", O_WRONLY);
+      if (nullFd < 0 || dup2(nullFd, STDERR_FILENO) < 0) _exit(126);
+      if (nullFd != STDERR_FILENO) close(nullFd);
+    }
+    execvp(command.front().c_str(), argv.data());
+    _exit(errno == ENOENT ? 127 : 126);
+  }
+
+  close(pipeFds[1]);
+  char buffer[4096];
+  for (;;) {
+    const ssize_t n = read(pipeFds[0], buffer, sizeof(buffer));
+    if (n > 0) {
+      output.append(buffer, static_cast<size_t>(n));
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  close(pipeFds[0]);
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) continue;
+    return 127;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 127;
+}
+
+static std::string findExecutable(const std::string& name) {
+  if (name.empty()) return {};
+  auto isExecutable = [](const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+           access(path.c_str(), X_OK) == 0;
+  };
+  if (name.find('/') != std::string::npos)
+    return isExecutable(name) ? name : std::string();
+  const char* pathEnv = getenv("PATH");
+  if (!pathEnv) return {};
+  std::string path(pathEnv);
+  size_t begin = 0;
+  for (;;) {
+    const size_t end = path.find(':', begin);
+    const std::string dir = path.substr(begin,
+        end == std::string::npos ? std::string::npos : end - begin);
+    const std::string candidate = (dir.empty() ? "." : dir) + "/" + name;
+    if (isExecutable(candidate)) return candidate;
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return {};
 }
 
 // Stage A2: build the Clang `-Rpass*` / `-fsave-optimization-record` argument
@@ -149,41 +282,62 @@ static int runCmd(const std::string& cmd) {
 //   --opt-remarks=inline        -> only inlining decisions
 //   --opt-remarks=vectorize,inline  -> both
 // The YAML record file is always named <out>.opt-records.yaml when enabled.
-static std::string optRemarksFlags(const std::string& outPath) {
-  if (!g_opts.optRemarksEnabled) return "";
-  std::string cats = g_opts.optRemarks.empty() ? "all" : g_opts.optRemarks;
-  std::string flags;
+static std::vector<std::string> optRemarksArgs(const std::string& outPath) {
+  std::vector<std::string> args;
+  if (!g_opts.optRemarksEnabled) return args;
+  const std::string cats = g_opts.optRemarks.empty() ? "all" : g_opts.optRemarks;
   auto has = [&](const char* k) {
     return cats == "all" || cats.find(k) != std::string::npos;
   };
-  // The Clang regex argument is matched against the pass NAME; for our
-  // purposes the user-visible strings are "loop-vectorize", "slp-vectorizer",
-  // "inline".  An empty regex ("") means "all passes".
   auto addRpass = [&](const char* kind, const char* regex) {
-    flags += " -Rpass";
-    if (kind && *kind) { flags += "-"; flags += kind; }
-    flags += "='";
-    flags += regex;
-    flags += "'";
+    std::string flag = "-Rpass";
+    if (kind && *kind) { flag += "-"; flag += kind; }
+    flag += "=";
+    flag += regex;
+    args.push_back(std::move(flag));
   };
   if (has("vectorize")) {
-    addRpass("missed",   "loop-vectorize|slp-vectorizer");
-    addRpass("",         "loop-vectorize|slp-vectorizer");
+    addRpass("missed", "loop-vectorize|slp-vectorizer");
+    addRpass("", "loop-vectorize|slp-vectorizer");
     addRpass("analysis", "loop-vectorize|slp-vectorizer");
   }
   if (has("inline")) {
-    addRpass("missed",   "inline|cgscc-inline|always-inline");
-    addRpass("",         "inline|cgscc-inline|always-inline");
+    addRpass("missed", "inline|cgscc-inline|always-inline");
+    addRpass("", "inline|cgscc-inline|always-inline");
     addRpass("analysis", "inline");
   }
   if (cats == "all") {
-    // broad: every pass, no regex
-    flags = " -Rpass-missed -Rpass -Rpass-analysis";
+    args = {"-Rpass-missed", "-Rpass", "-Rpass-analysis"};
   }
-  // Always drop a YAML record file alongside the binary so CI / IDE tools
-  // can post-process without scraping stderr.
-  flags += " -fsave-optimization-record -foptimization-record-file=" + outPath + ".opt-records.yaml";
-  return flags;
+  args.push_back("-fsave-optimization-record");
+  args.push_back("-foptimization-record-file=" + outPath + ".opt-records.yaml");
+  return args;
+}
+
+static void appendTargetArgs(std::vector<std::string>& args) {
+  if (!g_targetTriple.empty()) {
+    args.push_back("-target");
+    args.push_back(g_targetTriple);
+  }
+}
+
+static void appendVeclibArgs(std::vector<std::string>& args) {
+  if (g_opts.veclib == "libmvec") {
+    args.push_back("-fveclib=libmvec");
+    args.push_back("-fno-math-errno");
+  }
+}
+
+static void appendPgoArgs(std::vector<std::string>& args) {
+  if (g_opts.llvmPgoGenerate) args.push_back("-fprofile-generate");
+  if (!g_opts.llvmPgoUse.empty())
+    args.push_back("-fprofile-use=" + g_opts.llvmPgoUse);
+}
+
+static void appendOptRemarkArgs(std::vector<std::string>& args,
+                                const std::string& outPath) {
+  std::vector<std::string> extra = optRemarksArgs(outPath);
+  args.insert(args.end(), extra.begin(), extra.end());
 }
 
 static std::string readFile(const std::string& p) {
@@ -241,10 +395,10 @@ static std::string runtimeLl(const std::string& clangBin,
   struct stat cst;
   if (stat(cache.c_str(), &cst) == 0 && cst.st_mtime >= srcMtime)
     return readFile(cache);
-  std::string cmd = clangBin + " -S -emit-llvm -O" +
-                    std::to_string(g_opts.runtimeOpt) + " -g0 -x c " + rtSrc +
-                    " -o " + cache + " 2>/dev/null";
-  if (runCmd(cmd) != 0 || readFile(cache).empty()) {
+  const std::vector<std::string> cmd = {
+      clangBin, "-S", "-emit-llvm", "-O" + std::to_string(g_opts.runtimeOpt),
+      "-g0", "-x", "c", rtSrc, "-o", cache};
+  if (runCmd(cmd, ChildStderr::Discard) != 0 || readFile(cache).empty()) {
     fprintf(stderr, "penstock: cannot compile runtime library\n");
     return "";
   }
@@ -477,30 +631,6 @@ static std::string scratchDir() {
   return cacheDirectory();
 }
 
-// §8: backend flags selecting the vector math library.  libmvec (glibc's
-// vector math) lets the loop vectoriser replace llvm.sin/.cos/.log2/.log10
-// calls with vector routines; -fno-math-errno is required for that and
-// matches the language's default fast-FP semantics (errno is not part of
-// Freshet's observable model).  "none" keeps the portable lowering.
-static std::string veclibFlags() {
-  if (g_opts.veclib == "libmvec") return " -fveclib=libmvec -fno-math-errno";
-  return "";
-}
-
-// §11.2: backend flags for the LLVM IR-based PGO workflow.
-static std::string llvmPgoFlags() {
-  std::string f;
-  if (g_opts.llvmPgoGenerate) f += " -fprofile-generate";
-  if (!g_opts.llvmPgoUse.empty()) f += " -fprofile-use=" + g_opts.llvmPgoUse;
-  return f;
-}
-
-// §12: backend -target flag when a non-default target is configured.
-static std::string targetFlags() {
-  if (!g_targetTriple.empty()) return " -target " + g_targetTriple;
-  return "";
-}
-
 // §11.2: turn --llvm-pgo-use=<profraw|dir|comma-list|profdata> into a
 // .profdata path, merging raw profiles with llvm-profdata on the way —
 // the documented Clang workflow.  Returns "" (with a diagnostic) when
@@ -551,18 +681,10 @@ static std::string resolveLlvmPgoUse(const std::string& llvmRoot,
 
   // locate llvm-profdata: --llvm-profdata > $LLVM_ROOT/bin > $PATH
   std::string tool = g_opts.llvmProfdata;
-  if (tool.empty() &&
-      access((llvmRoot + "/bin/llvm-profdata").c_str(), X_OK) == 0)
-    tool = llvmRoot + "/bin/llvm-profdata";
   if (tool.empty()) {
-    FILE* p = popen("command -v llvm-profdata 2>/dev/null", "r");
-    char buf[512];
-    if (p && fgets(buf, sizeof buf, p)) {
-      std::string s(buf);
-      while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-      if (!s.empty()) tool = s;
-    }
-    if (p) pclose(p);
+    const std::string bundled = llvmRoot + "/bin/llvm-profdata";
+    tool = access(bundled.c_str(), X_OK) == 0
+        ? bundled : findExecutable("llvm-profdata");
   }
   if (tool.empty()) {
     fprintf(stderr, "penstock: llvm-profdata not found — merge the .profraw "
@@ -572,10 +694,10 @@ static std::string resolveLlvmPgoUse(const std::string& llvmRoot,
     return "";
   }
   std::string out = scratch + "/pgo_" + std::to_string(getpid()) + ".profdata";
-  std::string cmd = tool + " merge -output=" + out;
-  for (auto& r : raws) cmd += " " + r;
-  cmd += " 2>&1";
-  if (runCmd(cmd) != 0 || stat(out.c_str(), &st) != 0) {
+  std::vector<std::string> cmd{tool, "merge", "-output=" + out};
+  cmd.insert(cmd.end(), raws.begin(), raws.end());
+  if (runCmd(cmd, ChildStderr::MergeToStdout) != 0 ||
+      stat(out.c_str(), &st) != 0) {
     fprintf(stderr, "penstock: llvm-profdata merge failed\n");
     return "";
   }
@@ -980,21 +1102,20 @@ int main(int argc, char** argv) {
   // resolve backend version once: cache key + report description
   std::string llvmMajor, llvmVer;
   {
-    FILE* vp = popen((clang + " --version 2>/dev/null").c_str(), "r");
-    if (vp) {
-      char buf[512];
-      while (fgets(buf, sizeof buf, vp)) {
-        std::string line(buf);
-        size_t p = line.find("clang version ");
+    std::string versionText;
+    if (captureCmd({clang, "--version"}, versionText) == 0) {
+      std::istringstream lines(versionText);
+      std::string line;
+      while (std::getline(lines, line)) {
+        const size_t p = line.find("clang version ");
         if (p == std::string::npos) continue;
-        std::string rest = line.substr(p + 14);
-        size_t e = rest.find_first_not_of("0123456789.");
+        const std::string rest = line.substr(p + 14);
+        const size_t e = rest.find_first_not_of("0123456789.");
         llvmVer = rest.substr(0, e == std::string::npos ? rest.size() : e);
-        size_t dot = llvmVer.find('.');
+        const size_t dot = llvmVer.find('.');
         llvmMajor = llvmVer.substr(0, dot == std::string::npos ? llvmVer.size() : dot);
         break;
       }
-      pclose(vp);
     }
   }
   g_backend = "LLVM " + (llvmVer.empty() ? "<unknown>" : llvmVer) + " (" + llvmRoot + ")";
@@ -1013,7 +1134,7 @@ int main(int argc, char** argv) {
   //     made clang warn on every .ll ingest:
   //       warning: overriding the module target triple with
   //       x86_64-unknown-linux-gnu [-Woverride-module]
-  // The IR module (irgen.cpp) and the backend invocation (targetFlags())
+  // The IR module (irgen.cpp) and the backend invocation (appendTargetArgs)
   // then agree on ONE target by construction; -march alone could not
   // change front-end assumptions already baked into the module.
   {
@@ -1022,11 +1143,16 @@ int main(int argc, char** argv) {
                                        : g_opts.targetTriple;
     std::string probe = scratchDir() + "/tgt_probe_" +
                         std::to_string(getpid()) + ".ll";
-    std::string cmd = clang + " -S -emit-llvm -O0 -g0 -x c /dev/null" +
-                      (cross ? " -target " + want : "") +
-                      " -o " + probe + " 2>/dev/null";
+    std::vector<std::string> cmd{clang, "-S", "-emit-llvm", "-O0", "-g0",
+                                 "-x", "c", "/dev/null"};
+    if (cross) {
+      cmd.push_back("-target");
+      cmd.push_back(want);
+    }
+    cmd.push_back("-o");
+    cmd.push_back(probe);
     std::string tr, dl;
-    if (runCmd(cmd) == 0) {
+    if (runCmd(cmd, ChildStderr::Discard) == 0) {
       std::string ll = readFile(probe);
       size_t t = ll.find("target triple = \"");
       if (t != std::string::npos) {
@@ -1333,26 +1459,29 @@ int main(int argc, char** argv) {
   // Phase 3c (report §10.3): -g / --debug adds DWARF emission — the IR
   // already carries !dbg line locations + DISubprograms, so the backend
   // only needs the flag to materialise them
-  std::string dbgFlag = g_opts.debugInfo ? " -g" : "";
-  // project library targets compile to ONE object, then archive (static)
-  // or link shared — handled after the emitObj branch
+  // Project library targets compile to one object, then archive (static) or
+  // link shared. All compiler/tool invocations use argv directly, never sh.
   if (g_opts.emitObj) {
-    int clangO = g_opts.optLevel > 3 ? 3 : g_opts.optLevel;
-    std::string cmd = clang + " -O" + std::to_string(clangO) +
-                      " -march=" + g_opts.march + targetFlags() + veclibFlags() +
-                      llvmPgoFlags() + dbgFlag + " -c " + finalLl +
-                      " -o " + out + optRemarksFlags(out) + " 2>&1";
-    int rc = runCmd(cmd);
+    const int clangO = g_opts.optLevel > 3 ? 3 : g_opts.optLevel;
+    std::vector<std::string> cmd{clang, "-O" + std::to_string(clangO),
+                                 "-march=" + g_opts.march};
+    appendTargetArgs(cmd);
+    appendVeclibArgs(cmd);
+    appendPgoArgs(cmd);
+    if (g_opts.debugInfo) cmd.push_back("-g");
+    cmd.insert(cmd.end(), {"-c", finalLl, "-o", out});
+    appendOptRemarkArgs(cmd, out);
+    const int rc = runCmd(cmd, ChildStderr::MergeToStdout);
     if (!g_opts.keepIr) { unlink(finalLl.c_str()); unlink(userLl.c_str()); }
     if (rc) { fprintf(stderr, "penstock: clang failed on object emit\n"); return 1; }
-    // Phase 3 (§6.2): project library targets — object -> archive / .so
     if (libTarget) {
-      std::string lcmd;
-      if (g_opts.projectTarget == "static-lib")
-        lcmd = "rm -f " + libOut + " && ar rcs " + libOut + " " + out;
-      else
-        lcmd = clang + " -shared -o " + libOut + " " + out + " -lm -lpthread 2>&1";
-      if (runCmd(lcmd) == 0) {
+      if (g_opts.projectTarget == "static-lib") unlink(libOut.c_str());
+      const std::vector<std::string> lcmd =
+          g_opts.projectTarget == "static-lib"
+              ? std::vector<std::string>{"ar", "rcs", libOut, out}
+              : std::vector<std::string>{clang, "-shared", "-o", libOut,
+                                         out, "-lm", "-lpthread"};
+      if (runCmd(lcmd, ChildStderr::MergeToStdout) == 0) {
         fprintf(stderr, "penstock: wrote %s\n", libOut.c_str());
         return 0;
       }
@@ -1365,24 +1494,28 @@ int main(int argc, char** argv) {
 
   {
     // -O4 = -O3 codegen + evolution pass (run after link below); clang
-    // itself caps at -O3
-    int clangO = g_opts.optLevel > 3 ? 3 : g_opts.optLevel;
-    std::string llibs = " -lm -lpthread";
-    // #link declarations are collected by the preprocessor.  Resolve them at
-    // the final native link: simple identifiers become -lNAME, with the
-    // current directory searched first so local C shims can be packaged as
-    // libNAME.a.  Compiler command paths use the existing shell-command model.
-    if (!linkLibs.empty()) llibs += " -L.";
+    // itself caps at -O3.
+    const int clangO = g_opts.optLevel > 3 ? 3 : g_opts.optLevel;
+    std::vector<std::string> cmd{clang, "-O" + std::to_string(clangO),
+                                 "-march=" + g_opts.march};
+    appendTargetArgs(cmd);
+    appendVeclibArgs(cmd);
+    appendPgoArgs(cmd);
+    if (g_opts.debugInfo) cmd.push_back("-g");
+    cmd.push_back(finalLl);
+    cmd.push_back("-o");
+    cmd.push_back(out);
+    // #link declarations become individual linker arguments. No whitespace
+    // splitting or shell expansion is performed on source-controlled text.
+    if (!linkLibs.empty()) cmd.push_back("-L.");
     for (const auto& lib : linkLibs) {
       if (lib.empty()) continue;
-      if (lib[0] == '-') llibs += " " + lib;
-      else llibs += " -l" + lib;
+      cmd.push_back(lib[0] == '-' ? lib : "-l" + lib);
     }
-    std::string cmd = clang + " -O" + std::to_string(clangO) +
-                      " -march=" + g_opts.march + targetFlags() + veclibFlags() +
-                      llvmPgoFlags() + dbgFlag + " " + finalLl + " -o " + out +
-                      llibs + optRemarksFlags(out) + " 2>&1";
-    int rc = runCmd(cmd);
+    cmd.push_back("-lm");
+    cmd.push_back("-lpthread");
+    appendOptRemarkArgs(cmd, out);
+    const int rc = runCmd(cmd, ChildStderr::MergeToStdout);
     if (rc) {
       fprintf(stderr, "penstock: backend failed; IR kept at %s\n",
               finalLl.c_str());
@@ -1399,10 +1532,13 @@ int main(int argc, char** argv) {
     std::string finalIrPath = g_opts.emitFinalIr;
     if (finalIrPath == "<auto>") finalIrPath = base + ".final.ll";
     int clangO = g_opts.optLevel > 3 ? 3 : g_opts.optLevel;
-    std::string cmd = clang + " -S -emit-llvm -O" + std::to_string(clangO) +
-                      " -march=" + g_opts.march + targetFlags() + veclibFlags() +
-                      " " + finalLl + " -o " + finalIrPath + " 2>&1";
-    if (runCmd(cmd) == 0)
+    std::vector<std::string> cmd{clang, "-S", "-emit-llvm",
+                                 "-O" + std::to_string(clangO),
+                                 "-march=" + g_opts.march};
+    appendTargetArgs(cmd);
+    appendVeclibArgs(cmd);
+    cmd.insert(cmd.end(), {finalLl, "-o", finalIrPath});
+    if (runCmd(cmd, ChildStderr::MergeToStdout) == 0)
       fprintf(stderr, "penstock: final optimised IR written to %s\n",
               finalIrPath.c_str());
     else
@@ -1422,17 +1558,17 @@ int main(int argc, char** argv) {
                             std::to_string(getpid()) + ".ll";
       // §3: the tuned runtime uses the SAME optimisation level as the
       // cached runtime (default -O2), not the historical -O0
-      std::string tunedDefs =
-          "-DFRT_TUNED_THREADS=" + std::to_string(w.threads) +
-          " -DFRT_TUNED_AFFINITY=" + std::to_string(w.pin) +
-          " -DFRT_TUNED_CHUNK=" + std::to_string(w.chunk);
-      if (w.serialCutoff >= 0)   // -1 = leave the default heuristic
-        tunedDefs += " -DFRT_TUNED_SERIAL_CUTOFF=" +
-                     std::to_string(w.serialCutoff);
-      std::string dcmd = clang + " -S -emit-llvm -O" +
-          std::to_string(g_opts.runtimeOpt) + " -g0 -x c " + tunedDefs +
-          " " + rtSrc + " -o " + tunedRt + " 2>/dev/null";
-      if (runCmd(dcmd) != 0 || readFile(tunedRt).empty()) {
+      std::vector<std::string> dcmd{
+          clang, "-S", "-emit-llvm", "-O" + std::to_string(g_opts.runtimeOpt),
+          "-g0", "-x", "c",
+          "-DFRT_TUNED_THREADS=" + std::to_string(w.threads),
+          "-DFRT_TUNED_AFFINITY=" + std::to_string(w.pin),
+          "-DFRT_TUNED_CHUNK=" + std::to_string(w.chunk)};
+      if (w.serialCutoff >= 0)
+        dcmd.push_back("-DFRT_TUNED_SERIAL_CUTOFF=" +
+                       std::to_string(w.serialCutoff));
+      dcmd.insert(dcmd.end(), {rtSrc, "-o", tunedRt});
+      if (runCmd(dcmd, ChildStderr::Discard) != 0 || readFile(tunedRt).empty()) {
         fprintf(stderr, "evo: tuned runtime compile failed — keeping "
                         "default binary (set env vars instead: "
                         "FRT_THREADS=%d FRT_AFFINITY=%d FRT_CHUNK=%ld)\n",
@@ -1447,11 +1583,15 @@ int main(int argc, char** argv) {
         if (!writeFile(final2, combined2)) {
           fprintf(stderr, "penstock: cannot write %s\n", final2.c_str());
         } else {
-          std::string cmd2 = clang + " -O" + std::to_string(w.clangOpt) +
-              " -march=" + w.march + targetFlags() +
-              (w.veclib ? " -fveclib=libmvec -fno-math-errno" : "") +
-              " " + final2 + " -o " + out + " -lm -lpthread 2>&1";
-          if (runCmd(cmd2) == 0) {
+          std::vector<std::string> cmd2{
+              clang, "-O" + std::to_string(w.clangOpt), "-march=" + w.march};
+          appendTargetArgs(cmd2);
+          if (w.veclib) {
+            cmd2.push_back("-fveclib=libmvec");
+            cmd2.push_back("-fno-math-errno");
+          }
+          cmd2.insert(cmd2.end(), {final2, "-o", out, "-lm", "-lpthread"});
+          if (runCmd(cmd2, ChildStderr::MergeToStdout) == 0) {
             fprintf(stderr, "evo: tuning baked into %s (reproduce with: "
                             "FRT_THREADS=%d FRT_AFFINITY=%d FRT_CHUNK=%ld "
                             "FRT_SERIAL_CUTOFF=%ld%s)\n",
@@ -1492,16 +1632,15 @@ int main(int argc, char** argv) {
     return o.find('/') == std::string::npos ? "./" + o : o;
   };
   if (g_opts.report) {
-    std::string cmd = "FRT_TIMING=1 " + runPath(out);
-    runCmd(cmd);
+    runCmd({runPath(out)}, ChildStderr::Inherit, {{"FRT_TIMING", "1"}});
     mergeAndPrintReport(prog, finalLl, out);
   }
-  if (g_opts.run) runCmd(runPath(out));
+  if (g_opts.run) runCmd({runPath(out)});
   // Phase 4 (§10.3): `penstock test` executes the harness and mirrors its
-  // exit code (0 = all tests passed, 1 = at least one failure)
+  // exit code (0 = all tests passed, 1 = at least one failure).
   if (g_opts.testMode) {
     fflush(stdout);
-    return runCmd(runPath(out));
+    return runCmd({runPath(out)});
   }
 
   if (!g_opts.keepIr) { unlink(finalLl.c_str()); unlink(userLl.c_str()); }

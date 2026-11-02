@@ -60,6 +60,23 @@ run_okf() {
   else bad "$name (compile failed)"; sed -n '1,3p' "$TMP/err"; fi
 }
 
+echo "== driver process safety =="
+# Output paths are passed as one argv element. Shell metacharacters in a path
+# must remain literal and must never execute a second command.
+safe_marker="$TMP/penstock-shell-injection-marker"
+safe_output="$TMP/program; touch $safe_marker; #"
+if "$PEN" -O0 --no-superopt --no-precompute tests/pos_basics.fsh \
+    -o "$safe_output" 2>"$TMP/shell-safe.err"; then
+  if [ -x "$safe_output" ] && [ ! -e "$safe_marker" ]; then
+    ok "shell metacharacters in output path are passed literally"
+  else
+    bad "shell metacharacters in output path were not inert"
+  fi
+else
+  bad "compiler accepts output paths containing shell metacharacters"
+  sed -n '1,5p' "$TMP/shell-safe.err"
+fi
+
 echo "== R1 regression =="
 run_ok "hello/basics" tests/pos_basics.fsh "10.00|hi"
 run_ok "for-range" tests/pos_range.fsh "10"
