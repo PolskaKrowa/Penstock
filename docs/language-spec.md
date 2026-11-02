@@ -837,9 +837,11 @@ pressure, code size and non-AVX2 targets (audit §5).
 Two opt-ins exist:
 
 - `@vectorize for (...)` / `@vectorize parfor (...)` — a per-loop
-  request.  Emits a plain `vectorize.enable` hint **without** an
+  request. Emits a plain `vectorize.enable` hint **without** an
   interleave count, so the width/unroll choice stays with the cost
-  model.  Fusion propagates the hint to the fused loop.
+  model. Fusion propagates the hint to the fused loop. The emitted LLVM
+  LoopID is self-referential, and the enable hint is represented by its
+  name string alone (without a legacy `i1 true` operand).
 - `--force-vectorize` — restores the historical blanket hint
   (`vectorize.enable` + `interleave.count 4`) for differential
   benchmarking against the old behaviour.

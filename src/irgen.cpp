@@ -304,13 +304,21 @@ int IrGen::attrGroupFor(FnDecl* f) {
 // Returns -1 when no metadata should be attached.
 int IrGen::vectorizeLoopMeta(bool userHint) {
   if (!userHint && !g_opts.forceVectorize) return -1;
-  if (userHint && !g_opts.forceVectorize)
-    loopMetas.push_back("distinct !{!{!\"llvm.loop.vectorize.enable\", i1 true}}");
-  else
-    loopMetas.push_back(
-        "distinct !{!{!\"llvm.loop.vectorize.enable\", i1 true}, "
-        "!{!\"llvm.loop.interleave.count\", i32 4}}");
-  return 200 + (int)loopMetas.size() - 1;
+
+  // LLVM loop metadata is a self-referential LoopID node.  The loop hint
+  // itself is a child metadata node.  Current LLVM requires the
+  // vectorize.enable hint to contain ONLY its name string (the historical
+  // `i1 true` operand is rejected by the verifier with "Expecting only the
+  // metadata name").  A no-argument enable hint is also understood by older
+  // LoopVectorize implementations, so this form works across LLVM versions.
+  const int id = 200 + static_cast<int>(loopMetas.size());
+  std::string metadata = "distinct !{!" + std::to_string(id) +
+                        ", !{!\"llvm.loop.vectorize.enable\"}";
+  if (!userHint || g_opts.forceVectorize)
+    metadata += ", !{!\"llvm.loop.interleave.count\", i32 4}";
+  metadata += "}";
+  loopMetas.push_back(metadata);
+  return id;
 }
 
 // ---------------------------------------------------------------- driver

@@ -451,6 +451,14 @@ n_ilv=$(grep -c "interleave.count" "$TMP/va.ll")
 if [ "$n_annot" = "1" ] && [ "$n_ilv" = "0" ]; then
   ok "§5 @vectorize annotation: 1 annotated loop, no interleave count"
 else bad "§5 @vectorize IR (annotated=$n_annot interleave=$n_ilv, want 1/0)"; fi
+# LoopIDs must be self-referential, and the current vectorize.enable hint
+# takes its name string only (no legacy i1 true operand).
+if grep -Eq '^![0-9]+ = distinct !\{![0-9]+, !\{!"llvm.loop.vectorize.enable"\}\}$' "$TMP/va.ll" &&
+   ! grep -q 'llvm.loop.vectorize.enable", i1' "$TMP/va.ll"; then
+  ok "§5 @vectorize metadata uses a valid LoopID and enable hint"
+else
+  bad "§5 @vectorize metadata shape is invalid"
+fi
 # Preserve compiler stderr: this path runs both finite-domain rewriting and
 # embedded Alive2/Freshet superoptimisation at the default -O3. Hiding stderr
 # made native aborts appear only as an unhelpful shell "Aborted" line.
@@ -480,6 +488,9 @@ $PEN -S --force-vectorize "$TMP/fv.fsh" -o "$TMP/fv.ll" 2>/dev/null
 if grep -q "interleave.count" "$TMP/fv.ll"; then
   ok "§5 --force-vectorize restores the historical hint"
 else bad "§5 --force-vectorize hint missing"; fi
+if grep -Eq '^![0-9]+ = distinct !\{![0-9]+, !\{!"llvm.loop.vectorize.enable"\}, !\{!"llvm.loop.interleave.count", i32 4\}\}$' "$TMP/fv.ll"; then
+  ok "§5 --force-vectorize metadata uses a valid self-referential LoopID"
+else bad "§5 --force-vectorize LoopID metadata shape is invalid"; fi
 
 # custom PGO counters are thread-safe atomics (§11.1)
 $PEN -S --profile tests/pos_parfor.fsh -o "$TMP/pg.ll" 2>/dev/null
