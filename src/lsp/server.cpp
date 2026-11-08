@@ -392,28 +392,36 @@ void publishDiagnostics(Workspace& ws, const std::string& uri) {
 }
 
 Json serverCapabilities() {
-  // Advertise only what we actually implement.  Clients are required to
-  // honour capability negotiation — advertising a feature we don't have
-  // would cause the editor to send requests we can't satisfy.
+  // Advertise only features implemented by this server.  LSP 3.17 uses
+  // UTF-16 code units by default; state that explicitly because editor
+  // clients (including vscode-languageclient) inspect this field.
   return Json::object({
+    {"positionEncoding", Json::str("utf-16")},
     {"textDocumentSync", Json::num(1)},  // 1 = Full text sync
     {"hoverProvider",   Json::boolean(true)},
     {"documentSymbolProvider", Json::boolean(true)},
     {"definitionProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"referencesProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"renameProvider",         Json::boolean(true)},   // Phase 4 (§10.1)
-    // Completions, code actions, inlay hints and semantic tokens are not
-    // implemented yet.  Do not advertise placeholders: LSP clients may
-    // otherwise issue requests that this server cannot answer.
-    {"serverInfo", Json::object({
-      {"name",    Json::str("freshet-language-server")},
-      {"version", Json::str(FRESHET_VERSION)},
-    })},
+    // Completion, code actions, inlay hints and semantic tokens are not
+    // implemented yet.  Do not advertise placeholders for them.
   });
 }
 
 void handleInitialize(Workspace& ws, int id, const Json&) {
-  sendResponse(id, serverCapabilities());
+  (void)ws;
+  // LSP InitializeResult is an envelope: capabilities must be nested under
+  // `capabilities`, while serverInfo is a sibling at the top level.  Returning
+  // ServerCapabilities directly makes clients read an undefined
+  // result.capabilities and fail during initialisation.
+  Json result = Json::object({
+    {"capabilities", serverCapabilities()},
+    {"serverInfo", Json::object({
+      {"name", Json::str("freshet-language-server")},
+      {"version", Json::str(FRESHET_VERSION)},
+    })},
+  });
+  sendResponse(id, result);
 }
 void handleInitialized(Workspace& ws, const Json&) {
   (void)ws;  // nothing to do; documents will arrive via didOpen

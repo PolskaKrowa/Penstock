@@ -39,7 +39,16 @@ uri = "file:///tmp/lsp_nav_check.fsh"
 
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
       "params": {"capabilities": {}}})
-recv()
+init = recv()
+assert init and init.get("id") == 1, "missing initialize response"
+init_result = init.get("result") or {}
+init_capabilities = init_result.get("capabilities") or {}
+assert init_capabilities.get("textDocumentSync") == 1, \
+    "InitializeResult.capabilities missing or malformed"
+assert init_capabilities.get("positionEncoding") == "utf-16", \
+    "server must explicitly advertise the UTF-16 positions it uses"
+assert init_result.get("serverInfo", {}).get("name") == \
+    "freshet-language-server", "serverInfo must be at InitializeResult root"
 send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": uri, "languageId": "freshet",
