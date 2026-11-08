@@ -402,10 +402,9 @@ Json serverCapabilities() {
     {"definitionProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"referencesProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"renameProvider",         Json::boolean(true)},   // Phase 4 (§10.1)
-    {"completionProvider",     Json::object({{"triggerCharacters", Json::array({Json::str("."), Json::str(":")})}})},
-    {"codeActionProvider",     Json::boolean(false)},  // planned
-    {"inlayHintProvider",       Json::boolean(false)},  // planned
-    {"semanticTokensProvider",  Json::object({{"legend", Json::object({{"tokenTypes", Json::array({})}, {"tokenModifiers", Json::array({})}})}})},
+    // Completions, code actions, inlay hints and semantic tokens are not
+    // implemented yet.  Do not advertise placeholders: LSP clients may
+    // otherwise issue requests that this server cannot answer.
     {"serverInfo", Json::object({
       {"name",    Json::str("freshet-language-server")},
       {"version", Json::str(FRESHET_VERSION)},

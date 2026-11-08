@@ -1,0 +1,167 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Freshet",
+  "scopeName": "source.freshet",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#preprocessor" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#attributes" },
+    { "include": "#declarations" },
+    { "include": "#types" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.freshet",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.freshet",
+          "begin": "/\\*",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.freshet" } },
+          "end": "\\*/",
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.end.freshet" } }
+        }
+      ]
+    },
+    "preprocessor": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.freshet",
+          "begin": "^\\s*(#)\\s*(include|define|undef|ifdef|ifndef|else|endif|link|pragma)\\b",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.directive.freshet" },
+            "2": { "name": "keyword.control.directive.freshet" }
+          },
+          "end": "$",
+          "patterns": [
+            { "include": "#strings" },
+            { "include": "#comments" },
+            { "name": "variable.other.preprocessor.freshet", "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b" }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.freshet",
+          "begin": "\"",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.freshet" } },
+          "end": "\"",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.freshet" } },
+          "patterns": [
+            { "name": "constant.character.escape.freshet", "match": "\\\\(?:[\\\\\"nt0]|.)" }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.integer.hexadecimal.freshet",
+          "match": "\\b0[xX][0-9A-Fa-f]+(?:u8|u16|u32|u64|usize|i8|i16|i32|i64)?\\b"
+        },
+        {
+          "name": "constant.numeric.floating.freshet",
+          "match": "\\b(?:[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)(?:f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.freshet",
+          "match": "\\b[0-9]+(?:u8|u16|u32|u64|usize|i8|i16|i32|i64|f32|f64)?\\b"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "entity.other.attribute-name.freshet",
+          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.function.freshet",
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.freshet" },
+            "2": { "name": "entity.name.function.freshet" }
+          }
+        },
+        {
+          "name": "meta.type.freshet",
+          "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.freshet" },
+            "2": { "name": "entity.name.type.freshet" }
+          }
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.freshet",
+          "match": "\\b(?:u8|u16|u32|u64|usize|i8|i16|i32|i64|f32|f64|bool|void|str|Span)\\b"
+        },
+        {
+          "name": "storage.type.container.freshet",
+          "match": "\\b(?:Option|Result|String)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.freshet",
+          "match": "\\b(?:if|else|while|for|parfor|in|break|continue|match|return|defer|give|unsafe)\\b"
+        },
+        {
+          "name": "storage.type.freshet",
+          "match": "\\b(?:fn|let|mut|struct|enum|module|import|pub|extern|export|owned|borrowed)\\b"
+        },
+        {
+          "name": "keyword.other.freshet",
+          "match": "\\b(?:as|by|step|reduction|threads|chunk|affinity|collapse|close|spread|align|soa|sizeof|alignof)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.freshet",
+          "match": "\\b(?:true|false|nil)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.freshet",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.freshet",
+          "match": "\\.\\.|->|=>|::|==|!=|<=|>=|&&|\\|\\||\\+=|-=|\\*=|/=|%=|<<=|>>=|<<|>>|&=|\\|=|\\^=|[+*/%<>=!&|^~?:-]"
+        },
+        {
+          "name": "punctuation.separator.freshet",
+          "match": "[{}()\\[\\],;.]"
+        }
+      ]
+    }
+  }
+}

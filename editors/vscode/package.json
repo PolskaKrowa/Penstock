@@ -1,0 +1,85 @@
+{
+  "name": "freshet-language-support",
+  "displayName": "Freshet Language Support",
+  "description": "Syntax highlighting and language-server support for the Freshet language and Penstock compiler.",
+  "version": "0.1.0",
+  "publisher": "penstock-project",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "freshet",
+    "penstock",
+    "language server",
+    "syntax highlighting"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:freshet"
+  ],
+  "extensionDependencies": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "freshet",
+        "aliases": [
+          "Freshet",
+          "freshet"
+        ],
+        "extensions": [
+          ".fsh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "freshet",
+        "scopeName": "source.freshet",
+        "path": "./syntaxes/freshet.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "freshet.restartLanguageServer",
+        "title": "Freshet: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "Freshet",
+      "properties": {
+        "freshet.server.path": {
+          "type": "string",
+          "default": "freshet-language-server",
+          "description": "Path or command name of the Penstock Freshet language-server executable."
+        },
+        "freshet.server.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments passed to freshet-language-server."
+        },
+        "freshet.server.env": {
+          "type": "object",
+          "default": {},
+          "description": "Extra environment variables passed to the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.26.1"
+  }
+}

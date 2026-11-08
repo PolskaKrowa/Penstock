@@ -33,6 +33,9 @@ penstock [options] input.fsh [more.fsh ...]
 - **Tooling.** `penstock build/test/fmt/lint/run` subcommands and a
   `freshet-language-server` speaking LSP 3.18 over stdio (hover,
   documentSymbol, goto-definition, find-references, rename).
+- **Editor support.** VS Code and Vim integrations are provided under
+  [`editors/`](editors/README.md), with syntax highlighting and optional
+  LSP-backed diagnostics/navigation.
 
 ## Quick start
 
