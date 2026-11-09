@@ -40,7 +40,7 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
       diag(Diag::Error, Code::Thread,
            "I/O call '" + n + "' inside parfor — serialize the loop or move "
            "the call out; parfor bodies must be pure",
-           x->loc.file, x->loc.line, x->loc.col, "call=" + n);
+           x->loc, "call=" + n);
       impure = true;
       return;
     }
@@ -48,7 +48,7 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
       diag(Diag::Error, Code::Thread,
            "allocation call '" + n + "' inside parfor — allocator contention "
            "and non-deterministic layout; pre-allocate before the loop",
-           x->loc.file, x->loc.line, x->loc.col, "call=" + n);
+           x->loc, "call=" + n);
       impure = true;
       return;
     }
@@ -64,7 +64,7 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
         diag(Diag::Error, Code::Thread,
              "call to impure function '" + n + "' inside parfor — mark it "
              "@pure (only if truly pure) or hoist it out",
-             x->loc.file, x->loc.line, x->loc.col, "call=" + n);
+             x->loc, "call=" + n);
         impure = true;
       }
       return;
@@ -77,7 +77,7 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
            "indirect call through a function pointer inside parfor — the "
            "callee is not provably pure; hoist the call out or call a "
            "known @pure function",
-           x->loc.file, x->loc.line, x->loc.col, "call=" + n);
+           x->loc, "call=" + n);
       impure = true;
     }
   });
@@ -143,7 +143,7 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
         diag(Diag::Warning, Code::RedAddInit,
              "reduction(+" + c.var + ") should be initialized to 0 for "
              "deterministic parallel semantics",
-             c.loc.file, c.loc.line, c.loc.col);
+             c.loc);
     }
     if (c.redOp == "*") {
       bool foundOne = false;
@@ -157,7 +157,7 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
       if (!foundOne)
         diag(Diag::Error, Code::RedMulInit,
              "reduction(*" + c.var + ") must be initialized to 1",
-             c.loc.file, c.loc.line, c.loc.col);
+             c.loc);
     }
   }
 
@@ -223,7 +223,7 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
                "write to captured variable '" + t->name + "' inside parfor — "
                "concurrent iterations race; make it a reduction, or copy to a "
                "loop-local, or declare the var inside the parfor",
-               s->loc.file, s->loc.line, s->loc.col, "var=" + t->name);
+               s->loc, "var=" + t->name);
         }
       }
     }
@@ -280,14 +280,14 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
            "nested parfor (lines " + std::to_string(pf->loc.line) + "," +
            std::to_string(in->loc.line) + ") is rectangular — compiler "
            "collapses the iteration spaces into one parallel region",
-           in->loc.file, in->loc.line, in->loc.col);
+           in->loc);
     } else {
       // work-stealing path: inner tasks pushed to the global pool
       diag(Diag::Note, Code::NestedWs,
            "nested parfor (lines " + std::to_string(pf->loc.line) + "," +
            std::to_string(in->loc.line) + ") has dynamic bounds/reductions — "
            "inner chunks become stealable tasks in the global pool",
-           in->loc.file, in->loc.line, in->loc.col);
+           in->loc);
     }
   }
 }

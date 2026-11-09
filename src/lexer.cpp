@@ -118,9 +118,22 @@ int lexFile(const std::string& path, const std::string& src,
       }
     }
     if (c == '/' && p + 1 < end && p[1] == '*') {
+      // Block comments may contain nested block comments.  Tracking depth
+      // ensures that code-like text (including casts) remains comment text
+      // until the matching outer */ is reached.
       adv(2);
-      while (p < end && !(p[0] == '*' && p + 1 < end && p[1] == '/')) adv();
-      if (p < end) adv(2);
+      unsigned depth = 1;
+      while (p < end && depth) {
+        if (p + 1 < end && p[0] == '/' && p[1] == '*') {
+          ++depth;
+          adv(2);
+        } else if (p + 1 < end && p[0] == '*' && p[1] == '/') {
+          --depth;
+          adv(2);
+        } else {
+          adv();
+        }
+      }
       continue;
     }
 
@@ -229,8 +242,16 @@ int lexFile(const std::string& path, const std::string& src,
       }
     }
     if (!matched) {
+      SrcLoc badLoc;
+      badLoc.file = curFile;
+      badLoc.line = line;
+      badLoc.col = col;
+      badLoc.startOffset = (uint64_t)(p - base);
+      badLoc.endOffset = badLoc.startOffset + 1;
+      badLoc.endLine = line;
+      badLoc.endCol = col + 1;
       diag(Diag::Error, Code::Lex, std::string("unexpected character '") + c + "'",
-           path, line, col);
+           badLoc);
       adv();
     }
   }

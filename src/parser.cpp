@@ -16,6 +16,18 @@ struct Parser {
   Token& cur() { return toks[pos]; }
   Token& peek(int n = 1) { return toks[std::min(pos + n, toks.size() - 1)]; }
   Token advance() { return toks[pos < toks.size() - 1 ? pos++ : pos]; }
+
+  // Extend a node's source range through the last consumed token.  All
+  // ranges are half-open (end position is one past the final token), just
+  // like the lexer and LSP.
+  SrcLoc throughLastConsumed(SrcLoc start) const {
+    if (pos == 0 || toks.empty()) return start;
+    const SrcLoc& end = toks[std::min(pos - 1, toks.size() - 1)].loc;
+    start.endOffset = end.endOffset;
+    start.endLine = end.endLine > 0 ? end.endLine : end.line;
+    start.endCol = end.endCol > 0 ? end.endCol : end.col + 1;
+    return start;
+  }
   bool at(const char* s) {
     return (cur().kind == Token::PUNCT || cur().kind == Token::KW) && cur().text == s;
   }
@@ -26,7 +38,7 @@ struct Parser {
       diag(Diag::Error, Code::Parse,
            std::string("expected '") + s + "' (" + what + "), got '" +
            (cur().kind == Token::EOFTOK ? "<eof>" : cur().text) + "'",
-           file, cur().loc.line, cur().loc.col);
+           cur().loc);
     }
   }
   std::string expectIdent(const char* what) {
@@ -187,7 +199,7 @@ struct Parser {
       if (cur().kind != Token::INT) {
         diag(Diag::Error, Code::Parse,
              "array length must be an integer literal, got '" + cur().text + "'",
-             file, cur().loc.line, cur().loc.col);
+             cur().loc);
         advance();
         return {Type::arrayOf(ty, 0), "arr:0:" + nm};
       }
@@ -196,7 +208,7 @@ struct Parser {
       expect("]", "array type");
       if (n == 0) {
         diag(Diag::Error, Code::Parse, "array length must be at least 1",
-             file, l.line, l.col);
+             l);
       }
       return {Type::arrayOf(ty, n), nm.empty() ? "" : "arr:" + std::to_string(n) + ":" + nm};
     }
@@ -255,7 +267,7 @@ struct Parser {
       return {Type::structOf(nullptr), name};
     }
     diag(Diag::Error, Code::Parse, "expected type, got '" + cur().text + "'",
-         file, l.line, l.col);
+         l);
     advance();
     return {Type::simple(Type::VOID), ""};
   }
@@ -274,13 +286,14 @@ struct Parser {
       auto it = prec.find(cur().text);
       if (it == prec.end() || it->second < minPrec) break;
       std::string op = cur().text;
-      SrcLoc l = cur().loc;
+      SrcLoc l = lhs ? lhs->loc : cur().loc;
       advance();
       Expr* rhs = parseExpr(it->second + 1);
       Expr* b = new Expr(Expr::BIN, l);
       b->op = op; b->lhs = lhs; b->rhs = rhs;
       lhs = b;
     }
+    if (lhs) lhs->loc = throughLastConsumed(lhs->loc);
     return lhs;
   }
 
@@ -309,7 +322,7 @@ struct Parser {
     Expr* e = parsePrimary();
     while (true) {
       if (at("[")) {
-        SrcLoc l = cur().loc;
+        SrcLoc l = e ? e->loc : cur().loc;
         advance();
         Expr* idx = parseExpr();
         // Phase 1c (report §4.1): base[lo..hi] — a borrowed view
@@ -328,7 +341,7 @@ struct Parser {
         ix->base = e; ix->rhs = idx;
         e = ix;
       } else if (at(".")) {
-        SrcLoc l = cur().loc;
+        SrcLoc l = e ? e->loc : cur().loc;
         advance();
         std::string f = expectIdent("field");
         // dotted call: freshet.time_ns(...) etc.
@@ -353,7 +366,8 @@ struct Parser {
         e = fld;
       } else if (at("as")) {
         // cast postfix: expr as T (works after any expression)
-        SrcLoc l = cur().loc;
+        // Highlight the complete cast expression, not only the `as` token.
+        SrcLoc l = e ? e->loc : cur().loc;
         advance();
         auto [ty, nm] = parseTypeNamed();
         Expr* c = new Expr(Expr::CAST, l);
@@ -362,7 +376,7 @@ struct Parser {
       } else if (at("?")) {
         // Phase 2c (report §4.6): expr? — Option/Result error
         // propagation (early-return on None/Err)
-        SrcLoc l = cur().loc;
+        SrcLoc l = e ? e->loc : cur().loc;
         advance();
         Expr* q = new Expr(Expr::TRYQ, l);
         q->base = e;
@@ -526,9 +540,11 @@ struct Parser {
       }
       case Token::PUNCT: {
         if (at("(")) {
+          SrcLoc parenLoc = l;
           advance();
           Expr* e = parseExpr();
           expect(")", "paren");
+          if (e) e->loc = throughLastConsumed(parenLoc);
           return e;
         }
         // Phase 1b (report §4.1): array literal [a, b, c]
@@ -552,7 +568,7 @@ struct Parser {
       default: break;
     }
     diag(Diag::Error, Code::Parse,
-         "expected expression, got '" + cur().text + "'", file, l.line, l.col);
+         "expected expression, got '" + cur().text + "'", l);
     advance();
     return new Expr(Expr::INT, l);
   }
@@ -569,6 +585,7 @@ struct Parser {
       if (s) b->stmts.push_back(s);
     }
     expect("}", "block");
+    b->loc = throughLastConsumed(l);
     return b;
   }
 
@@ -599,18 +616,19 @@ struct Parser {
         reproducibleHint = true;
       } else {
         diag(Diag::Warning, Code::Attr, "unknown statement attribute @" + attr,
-             file, l.line, l.col);
+             l);
       }
     }
     Stmt* s = parseStmtInner(fn, parent);
     if (s) {
+      s->loc = throughLastConsumed(l);
       s->vectorizeHint = vectorizeHint;
       if (reproducibleHint) {
         if (s->k == Stmt::PARFOR) s->reproducible = true;
         else
           diag(Diag::Warning, Code::Attr,
                "@reproducible only applies to parfor with reduction clauses",
-               file, l.line, l.col);
+               l);
       }
     }
     return s;
@@ -791,8 +809,7 @@ struct Parser {
         s->fn = fn; s->parent = parent;
         s->pvar = expectIdent("parfor var");
         if (!accept("in")) {
-          diag(Diag::Error, Code::Parse, "parfor requires 'in'", file,
-               cur().loc.line, cur().loc.col);
+          diag(Diag::Error, Code::Parse, "parfor requires 'in'", cur().loc);
         }
         s->plo = parseExpr();
         if (!accept("..")) expect("..", "parfor range");
@@ -804,7 +821,7 @@ struct Parser {
                 step->rhs->k == Expr::INT && step->rhs->ival == 1)) {
             diag(Diag::Error, Code::Parfor,
                  "parfor supports only unit step (by -1 for descending)",
-                 file, l.line, l.col);
+                 l);
           } else {
             s->pDescending = true;
           }
@@ -849,7 +866,7 @@ struct Parser {
               if (cur().kind == Token::INT) { c.ival = (int)cur().ival; advance(); }
             } else {
               diag(Diag::Error, Code::Parfor, "unknown parfor clause: " + cname,
-                   file, c.loc.line, c.loc.col);
+                   c.loc);
             }
             s->clauses.push_back(c);
             if (!accept(",")) break;
@@ -902,12 +919,12 @@ struct Parser {
           diag(Diag::Error, Code::Mod,
                "duplicate module declaration (already '" + p->moduleName +
                "')",
-               file, l.line, l.col);
+               l);
         } else if (!p->fns.empty() || !p->structs.empty() ||
                    !p->enums.empty() || !p->globals.empty()) {
           diag(Diag::Error, Code::Mod,
                "module declaration must come before every other declaration",
-               file, l.line, l.col);
+               l);
         } else {
           p->moduleName = name;
         }
@@ -973,10 +990,11 @@ struct Parser {
           if (at("}")) break;   // trailing comma
         }
         expect("}", "enum body");
+        ed->loc = throughLastConsumed(l);
         if (ed->variants.empty()) {
           diag(Diag::Error, Code::Parse, "enum " + ed->name +
                " must declare at least one variant",
-               file, l.line, l.col);
+               l);
         }
         ed->id = (int)p->enums.size();
         p->enums.push_back(ed);
@@ -1018,6 +1036,7 @@ struct Parser {
           if (at("}")) break;   // trailing comma
         }
         expect("}", "struct body");
+        sd->loc = throughLastConsumed(l);
         sd->id = (int)p->structs.size();
         p->structs.push_back(sd);
         continue;
@@ -1066,7 +1085,7 @@ struct Parser {
           preAliasPairs.push_back({a, b});
         } else {
           diag(Diag::Warning, Code::Attr, "unknown attribute @" + attr,
-               file, l.line, l.col);
+               l);
         }
       }
       if (at("fn")) {
@@ -1155,7 +1174,7 @@ struct Parser {
             f->aliasPairs.push_back({a, b});
           } else {
             diag(Diag::Warning, Code::Attr, "unknown attribute @" + attr,
-                 file, l.line, l.col);
+                 l);
           }
         }
         // @inline + @noinline is contradictory (LLVM resolves it as
@@ -1164,7 +1183,7 @@ struct Parser {
           diag(Diag::Warning, Code::Attr,
                "function " + f->name + " has both @inline and @noinline — "
                "@noinline takes precedence",
-               file, l.line, l.col);
+               l);
         }
         if (imported) {
           expect(";", "extern function declaration");
@@ -1172,6 +1191,7 @@ struct Parser {
         } else {
           f->body = parseBlock(f, nullptr);
         }
+        f->loc = throughLastConsumed(l);
         f->id = (int)p->fns.size();
         p->fns.push_back(f);
         continue;
@@ -1192,12 +1212,13 @@ struct Parser {
         expect("=", "global init");
         g->init = parseExpr();
         expect(";", "global");
+        g->loc = throughLastConsumed(l);
         p->globals.push_back(g);
         continue;
       }
       diag(Diag::Error, Code::Parse,
            "expected fn/struct/let at toplevel, got '" + cur().text + "'",
-           file, cur().loc.line, cur().loc.col);
+           cur().loc);
       advance();
     }
   }

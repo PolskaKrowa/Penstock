@@ -429,7 +429,7 @@ int runParforAdvisorPass(Program* p) {
                  "are disjoint injective index functions, every same-root "
                  "read is same-iteration, and the body has no observable "
                  "effects — consider `parfor`",
-                 s->loc.file, s->loc.line, s->loc.col,
+                 s->loc,
                  "kind=parallel-safe,fn=" + fn->name);
           } else {
             // accumulate-into-scalar shape: reduction candidate
@@ -446,7 +446,7 @@ int runParforAdvisorPass(Program* p) {
                    "preserves the arithmetic when the operator is "
                    "associative (floating-point reassociation stays an "
                    "explicit language mode)",
-                   s->loc.file, s->loc.line, s->loc.col,
+                   s->loc,
                    "kind=reduction-candidate,fn=" + fn->name);
             }
           }

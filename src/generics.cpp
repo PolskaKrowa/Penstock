@@ -133,14 +133,14 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       diag(Diag::Error, Code::Import,
            "module '" + mod + "' is not imported here — cannot use " +
            mod + "::" + item,
-           loc.file, loc.line, loc.col);
+           loc);
       return false;
     }
     if (!isPub && mod != currentLookupModule()) {
       diag(Diag::Error, Code::Import,
            "type '" + item + "' is private to module '" + mod +
            "' — mark it `pub struct'/`pub enum'",
-           loc.file, loc.line, loc.col);
+           loc);
       return false;
     }
     return true;
@@ -242,7 +242,7 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
     }
     diag(Diag::Error, Code::Type,
          "module '" + mod + "' has no type named '" + item + "'",
-         loc.file, loc.line, loc.col);
+         loc);
     return Type::simple(Type::VOID);
   }
   if (enc.compare(pos, 4, "soa:") == 0) {
@@ -251,7 +251,7 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
     StructDef* sd = findStructDef(sn);
     if (!sd) {
       diag(Diag::Error, Code::Type, "unknown struct in soa(): " + sn,
-           loc.file, loc.line, loc.col);
+           loc);
       return Type::simple(Type::VOID);
     }
     return Type::soaOf(sd);
@@ -337,13 +337,13 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
         if (!moduleVisibleFrom(qualMod)) {
           diag(Diag::Error, Code::Import,
                "module '" + qualMod + "' is not imported here — cannot use " +
-               name, loc.file, loc.line, loc.col);
+               name, loc);
           return Type::simple(Type::VOID);
         }
         if (!tmpl->isPub && qualMod != currentLookupModule()) {
           diag(Diag::Error, Code::Import,
                "type '" + lookupName + "' is private to module '" + qualMod +
-               "' — mark it `pub struct'", loc.file, loc.line, loc.col);
+               "' — mark it `pub struct'", loc);
           return Type::simple(Type::VOID);
         }
       }
@@ -354,14 +354,14 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
              "generic struct " + name + " expects " +
              std::to_string(tmpl->tparams.size()) + " type arguments, got " +
              std::to_string(args.size()),
-             loc.file, loc.line, loc.col);
+             loc);
         return Type::simple(Type::VOID);
       }
       for (Type* a : args)
         if (!a) {
           diag(Diag::Error, Code::Generic,
                "unresolved type argument in " + name + "<...>",
-               loc.file, loc.line, loc.col);
+               loc);
           return Type::simple(Type::VOID);
         }
       return Type::structOf(instantiateStruct(prog, tmpl, args, loc));
@@ -374,13 +374,13 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       if (!moduleVisibleFrom(qualMod)) {
         diag(Diag::Error, Code::Import,
              "module '" + qualMod + "' is not imported here — cannot use " +
-             name, loc.file, loc.line, loc.col);
+             name, loc);
         return Type::simple(Type::VOID);
       }
       if (!et->isPub && qualMod != currentLookupModule()) {
         diag(Diag::Error, Code::Import,
              "type '" + lookupName + "' is private to module '" + qualMod +
-             "' — mark it `pub enum'", loc.file, loc.line, loc.col);
+             "' — mark it `pub enum'", loc);
         return Type::simple(Type::VOID);
       }
     }
@@ -390,14 +390,14 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
              "generic enum " + name + " expects " +
              std::to_string(et->tparams.size()) + " type arguments, got " +
              std::to_string(args.size()),
-             loc.file, loc.line, loc.col);
+             loc);
         return Type::simple(Type::VOID);
       }
       for (Type* a : args)
         if (!a) {
           diag(Diag::Error, Code::Generic,
                "unresolved type argument in " + name + "<...>",
-               loc.file, loc.line, loc.col);
+               loc);
           return Type::simple(Type::VOID);
         }
       return Type::enumOf(instantiateEnum(prog, et, args, loc));
@@ -405,10 +405,10 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
     if (tmpl || et) {
       diag(Diag::Error, Code::Generic,
            "type " + name + " is not generic; drop the <...> arguments",
-           loc.file, loc.line, loc.col);
+           loc);
     } else {
       diag(Diag::Error, Code::Type, "unknown type name: " + name,
-           loc.file, loc.line, loc.col);
+           loc);
     }
     return Type::simple(Type::VOID);
   }
@@ -441,7 +441,7 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
   ensurePreludeEnum(name);
   if (EnumDef* ed = findEnumDef(name)) return Type::enumOf(ed);
   diag(Diag::Error, Code::Type, "unknown type name: " + name,
-       loc.file, loc.line, loc.col);
+       loc);
   return Type::simple(Type::VOID);
 }
 
@@ -522,7 +522,7 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
     if (!a) {
       diag(Diag::Error, Code::Generic,
            "unresolved type argument for struct " + tmpl->name,
-           loc.file, loc.line, loc.col);
+           loc);
       return tmpl;
     }
   std::string mangled = tmpl->name;
@@ -680,7 +680,7 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
          "function " + tmpl->name + " expects " +
          std::to_string(tmpl->params.size()) + " args, got " +
          std::to_string(argTypes.size()),
-         loc.file, loc.line, loc.col);
+         loc);
     return nullptr;
   }
   // 1. infer template parameter types from the arguments
@@ -704,14 +704,14 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
       diag(Diag::Error, Code::Generic,
            "cannot infer type parameter " + tp + " of " + tmpl->name +
            " from the call arguments",
-           loc.file, loc.line, loc.col);
+           loc);
       return nullptr;
     }
     if (!typeSatisfiesConstraint(tmap[tp], cons)) {
       diag(Diag::Error, Code::Generic,
            "type argument " + typeToString(tmap[tp]) + " for " + tp +
            " does not satisfy constraint " + cons + " (fn " + tmpl->name + ")",
-           loc.file, loc.line, loc.col);
+           loc);
       return nullptr;
     }
   }

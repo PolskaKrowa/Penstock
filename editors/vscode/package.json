@@ -2,7 +2,7 @@
   "name": "freshet-language-support",
   "displayName": "Freshet Language Support",
   "description": "Syntax highlighting and language-server support for the Freshet language and Penstock compiler.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "penstock-project",
   "license": "MIT",
   "engines": {

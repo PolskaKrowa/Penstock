@@ -105,7 +105,7 @@ static void checkArith(FnDecl* fn, Expr* e) {
     uint64_t d = divisor->ival;
     if (d == 0) {
       diag(Diag::Error, Code::ArithDivZero, "division by zero",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return;
     }
     if ((d & (d - 1)) != 0) {
@@ -116,7 +116,7 @@ static void checkArith(FnDecl* fn, Expr* e) {
            "multiply by the reciprocal constant yourself)"
            + std::string(perfStrict(fn) ? "" :
                          " (--strict-performance makes this an error)"),
-           e->loc.file, e->loc.line, e->loc.col,
+           e->loc,
            "divisor=" + std::to_string(d));
       return;
     }
@@ -127,7 +127,7 @@ static void checkArith(FnDecl* fn, Expr* e) {
          "not pipelined; hoist to a constant power-of-2, or restructure"
          + std::string(perfStrict(fn) ? "" :
                        " (--strict-performance makes this an error)"),
-         e->loc.file, e->loc.line, e->loc.col, "divisor=runtime");
+         e->loc, "divisor=runtime");
   }
 }
 
@@ -165,13 +165,13 @@ static void checkStrided(FnSema* fs, Expr* e) {
          "B per element — every touch burns a full cache line (" +
          std::string(eff < 0.15 ? "13%" : "25%") + " efficiency); unit-stride "
          "or blocked traversal recommended",
-         e->loc.file, e->loc.line, e->loc.col,
+         e->loc,
          "stride_bytes=" + std::to_string(bytes));
   } else {
     diag(Diag::Warning, Code::CacheStride,
          "strided access " + std::to_string(bytes) + "B/element (" +
          std::to_string((int)(eff * 100)) + "% line efficiency)",
-         e->loc.file, e->loc.line, e->loc.col,
+         e->loc,
          "stride_bytes=" + std::to_string(bytes));
   }
 }
@@ -218,7 +218,7 @@ static void reportStructLayouts(Program* p) {
              "B padding; declaring fields largest-first shrinks it to " +
              std::to_string(best) + "B (" +
              std::to_string(sd->size - best) + "B saved per element)",
-             sd->loc.file, sd->loc.line, sd->loc.col,
+             sd->loc,
              "struct=" + sd->name + ",size=" + std::to_string(sd->size) +
              ",optimal=" + std::to_string(best));
       }
@@ -303,7 +303,7 @@ static void checkSoaLoop(FnDecl* fn, Stmt* loop) {
            adv.rootVar + "' (" + std::to_string((int)(eff * 100)) +
            "% cache efficiency); declare it soa(" + adv.sdef->name +
            ") to store fields in separate planes",
-           loop->loc.file, loop->loc.line, loop->loc.col,
+           loop->loc,
            "var=" + adv.rootVar + ",struct=" + adv.sdef->name +
            ",needed=" + std::to_string(adv.bytesNeeded) +
            ",touched=" + std::to_string(adv.bytesTouched));
@@ -327,7 +327,7 @@ static void checkSoaLoop(FnDecl* fn, Stmt* loop) {
              std::to_string(sz) + ") straddles a 64-byte cache line — "
              "half of accesses touch two lines; declare struct " +
              adv.sdef->name + " align(64) or reorder fields",
-             loop->loc.file, loop->loc.line, loop->loc.col,
+             loop->loc,
              "struct=" + adv.sdef->name + ",field=" + f.name);
       }
     }
@@ -462,7 +462,7 @@ static void checkAlias(FnDecl* fn, Expr* e) {
              "either remove @alias from the declaration or change the "
              "callers.  The optimiser will NOT be told these args are "
              "noalias for this compilation unit.",
-             e->loc.file, e->loc.line, e->loc.col,
+             e->loc,
              "root=" + ni + ",declared=" + callee->params[i].name + "," +
              callee->params[j].name);
       } else {
@@ -474,7 +474,7 @@ static void checkAlias(FnDecl* fn, Expr* e) {
              callee->params[i].name + "," + callee->params[j].name +
              ") on the function AND ensure EVERY caller passes "
              "non-overlapping memory",
-             e->loc.file, e->loc.line, e->loc.col,
+             e->loc,
              "root=" + ni);
       }
     }
@@ -513,7 +513,7 @@ static void checkLoop(FnDecl* fn, FnSema* fs, Stmt* s) {
          "are lost; use a nested loop or manual blocking for other strides"
          + std::string(strict ? "" :
                        " (--strict-performance makes this an error)"),
-         s->loc.file, s->loc.line, s->loc.col);
+         s->loc);
   }
   // induction var must not be assigned inside body
   bool writesIv = false;
@@ -529,7 +529,7 @@ static void checkLoop(FnDecl* fn, FnSema* fs, Stmt* s) {
          Code::LoopIvWritten,
          "loop induction variable '" + s->ivar + "' modified in body — "
          "the loop still executes correctly, but cannot be vectorized",
-         s->loc.file, s->loc.line, s->loc.col);
+         s->loc);
   }
 }
 

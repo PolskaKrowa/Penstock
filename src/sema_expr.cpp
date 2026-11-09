@@ -4,6 +4,83 @@
 
 namespace freshet {
 
+static std::string numericKindDescription(Type* ty) {
+  if (ty->isFloat()) return "floating-point";
+  return ty->isSigned() ? "signed integer" : "unsigned integer";
+}
+
+static std::string integerValueRange(Type* ty) {
+  const int bits = ty->bits();
+  if (ty->isSigned()) {
+    if (bits >= 64) return "-9223372036854775808..9223372036854775807";
+    const long long limit = 1LL << (bits - 1);
+    return "-" + std::to_string(limit) + ".." + std::to_string(limit - 1);
+  }
+  if (bits >= 64) return "0..18446744073709551615";
+  const uint64_t max = (uint64_t(1) << bits) - 1;
+  return "0.." + std::to_string(max);
+}
+
+static std::string narrowingCastMessage(Type* from, Type* to) {
+  const std::string fromName = typeToString(from);
+  const std::string toName = typeToString(to);
+  const std::string fromDesc = fromName + " (" + std::to_string(from->bits()) +
+      "-bit " + numericKindDescription(from) + ")";
+  const std::string toDesc = toName + " (" + std::to_string(to->bits()) +
+      "-bit " + numericKindDescription(to) + ")";
+
+  if (from->isInt() && to->isInt()) {
+    const std::string range = integerValueRange(to);
+    std::string behaviour;
+    if (to->isSigned()) {
+      behaviour = "Values outside that range are truncated to the low " +
+          std::to_string(to->bits()) + " bits and may change sign.";
+    } else {
+      behaviour = "Values outside that range are truncated to the low " +
+          std::to_string(to->bits()) + " bits (equivalent to wrapping modulo " +
+          (to->bits() >= 64 ? std::string("2^64") :
+             std::to_string(uint64_t(1) << to->bits())) + ").";
+    }
+    if (from->isSigned() && !to->isSigned())
+      behaviour += " Negative source values also become large unsigned values.";
+    return "Narrowing cast from " + fromDesc + " to " + toDesc + ". " +
+        toName + " can represent " + range + ". " + behaviour +
+        " Check the value against this range before casting, or retain the " +
+        "wider type if truncation is not intentional.";
+  }
+
+  if (from->isFloat() && to->isInt()) {
+    return "Narrowing cast from " + fromDesc + " to " + toDesc + ". " +
+        toName + " can represent " + integerValueRange(to) +
+        "; the fractional part is discarded (truncated towards zero). " +
+        "A value outside the destination range has no valid integer result. " +
+        "Check the range before casting, and round explicitly if that is " +
+        "what you intend.";
+  }
+
+  if (from->isInt() && to->isFloat()) {
+    const std::string exactLimit = to->k == Type::F32
+        ? "16777216 (2^24)" : "9007199254740992 (2^53)";
+    return "Narrowing cast from " + fromDesc + " to " + toDesc +
+        " may round integer values because the destination cannot represent "
+        "every source integer exactly. " + toName + " represents every integer "
+        "exactly only up to " + exactLimit + "; larger values can lose low "
+        "bits. Keep the integer type for exact arithmetic, or use a wider "
+        "floating-point type if approximation is acceptable.";
+  }
+
+  if (from->isFloat() && to->isFloat()) {
+    return "Narrowing cast from " + fromDesc + " to " + toDesc +
+        " reduces precision from binary64 to binary32 (about 7 significant "
+        "decimal digits) and reduces the finite range. Values may round or "
+        "overflow; keep f64 when that precision/range matters.";
+  }
+
+  return "Narrowing cast from " + fromDesc + " to " + toDesc +
+      " may lose value information. Check that the value is representable "
+      "in the destination type before casting.";
+}
+
 static bool isBuiltinCall(const std::string& n) {
   static const std::set<std::string> b = {
     "malloc", "free", "give",
@@ -71,7 +148,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if ((int)e->args.size() != cnt) {
       diag(Diag::Error, Code::Args, n + " expects " + std::to_string(cnt) +
            " args, got " + std::to_string(e->args.size()),
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return false;
     }
     return true;
@@ -91,16 +168,16 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     }
     if (!elem) {
       diag(Diag::Error, Code::Args, "malloc's first argument must be a type",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::ptr(Type::simple(Type::U8));
     }
     if (elem->k == Type::VOID || elem->k == Type::SOA) {
       diag(Diag::Error, Code::Args, "cannot malloc " + typeToString(elem),
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     if (!argT(1) || !argT(1)->isInt()) {
       diag(Diag::Error, Code::Args, "malloc count must be integer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     e->mallocElem = elem;
     return Type::ptr(elem);
@@ -109,7 +186,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!need(1)) return Type::simple(Type::VOID);
     if (argT(0) && !argT(0)->isPtr()) {
       diag(Diag::Error, Code::Args, "free expects a pointer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::simple(Type::VOID);
   }
@@ -125,7 +202,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (e->args[0]->k != Expr::STR &&
         !(e->args[0]->ty && e->args[0]->ty->k == Type::STR)) {
       diag(Diag::Error, Code::Args, "print expects a str value",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::simple(Type::VOID);
   }
@@ -145,12 +222,12 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!sd) {
       diag(Diag::Error, Code::Args,
            "soa_new's first argument must be a struct name",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::simple(Type::VOID);
     }
     if (!argT(1) || !argT(1)->isInt()) {
       diag(Diag::Error, Code::Args, "soa_new count must be integer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     e->mallocElem = Type::structOf(sd);
     return Type::soaOf(sd);
@@ -159,7 +236,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!need(1)) return Type::simple(Type::VOID);
     if (argT(0) && argT(0)->k != Type::SOA) {
       diag(Diag::Error, Code::Args, "soa_free expects a soa() value",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::simple(Type::VOID);
   }
@@ -167,7 +244,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!need(1)) return Type::simple(Type::USIZE);
     if (argT(0) && argT(0)->k != Type::SOA) {
       diag(Diag::Error, Code::Args, "soa_len expects a soa() value",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::simple(Type::USIZE);
   }
@@ -177,7 +254,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (argT(0)) {
       if (argT(0)->k != Type::SOA) {
         diag(Diag::Error, Code::Args, "soa_field_ptr expects soa() first arg",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
         return Type::ptr(Type::simple(Type::U8));
       }
       StructDef* sd = argT(0)->sdef;
@@ -185,7 +262,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
         for (auto& f : sd->fields)
           if (f.name == e->args[1]->sval) return Type::ptr(f.ty);
         diag(Diag::Error, Code::Args, "no field " + e->args[1]->sval +
-             " in struct " + sd->name, e->loc.file, e->loc.line, e->loc.col);
+             " in struct " + sd->name, e->loc);
       }
       return Type::ptr(Type::simple(Type::U8));
     }
@@ -200,7 +277,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     // span(p: *T, n) -> Span<T>   |   span(a: [T; N]) -> Span<T>
     if (e->args.empty()) {
       diag(Diag::Error, Code::Args, "span expects a pointer + length or an array",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::spanOf(Type::simple(Type::U8));
     }
     Type* a0 = argT(0);
@@ -209,27 +286,27 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
         return Type::spanOf(a0->pointee);
       diag(Diag::Error, Code::Args,
            "span(a) expects a fixed array [T; N]; for pointers use span(p, len)",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::spanOf(Type::simple(Type::U8));
     }
     if (e->args.size() != 2) {
       diag(Diag::Error, Code::Args, "span expects (pointer, length)",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::spanOf(Type::simple(Type::U8));
     }
     if (!a0 || !a0->isPtr()) {
       diag(Diag::Error, Code::Args, "span's first argument must be a pointer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::spanOf(Type::simple(Type::U8));
     }
     if (a0->pointee && (a0->pointee->k == Type::VOID)) {
       diag(Diag::Error, Code::Args,
            "cannot build a Span<void>; cast the pointer to *T first",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     if (argT(1) && !argT(1)->isInt()) {
       diag(Diag::Error, Code::Args, "span length must be an integer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::spanOf(a0->pointee);
   }
@@ -239,24 +316,24 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     for (int i = 0; i < 2; ++i)
       if (argT(i) && argT(i)->k != Type::STR)
         diag(Diag::Error, Code::Args, "str_eq expects two str values",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
     return Type::simple(Type::BOOL);
   }
   if (n == "str_cat" || n == "string_from") {
     if (n == "str_cat") {
       if ((int)e->args.size() != 2) {
         diag(Diag::Error, Code::Args, "str_cat expects two str values",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
       }
       for (int i = 0; i < (int)e->args.size(); ++i)
         if (argT(i) && argT(i)->k != Type::STR)
           diag(Diag::Error, Code::Args, "str_cat expects str arguments",
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
     } else {
       need(1);
       if (argT(0) && argT(0)->k != Type::STR)
         diag(Diag::Error, Code::Args, "string_from expects a str value",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
     }
     return Type::structOf(ensurePreludeString(currentProgram()));
   }
@@ -264,7 +341,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     need(1);
     if (argT(0) && argT(0)->k != Type::STR)
       diag(Diag::Error, Code::Args, "str_to_cstr expects a str value",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     return Type::ptr(Type::simple(Type::U8));
   }
   if (n == "string_new" || n == "fmt_f64" || n == "fmt_i64") {
@@ -273,15 +350,15 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
       need(2);
       if (argT(0) && !argT(0)->isFloat())
         diag(Diag::Error, Code::Args, "fmt_f64 expects (f64, digits)",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
       if (argT(1) && !argT(1)->isInt())
         diag(Diag::Error, Code::Args, "fmt_f64 digit count must be an integer",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
     } else {
       need(1);
       if (argT(0) && !argT(0)->isInt())
         diag(Diag::Error, Code::Args, "fmt_i64 expects an integer",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
     }
     return Type::structOf(ensurePreludeString(currentProgram()));
   }
@@ -292,10 +369,10 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
                      argT(0)->pointee->sdef == ensurePreludeString(currentProgram())))
       diag(Diag::Error, Code::Args,
            "string_append expects (&String, str) — take the address with &s",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     if (argT(1) && argT(1)->k != Type::STR)
       diag(Diag::Error, Code::Args, "string_append's second argument must be str",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     return Type::simple(Type::VOID);
   }
   if (n == "string_free") {
@@ -304,7 +381,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
                      argT(0)->pointee && argT(0)->pointee->k == Type::STRUCT &&
                      argT(0)->pointee->sdef == ensurePreludeString(currentProgram())))
       diag(Diag::Error, Code::Args, "string_free expects a *String",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     return Type::simple(Type::VOID);
   }
   if (n == "str_of") {
@@ -313,7 +390,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
                      argT(0)->pointee && argT(0)->pointee->k == Type::STRUCT &&
                      argT(0)->pointee->sdef == ensurePreludeString(currentProgram())))
       diag(Diag::Error, Code::Args, "str_of expects a *String",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     return Type::simple(Type::STR);
   }
   // math
@@ -326,7 +403,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     Type* a = argT(0);
     if (a && !a->isFloat()) {
       diag(Diag::Error, Code::Args, n + " expects a float argument",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return (a && a->k == Type::F32) ? Type::simple(Type::F32)
                                     : Type::simple(Type::F64);
@@ -336,7 +413,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     Type* a = argT(0);
     if (a && !a->isFloat()) {
       diag(Diag::Error, Code::Args, n + " expects float arguments",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return (a && a->k == Type::F32) ? Type::simple(Type::F32)
                                     : Type::simple(Type::F64);
@@ -353,7 +430,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     Type* b = argT(1);
     if ((!a || !a->isInt()) || (!b || !b->isInt())) {
       diag(Diag::Error, Code::Args, n + " expects two integer arguments",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return Type::simple(Type::I64);
     }
     Type* c = commonType(a, b);
@@ -389,7 +466,7 @@ static Type* typeIntrinsic(FnSema* fs, Expr* e) {
   auto need = [&](int cnt) {
     if ((int)e->args.size() != cnt) {
       diag(Diag::Error, Code::Args, n + " expects " + std::to_string(cnt) + " args",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
       return false;
     }
     return true;
@@ -400,7 +477,7 @@ static Type* typeIntrinsic(FnSema* fs, Expr* e) {
     Type* a = e->args.empty() ? nullptr : e->args[0]->ty;
     if (a && !a->isPtr()) {
       diag(Diag::Error, Code::Args, n + " expects a pointer",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     return Type::simple(Type::VOID);
   }
@@ -462,13 +539,13 @@ static bool resolveVariantExprAgainst(FnSema* fs, Expr* e, EnumDef* ed,
     if (v->fields.empty()) {
       diag(Diag::Error, Code::Args,
            "variant " + vname + " carries no payload",
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     } else if (args->size() != v->fields.size()) {
       diag(Diag::Error, Code::Args,
            "variant " + vname + " expects " +
            std::to_string(v->fields.size()) + " payload value(s), got " +
            std::to_string(args->size()),
-           e->loc.file, e->loc.line, e->loc.col);
+           e->loc);
     }
     for (size_t i = 0; i < args->size() && i < v->fields.size(); ++i) {
       Type* at = typeExpr(fs, (*args)[i]);
@@ -478,7 +555,7 @@ static bool resolveVariantExprAgainst(FnSema* fs, Expr* e, EnumDef* ed,
         diag(Diag::Error, Code::Type,
              "payload " + std::to_string(i + 1) + " of " + vname + ": expected " +
              typeToString(pt) + ", got " + typeToString(at),
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
       }
     }
   } else if (!v->fields.empty()) {
@@ -486,7 +563,7 @@ static bool resolveVariantExprAgainst(FnSema* fs, Expr* e, EnumDef* ed,
     diag(Diag::Error, Code::Args,
          "variant " + vname + " carries a payload — construct it as " +
          vname + "(...)",
-         e->loc.file, e->loc.line, e->loc.col);
+         e->loc);
   }
   return true;
 }
@@ -547,7 +624,7 @@ static bool resolveVariantGlobally(FnSema* fs, Expr* e) {
         diag(Diag::Error, Code::Match,
              "ambiguous variant name " + vname + " (in " + found->name +
              " and " + ed->name + ") — qualify it as " + ed->name + "." + vname,
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
         return true;
       }
   }
@@ -558,7 +635,7 @@ static bool resolveVariantGlobally(FnSema* fs, Expr* e) {
 Type* typeExpr(FnSema* fs, Expr* e) {
   if (e->ty) return e->ty;   // memoized
   auto bad = [&](const std::string& m) {
-    diag(Diag::Error, Code::Type, m, e->loc.file, e->loc.line, e->loc.col);
+    diag(Diag::Error, Code::Type, m, e->loc);
     e->ty = Type::simple(Type::U64);
     return e->ty;
   };
@@ -634,7 +711,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
           if (!(e->args[i]->constant && f->ty->isNum() && vt->isNum()))
             diag(Diag::Error, Code::Type, "field " + f->name + ": " +
                  typeToString(f->ty) + " vs " + typeToString(vt),
-                 e->loc.file, e->loc.line, e->loc.col);
+                 e->loc);
         }
       }
       e->ty = Type::structOf(sd);
@@ -719,7 +796,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                      "arg " + std::to_string(i + 1) + " of " + e->name +
                      ": expected " + typeToString(pt) + ", got " +
                      typeToString(at),
-                     e->loc.file, e->loc.line, e->loc.col);
+                     e->loc);
             }
           }
           e->fnPtrSym = fps;
@@ -760,11 +837,11 @@ Type* typeExpr(FnSema* fs, Expr* e) {
           if (!(e->args[i]->constant && pt->isNum() && at->isNum()))
             diag(Diag::Error, Code::Type, "arg " + std::to_string(i + 1) + " of " +
                  e->name + ": expected " + typeToString(pt) + ", got " +
-                 typeToString(at), e->loc.file, e->loc.line, e->loc.col);
+                 typeToString(at), e->loc);
         }
         if (e->argGive[i] && !(at && at->isPtr())) {
           diag(Diag::Error, Code::Own, "give() requires a pointer",
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
         // Phase MEM (§5.3): parameter mode enforcement at the call site
         if (f->params[i].owned && !e->argGive[i]) {
@@ -772,14 +849,14 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                "argument " + std::to_string(i + 1) + " of " + e->name +
                " (" + f->params[i].name + ") is declared `owned` — the caller "
                "must transfer it with give(...)",
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
         if (f->params[i].borrowed && e->argGive[i]) {
           diag(Diag::Error, Code::OwnCall,
                "argument " + std::to_string(i + 1) + " of " + e->name +
                " (" + f->params[i].name + ") is declared `borrowed` — it cannot "
                "be given away",
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
       }
       e->callee = f;
@@ -929,7 +1006,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         // unsigned negation is a logic error in strict mode
         diag(Diag::Error, Code::ArithNegUnsigned,
              "negation of unsigned value — declare as i64 or use 0 - x",
-             e->loc.file, e->loc.line, e->loc.col);
+             e->loc);
       }
       e->constant = e->rhs->constant;
       return e->ty;
@@ -956,7 +1033,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                "constant index " + std::to_string(e->rhs->ival) +
                " is out of bounds for " + typeToString(bt) +
                " (valid: 0.." + std::to_string(bt->arrLen - 1) + ")",
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
         e->ty = bt->pointee;
         e->isLvalue = true;
@@ -1049,8 +1126,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       // numeric cast: warn on narrowing
       if (bt && to && bt->isNum() && to->isNum() && to->bits() < bt->bits()) {
         diag(Diag::Warning, Code::CastNarrowing,
-             "narrowing cast " + typeToString(bt) + " -> " + typeToString(to),
-             e->loc.file, e->loc.line, e->loc.col);
+             narrowingCastMessage(bt, to), e->loc);
       }
       e->ty = to;
       e->constant = e->base->constant;
@@ -1071,7 +1147,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                "array literal element " + std::to_string(i + 1) + ": " +
                typeToString(at) + " does not match element type " +
                typeToString(et),
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
       }
       e->ty = Type::arrayOf(et ? et : Type::simple(Type::U64), e->args.size());
@@ -1165,7 +1241,7 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                "`?` propagation error type mismatch: value carries " +
                typeToString(valErr) + ", fn " + fs->fn->name +
                " returns " + typeToString(rt),
-               e->loc.file, e->loc.line, e->loc.col);
+               e->loc);
         }
       }
       e->ty = payload;

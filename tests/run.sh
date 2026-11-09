@@ -789,6 +789,17 @@ else
   sed -n '1,5p' "$TMP/lsperr"
 fi
 
+# LSP diagnostic ranges, comment lexing, useful narrowing-cast messages,
+# and the filename/path-specific main() requirement.
+if [ ! -x "$PEN_LSP" ]; then
+  bad "LSP: diagnostic spans/comments/main-file policy (server not built)"
+elif python3 scripts/lsp_diagnostics_check.py "$PEN_LSP" >/dev/null 2>"$TMP/lspdiagerr"; then
+  ok "LSP: diagnostic spans/comments/main-file policy"
+else
+  bad "LSP: diagnostic spans/comments/main-file policy"
+  sed -n '1,8p' "$TMP/lspdiagerr"
+fi
+
 echo "== optimisation-audit: §10.2/§10.3 differential + property tests =="
 if [ "${RUN_DIFFTEST:-0}" = "1" ]; then
   if bash scripts/difftest.sh; then ok "difftest: all configurations agree"; else bad "difftest: outputs differ"; fi

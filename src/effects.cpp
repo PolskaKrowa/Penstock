@@ -603,10 +603,9 @@ void computeEffects(Program* p) {
                        (clean ? std::string("body has effects the analysis could not localise")
                               : viol.empty() ? std::string("reads or writes memory")
                                              : viol.front().msg);
-    diag(Diag::Error, Code::Pure, head, f->loc.file, f->loc.line, f->loc.col);
+    diag(Diag::Error, Code::Pure, head, f->loc);
     for (size_t i = viol.empty() ? 0 : 1; i < viol.size() && i < 4; ++i)
-      diag(Diag::Note, Code::Pure, viol[i].msg, viol[i].loc.file,
-           viol[i].loc.line, viol[i].loc.col);
+      diag(Diag::Note, Code::Pure, viol[i].msg, viol[i].loc);
   }
 }
 

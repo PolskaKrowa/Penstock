@@ -215,7 +215,7 @@ struct ModuleLoader {
         diag(Diag::Error, Code::Import,
              "circular import: " + chain + name + " — cycles are not " +
              "allowed (restructure the shared part into its own module)",
-             loc.file, loc.line, loc.col);
+             loc);
         return nullptr;
       }
       return known->second;   // already loaded
@@ -233,7 +233,7 @@ struct ModuleLoader {
     diag(Diag::Error, Code::Import,
          "module '" + name + "' not found — searched:" + searched +
          "\n  (add the directory with -I<dir>, or create the module file)",
-         loc.file, loc.line, loc.col);
+         loc);
     return nullptr;
   }
 };
@@ -521,26 +521,26 @@ bool synthesizeTestMain(Program* p) {
     if (f->isGeneric) {
       diag(Diag::Error, Code::Test,
            "@test functions cannot be generic: " + f->name,
-           f->loc.file, f->loc.line, f->loc.col);
+           f->loc);
       return false;
     }
     if (f->imported) {
       diag(Diag::Error, Code::Test,
            "@test functions must have a body: " + f->name,
-           f->loc.file, f->loc.line, f->loc.col);
+           f->loc);
       return false;
     }
     if (!f->params.empty()) {
       diag(Diag::Error, Code::Test,
            "@test functions take no parameters: " + f->name,
-           f->loc.file, f->loc.line, f->loc.col);
+           f->loc);
       return false;
     }
     if (f->retTyName != "" && f->retTyName != "void") {
       diag(Diag::Error, Code::Test,
            "@test functions must return void (assertions signal failure): " +
            f->name,
-           f->loc.file, f->loc.line, f->loc.col);
+           f->loc);
       return false;
     }
     tests.push_back(f);

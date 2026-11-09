@@ -13,7 +13,7 @@ penstock [options] file.fsh
 
 ## 1. Lexical structure
 
-Line comments `//`, block comments `/* */`. Identifiers are C-like.
+Line comments `//`, block comments `/* */` (block comments may nest). Identifiers are C-like.
 Numeric literals carry optional suffixes (`42u8`, `1.5f32`, `0x1F`). The
 preprocessor supports `#include "file"`, `#include <file>` (searches `-I`
 dirs), `#define NAME body`, object and function-like macros, `#link m`,

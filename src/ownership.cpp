@@ -45,17 +45,17 @@ static void checkExprUses(OwnCtx& ctx, Expr* e, SrcLoc at) {
         diag(Diag::Error, Code::Own,
              "use-after-free: '" + e->name + "' was freed at line " +
              std::to_string(it->second.freeLoc.line),
-             at.file, at.line, at.col, "var=" + e->name + ",kind=uaf");
+             at, "var=" + e->name + ",kind=uaf");
       } else if (it->second.st == OS_MOVED) {
         diag(Diag::Error, Code::Own,
              "use-after-move: '" + e->name + "' ownership was given away at line " +
              std::to_string(it->second.freeLoc.line),
-             at.file, at.line, at.col, "var=" + e->name + ",kind=move");
+             at, "var=" + e->name + ",kind=move");
       } else if (it->second.st == OS_MAYBE) {
         diag(Diag::Error, Code::Own,
              "possibly-freed: '" + e->name + "' may have been freed on a "
              "branch (strict mode requires provably-single flow)",
-             at.file, at.line, at.col, "var=" + e->name + ",kind=maybe");
+             at, "var=" + e->name + ",kind=maybe");
       }
     }
     return;
@@ -78,21 +78,21 @@ static void applyFree(OwnCtx& ctx, const std::string& v, SrcLoc at,
          std::string("double ") + (isGive ? "give" : "free") + ": '" + v +
          "' already " + osName(oi.st) + " at line " +
          std::to_string(oi.freeLoc.line),
-         at.file, at.line, at.col,
+         at,
          std::string("var=") + v + ",kind=double" + (isGive ? "move" : "free"));
     return;
   }
   if (oi.st == OS_MAYBE) {
     diag(Diag::Error, Code::Own,
          std::string(verb) + " of possibly-freed '" + v + "'",
-         at.file, at.line, at.col, "var=" + v + ",kind=double");
+         at, "var=" + v + ",kind=double");
     return;
   }
   if (!isGive && !oi.owned) {
     diag(Diag::Warning, Code::OwnSuspicious,
          "free() of borrowed pointer '" + v +
          "' — only the owner may free (received via give?)",
-         at.file, at.line, at.col);
+         at);
   }
   oi.st = isGive ? OS_MOVED : OS_FREED;
   oi.freeLoc = at;
@@ -145,7 +145,7 @@ static void ownBlock(OwnCtx& ctx, FnSema* fs, Stmt* b,
         if (f != ctx.vars.end() && f->second.st == OS_FREED) {
           diag(Diag::Error, Code::Own,
                "double free: '" + v + "' freed manually and again by defer",
-               it->loc.file, it->loc.line, it->loc.col,
+               it->loc,
                "var=" + v + ",kind=double");
         } else if (f != ctx.vars.end() && f->second.st == OS_ALIVE) {
           f->second.st = OS_FREED;
@@ -200,7 +200,7 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
              (s->rhs->name != "malloc" && s->rhs->name != "soa_new"))) {
           diag(Diag::Warning, Code::OwnSuspicious,
                "rebinding owned '" + lv + "' without freeing the old value",
-               s->loc.file, s->loc.line, s->loc.col);
+               s->loc);
         }
         OwnInfo oi;
         oi.var = lv;
@@ -289,7 +289,7 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         diag(Diag::Error, Code::Thread,
              "defer inside parfor body — defers run per-iteration; move the "
              "allocation out of the loop",
-             d.loc.file, d.loc.line, d.loc.col);
+             d.loc);
       }
       break;
     }
@@ -316,7 +316,7 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
             if (it == ctx.vars.end() || !it->second.owned) {
               diag(Diag::Error, Code::Own,
                    "give() of non-owned pointer '" + v + "'",
-                   s->loc.file, s->loc.line, s->loc.col,
+                   s->loc,
                    "var=" + v + ",kind=move-nonowned");
             } else {
               applyFree(ctx, v, s->loc, true);
@@ -386,7 +386,7 @@ void runOwnershipAnalysis(Program* p) {
           if (f != ctx.vars.end() && f->second.st == OS_FREED) {
             diag(Diag::Error, Code::Own,
                  "double free: '" + v + "' freed manually and again by defer",
-                 it->loc.file, it->loc.line, it->loc.col,
+                 it->loc,
                  "var=" + v + ",kind=double");
           } else if (f != ctx.vars.end() && f->second.st == OS_ALIVE) {
             f->second.st = OS_FREED;

@@ -64,7 +64,7 @@ void registerEnum(EnumDef* ed) {
   for (auto* o : r[ed->name])
     if (o->module == ed->module) {
       diag(Diag::Error, Code::Type, "duplicate enum definition: " + ed->name,
-           ed->loc.file, ed->loc.line, ed->loc.col);
+           ed->loc);
       return;
     }
   r[ed->name].push_back(ed);
@@ -125,7 +125,7 @@ void registerStruct(StructDef* sd) {
   for (auto* o : r[sd->name])
     if (o->module == sd->module) {
       diag(Diag::Error, Code::Type, "duplicate struct definition: " + sd->name,
-           sd->loc.file, sd->loc.line, sd->loc.col);
+           sd->loc);
       return;
     }
   r[sd->name].push_back(sd);
@@ -306,13 +306,16 @@ std::string typeToString(Type* t) {
       s += ") -> " + typeToString(t->pointee);
       return s;
     }
-    case Type::STRUCT: return "struct " + t->sdef->name;
-    case Type::SOA: return "soa(" + t->sdef->name + ")";
+    case Type::STRUCT: return t->sdef ? "struct " + t->sdef->name
+                                           : "struct <unresolved>";
+    case Type::SOA: return t->sdef ? "soa(" + t->sdef->name + ")"
+                                       : "soa(<unresolved>)";
     case Type::STR: return "str";
     case Type::SPAN: return "Span<" + typeToString(t->pointee) + ">";
     case Type::ARRAY: return "[" + typeToString(t->pointee) + "; " +
                          std::to_string(t->arrLen) + "]";
-    case Type::ENUM: return "enum " + t->edef->name;
+    case Type::ENUM: return t->edef ? "enum " + t->edef->name
+                                         : "enum <unresolved>";
   }
   return "?";
 }

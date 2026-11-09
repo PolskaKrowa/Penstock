@@ -355,7 +355,7 @@ static int licmInList(std::vector<Stmt*>& list, FnDecl* fn, int* budget) {
            std::to_string(L->loc.line) + ", fn " + fn->name +
            ") out of the range loop — the pure, non-trapping initializer "
            "is computed once instead of per iteration",
-           L->loc.file, L->loc.line, L->loc.col,
+           L->loc,
            "kind=licm,fn=" + fn->name + ",var=" + L->var);
       proofLogLine("licm",
                    "P1:immutable+unique-name;P2:no-inner-bindings;"
@@ -482,7 +482,7 @@ static int partialUnrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
          " block iteration(s) of " + std::to_string(F) +
          " body copies (i -> i*" + std::to_string(F) + "+k); a " + std::to_string(trip - evenTrip) +
          "-iteration remainder loop preserves the exact domain",
-         s->loc.file, s->loc.line, s->loc.col,
+         s->loc,
          "kind=partial-unroll,fn=" + fn->name +
          ",trip=" + std::to_string(trip) + ",factor=" + std::to_string(F));
     proofLogLine("partial-unroll",
@@ -679,7 +679,7 @@ static int peelInList(std::vector<Stmt*>& list, FnDecl* fn) {
          std::to_string(s->loc.line) + ", fn " + fn->name +
          ") — the first-iteration guard is resolved statically in the "
          "peeled copy and removed from the steady-state loop",
-         s->loc.file, s->loc.line, s->loc.col,
+         s->loc,
          "kind=peel,fn=" + fn->name + ",trip=" + std::to_string(ti.trip));
     proofLogLine("peel",
                  "constant-trip:" + std::to_string(ti.trip) +
@@ -873,7 +873,7 @@ static int interchangeInList(std::vector<Stmt*>& list, FnDecl* fn) {
          std::to_string(inner->loc.line) + ", fn " + fn->name +
          ") — the strided inner traversal (" + std::to_string(v.strided) +
          " transposed access[es]) becomes contiguous after the swap",
-         outer->loc.file, outer->loc.line, outer->loc.col,
+         outer->loc,
          "kind=interchange,fn=" + fn->name +
          ",strided=" + std::to_string(v.strided));
     proofLogLine("interchange",
@@ -1011,7 +1011,7 @@ static int tileInList(std::vector<Stmt*>& list, FnDecl* fn) {
          " blocks — boundary tiles are imin-clamped so the iteration "
          "domain is exact; the tile working set targets half of L1 (" +
          std::to_string(profit::target().l1Bytes / 1024) + " KiB)",
-         outer->loc.file, outer->loc.line, outer->loc.col,
+         outer->loc,
          "kind=tile,fn=" + fn->name + ",TI=" + std::to_string(TI) +
          ",TJ=" + std::to_string(TJ));
     proofLogLine("tile",
@@ -1118,7 +1118,7 @@ static int distributeInList(std::vector<Stmt*>& list, FnDecl* fn) {
          std::to_string(best + 1) + ") — no cross-group flow/anti/output "
          "dependence exists, so each phase can vectorise and schedule "
          "independently",
-         s->loc.file, s->loc.line, s->loc.col,
+         s->loc,
          "kind=distribute,fn=" + fn->name + ",split=" + std::to_string(best));
     proofLogLine("distribute",
                  "D1:no-cross-group-dependence;D2:no-unknown-effects;"
@@ -1284,7 +1284,7 @@ static int unrollJamInList(std::vector<Stmt*>& list, FnDecl* fn) {
          ") — the outer constant " + std::to_string(ti.trip) +
          "-trip loop runs 2 iterations per step and the inner loops are "
          "jammed into one, reusing each row across adjacent iterations",
-         outer->loc.file, outer->loc.line, outer->loc.col,
+         outer->loc,
          "kind=unroll-and-jam,fn=" + fn->name +
          ",trip=" + std::to_string(ti.trip));
     proofLogLine("unroll-and-jam",

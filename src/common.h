@@ -27,13 +27,14 @@ struct Diag {
   std::string msg;
   std::string file;
   int line, col;
+  int endLine = 0, endCol = 0; // exclusive end; 0 means point-only fallback
   std::string extra;     // machine-readable detail for report merging
 };
 inline std::vector<Diag> g_diags;
 inline void diag(Diag::Severity s, Code code, const std::string& msg,
                  const std::string& file = "", int line = 0, int col = 0,
                  const std::string& extra = "") {
-  g_diags.push_back({s, info(code).id, msg, file, line, col, extra});
+  g_diags.push_back({s, info(code).id, msg, file, line, col, 0, 0, extra});
 }
 inline int errorCount() {
   int n = 0; for (auto& d : g_diags) if (d.sev == Diag::Error) ++n; return n;
@@ -68,6 +69,15 @@ struct SrcLoc {
   // end position; defaults to (line, col) for back-compat with single-point spans
   int endLine = 0, endCol = 0;
 };
+// Source-aware diagnostic overload.  Unlike the legacy (file,line,col)
+// form, this preserves the full token/AST span for editors and terminal
+// renderers.  SrcLoc end positions are exclusive, matching LSP ranges.
+inline void diag(Diag::Severity s, Code code, const std::string& msg,
+                 const SrcLoc& loc, const std::string& extra = "") {
+  g_diags.push_back({s, info(code).id, msg, loc.file, loc.line, loc.col,
+                     loc.endLine, loc.endCol, extra});
+}
+
 struct Token {
   enum K {
     EOFTOK, IDENT, INT, FLT, STR, KW, PUNCT,
@@ -268,7 +278,12 @@ struct Sym {
 
 struct FnSema {
   FnDecl* fn = nullptr;
-  std::vector<std::map<std::string, Sym>> scopes;
+  // Identifier expressions retain Sym* annotations after semantic analysis
+  // has left their lexical scope (the LSP uses them for hover/definition/
+  // references).  Store symbols in stable heap allocations; the active scope
+  // maps only index those allocations and may safely be discarded on pop().
+  std::vector<std::map<std::string, Sym*>> scopes;
+  std::vector<std::unique_ptr<Sym>> ownedSyms;
   int scopeDepth = 0;
   std::vector<Sym> allSyms;
   struct LoopInfo { std::string var; Stmt* loop; };
@@ -286,7 +301,7 @@ struct FnSema {
   Sym* lookup(const std::string& n) {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
       auto f = it->find(n);
-      if (f != it->end()) return &f->second;
+      if (f != it->end()) return f->second;
     }
     return nullptr;
   }
@@ -294,8 +309,12 @@ struct FnSema {
   void pop() { if (!scopes.empty()) { scopes.pop_back(); --scopeDepth; } }
   void declare(Sym s) {
     s.scope = scopeDepth;
-    if (!scopes.empty()) scopes.back()[s.name] = s;
-    allSyms.push_back(s);
+    auto owned = std::make_unique<Sym>(std::move(s));
+    Sym* stable = owned.get();
+    ownedSyms.push_back(std::move(owned));
+    if (!scopes.empty()) scopes.back()[stable->name] = stable;
+    // Keep the historical by-value index for passes that iterate all symbols.
+    allSyms.push_back(*stable);
   }
 };
 
@@ -801,7 +820,7 @@ bool typesEquivalent(Type* a, Type* b);
 bool typesCompatible(Type* a, Type* b);   // with implicit conversion rules
 Type* commonType(Type* a, Type* b);
 // sema
-bool semaProgram(Program* p);
+bool semaProgram(Program* p, bool requireMain = true);
 // sema accessors for cross-TU phases (sema_expr.cpp / generics.cpp)
 void queueGenericInstance(FnDecl* inst);
 Program* currentProgram();

@@ -197,7 +197,13 @@ static bool importCandidate(Module &destination, Module &candidate) {
   return true;
 }
 
-class PenstockVerifiedRewritePass : public PassInfoMixin<PenstockVerifiedRewritePass> {
+#if LLVM_VERSION_MAJOR >= 23
+template <class T> using PenstockPassMixin = OptionalPassInfoMixin<T>;
+#else
+template <class T> using PenstockPassMixin = PassInfoMixin<T>;
+#endif
+
+class PenstockVerifiedRewritePass : public PenstockPassMixin<PenstockVerifiedRewritePass> {
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
     TemporaryIR ir;

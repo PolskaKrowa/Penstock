@@ -190,7 +190,7 @@ static int mergeScan(std::vector<Stmt*>& list, FnDecl* fn) {
          "condition (line " + std::to_string(b->loc.line) + ", fn " +
          fn->name + ") — the per-iteration predicate is computed once "
          "and reused instead of recomputed",
-         b->loc.file, b->loc.line, b->loc.col,
+         b->loc,
          "kind=merge,fn=" + fn->name);
     // rescan at i: the merged IF may merge again with i+1
   }
@@ -316,7 +316,7 @@ static bool tryDeepUnswitch(std::vector<Stmt*>& list, size_t idx,
            " ops, minimum " + std::to_string(minWork) +
            (info.nodes * 2 > 600 ? "; whole-loop clone exceeds size budget" : "") +
            (*budget <= 0 ? "; unswitch budget exhausted" : ""),
-           cand->loc.file, cand->loc.line, cand->loc.col,
+           cand->loc,
            "kind=deep-hoist-skip,fn=" + fn->name);
     }
     return false;
@@ -345,7 +345,7 @@ static bool tryDeepUnswitch(std::vector<Stmt*>& list, size_t idx,
        "(line " + std::to_string(cand->loc.line) + ", fn " + fn->name +
        ") — the condition is evaluated once for the loop nest, removing a "
        "per-inner-iteration branch from the vectorisable kernel",
-       cand->loc.file, cand->loc.line, cand->loc.col,
+       cand->loc,
        "kind=deep-hoist,fn=" + fn->name + ",lanework=" +
        std::to_string(info.laneWork));
   return true;
@@ -434,7 +434,7 @@ static void tryUnswitchLoop(std::vector<Stmt*>& list, size_t idx, FnDecl* fn,
            ") NOT hoisted — the loop range may be empty and the condition "
            "is not provably total (division/dereference/call could trap "
            "on a zero-trip loop the source would never execute)",
-           cand->loc.file, cand->loc.line, cand->loc.col,
+           cand->loc,
            "kind=hoist-skip-zero-trip,fn=" + fn->name);
     }
     return;
@@ -458,7 +458,7 @@ static void tryUnswitchLoop(std::vector<Stmt*>& list, size_t idx, FnDecl* fn,
            "code duplication would cost more than the branch)" +
            (info.nodes * 2 > 600 ? "; body too large to duplicate" : "") +
            (*budget <= 0 ? "; unswitch budget exhausted" : ""),
-           cand->loc.file, cand->loc.line, cand->loc.col,
+           cand->loc,
            "kind=hoist-skip,fn=" + fn->name);
     }
     return;
@@ -515,7 +515,7 @@ static void tryUnswitchLoop(std::vector<Stmt*>& list, size_t idx, FnDecl* fn,
          ") out of the vector loop — the condition is evaluated once, "
          "scalar (one lane reserved for the decision); the specialised "
          "loops are branch-free so every lane does independent work",
-         cand->loc.file, cand->loc.line, cand->loc.col,
+         cand->loc,
          "kind=hoist,fn=" + fn->name + ",lanework=" +
          std::to_string(info.laneWork));
 }

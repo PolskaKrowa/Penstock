@@ -390,7 +390,7 @@ static bool tryFuseRun(std::vector<Stmt*>& list, size_t from, size_t end,
        rangeDesc + "] in fn " + fn->name +
        " into one sweep — per-iteration data stays hot across phase "
        "boundaries; the batching loop is retained",
-       firstL->loc.file, firstL->loc.line, firstL->loc.col,
+       firstL->loc,
        "loops=" + std::to_string(run.size()) + ",fn=" + fn->name);
   return true;
 }
@@ -510,7 +510,7 @@ static int unrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
          "-trip loop (line " + std::to_string(s->loc.line) + ", fn " +
          fn->name + ") — induction variable folds into literal "
          "indices; constant-offset addressing reaches the backend",
-         s->loc.file, s->loc.line, s->loc.col,
+         s->loc,
          "trip=" + std::to_string(trip) + ",fn=" + fn->name);
   }
   return applied;

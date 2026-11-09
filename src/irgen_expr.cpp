@@ -43,7 +43,7 @@ std::string emitArithOp(const std::string& op, Type* dt, const std::string& a,
     else if (op == "*") G->out << "  " << r << " = fmul " << flag << " " << ty << " " << a << ", " << b << "\n";
     else if (op == "/") G->out << "  " << r << " = fdiv " << flag << " " << ty << " " << a << ", " << b << "\n";
     else diag(Diag::Error, Code::Ir, "bad float op " + op,
-              loc.file, loc.line, loc.col);
+              loc);
     return r;
   }
   if (op == "+") G->out << "  " << r << " = add " << ty << " " << a << ", " << b << "\n";
@@ -129,7 +129,7 @@ std::string emitArithOp(const std::string& op, Type* dt, const std::string& a,
     G->out << "  " << r << " = " << (dt->isSigned() ? "ashr " : "lshr ")
            << ty << " " << a << ", " << b << "\n";
   else diag(Diag::Error, Code::Ir, "bad int op " + op,
-            loc.file, loc.line, loc.col);
+            loc);
   return r;
 }
 

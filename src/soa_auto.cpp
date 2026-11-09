@@ -353,8 +353,7 @@ int applySoaAutoTransform(Program* p) {
   for (auto& c : cands) {
     if (!c.anyLoop) continue;
     auto note = [&](const std::string& msg) {
-      diag(Diag::Note, Code::SoaAuto, msg, c.let->loc.file, c.let->loc.line,
-           c.let->loc.col);
+      diag(Diag::Note, Code::SoaAuto, msg, c.let->loc);
     };
     auto aosoaAdvice = [&]() {
       // §6.11 middle band: neither pure AoS nor pure SoA is a clear
@@ -370,7 +369,7 @@ int applySoaAutoTransform(Program* p) {
            std::to_string((int)(c.weightedEff * 100)) + "% — " + verdict +
            "; restructure manually as soa(" + c.sdef->name +
            ") or a blocked AoSoA layout if this array is hot",
-           c.let->loc.file, c.let->loc.line, c.let->loc.col,
+           c.let->loc,
            "var=" + c.let->var + ",struct=" + c.sdef->name +
            ",weighted-eff=" + std::to_string((int)(c.weightedEff * 100)));
     };
@@ -409,7 +408,7 @@ int applySoaAutoTransform(Program* p) {
          c.sdef->name + " -> soa(" + c.sdef->name + ")): hot loop fetches " +
          std::to_string((int)(c.minEff * 100)) + "% of " +
          std::to_string(c.layout.size) + "B per element; fields now in planes",
-         c.let->loc.file, c.let->loc.line, c.let->loc.col,
+         c.let->loc,
          "var=" + c.let->var + ",struct=" + c.sdef->name);
   }
   return transformed;

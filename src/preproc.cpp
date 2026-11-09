@@ -108,7 +108,7 @@ static std::string expandMacro(PpState& st, const Macro& m,
                                size_t& ti, const SrcLoc& loc, int depth) {
   if (depth > 16) {
     diag(Diag::Error, Code::Preproc, "macro recursion too deep: " + m.name,
-         loc.file, loc.line, loc.col);
+         loc);
     st.failed = true;
     return "";
   }
@@ -136,7 +136,7 @@ static std::string expandMacro(PpState& st, const Macro& m,
     if (actuals.size() != m.params.size()) {
       diag(Diag::Error, Code::Preproc, "macro " + m.name + " expects " +
            std::to_string(m.params.size()) + " args, got " +
-           std::to_string(actuals.size()), loc.file, loc.line, loc.col);
+           std::to_string(actuals.size()), loc);
       st.failed = true;
     }
     for (size_t i = 0; i < m.params.size() && i < actuals.size(); ++i) {

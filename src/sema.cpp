@@ -85,7 +85,7 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
         diag(Diag::Error, Code::Type,
              "array literal has " + std::to_string(s->init->args.size()) +
              " element(s) but the annotation is " + typeToString(t),
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
       } else if (t->arrLen > 0) {
         // adopt (also lets the empty literal resolve).  The adopted type
         // memoizes the whole literal, so its ELEMENTS must be typed here
@@ -107,7 +107,7 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
       if (s->init->k == Expr::SLICE && t->isPair()) ok = true;
       if (!ok) {
         diag(Diag::Error, Code::Type, "cannot initialize " + typeToString(t) +
-             " with " + typeToString(it), s->loc.file, s->loc.line, s->loc.col);
+             " with " + typeToString(it), s->loc);
       }
     }
     if (t->k == Type::SOA) {
@@ -117,7 +117,7 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
         if (!give) {
           diag(Diag::Error, Code::Type,
                "soa(" + t->sdef->name + ") values come only from soa_new()",
-               s->loc.file, s->loc.line, s->loc.col);
+               s->loc);
         }
       }
     }
@@ -127,12 +127,12 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
     if (t->k == Type::USIZE) t = Type::simple(Type::U64); // default
     if (t->k == Type::VOID) {
       diag(Diag::Error, Code::Type, "cannot infer type of void expression",
-           s->loc.file, s->loc.line, s->loc.col);
+           s->loc);
     }
     if (t->k == Type::STRUCT && s->init->k == Expr::ARRLIT) {
       diag(Diag::Error, Code::Type,
            "array literal needs a type annotation: let a: [T; N] = [...]",
-           s->loc.file, s->loc.line, s->loc.col);
+           s->loc);
     }
   }
   Sym sym;
@@ -201,7 +201,7 @@ static void semaParfor(FnSema* fs, Stmt* s) {
   for (Type* t : {lot, hit}) {
     if (t && !t->isInt()) {
       diag(Diag::Error, Code::Type, "parfor bounds must be integers",
-           s->loc.file, s->loc.line, s->loc.col);
+           s->loc);
     }
   }
   // iterate var is a fresh immutable usize in body scope
@@ -227,24 +227,24 @@ static void semaParfor(FnSema* fs, Stmt* s) {
         if (!acc) {
           diag(Diag::Error, Code::Parfor,
                "reduction accumulator not found: " + c.var,
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
           break;
         }
         if (!acc->mut) {
           diag(Diag::Error, Code::Parfor,
                "reduction accumulator must be declared mut: " + c.var,
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
         }
         if (!(acc->ty->isNum())) {
           diag(Diag::Error, Code::Parfor,
                "reduction accumulator must be numeric: " + c.var,
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
         }
         if (c.redOp != "+" && c.redOp != "-" && c.redOp != "*" &&
             c.redOp != "min" && c.redOp != "max") {
           diag(Diag::Error, Code::Parfor,
                "unsupported reduction op: " + c.redOp,
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
         }
         fs->reductionVars.insert(c.var);
         // init value check: + requires 0, * requires 1, min/max any
@@ -262,7 +262,7 @@ static void semaParfor(FnSema* fs, Stmt* s) {
         if (c.sval != "close" && c.sval != "spread") {
           diag(Diag::Error, Code::Parfor,
                "affinity must be close or spread, got: " + c.sval,
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
         }
         affinity = c.sval;
         break;
@@ -270,7 +270,7 @@ static void semaParfor(FnSema* fs, Stmt* s) {
       case ParForClause::COLLAPSE: {
         if (c.ival < 1 || c.ival > 2) {
           diag(Diag::Error, Code::Parfor, "collapse supports 1 or 2",
-               c.loc.file, c.loc.line, c.loc.col);
+               c.loc);
         }
         break;
       }
@@ -309,7 +309,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       Type* rt = typeExpr(fs, s->rhs);
       if (!s->lhs->isLvalue) {
         diag(Diag::Error, Code::Type, "left side of assignment is not assignable",
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
       } else {
         Sym* sym = nullptr;
         if (s->lhs->k == Expr::IDENT) {
@@ -317,7 +317,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
           if (sym && !sym->mut && !sym->owned) {
             // owned ptr rebinding allowed (ownership handles)
             diag(Diag::Error, Code::Mut, "cannot assign to immutable " + sym->name,
-                 s->loc.file, s->loc.line, s->loc.col);
+                 s->loc);
           }
         }
         if (s->lhs->k == Expr::FIELD || s->lhs->k == Expr::INDEX) {
@@ -332,7 +332,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             if (bs && !bs->mut && !bs->owned && bs->ty && bs->ty->k == Type::PTR) {
               diag(Diag::Error, Code::Mut,
                    "cannot mutate through immutable pointer " + base->name,
-                   s->loc.file, s->loc.line, s->loc.col);
+                   s->loc);
             }
           }
         }
@@ -345,7 +345,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             diag(Diag::Error, Code::Type,
                  "compound assignment type mismatch: " +
                  typeToString(lt) + " " + s->op2 + " " + typeToString(rt),
-                 s->loc.file, s->loc.line, s->loc.col);
+                 s->loc);
           }
         } else if (s->lhs->ty && rt && !typesCompatible(s->lhs->ty, rt)) {
           bool ok = s->rhs->constant && s->lhs->ty->isNum() && rt->isNum();
@@ -353,7 +353,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             diag(Diag::Error, Code::Type,
                  "assignment type mismatch: " + typeToString(s->lhs->ty) +
                  " = " + typeToString(rt),
-                 s->loc.file, s->loc.line, s->loc.col);
+                 s->loc);
         }
       }
       // record write for parfor race checks
@@ -384,11 +384,11 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             diag(Diag::Error, Code::Type,
                  "return type mismatch: fn returns " +
                  typeToString(fs->fn->ret) + ", got " + typeToString(t),
-                 s->loc.file, s->loc.line, s->loc.col);
+                 s->loc);
         }
         if (fs->fn->ret->k == Type::VOID && s->retVal) {
           diag(Diag::Error, Code::Type, "void function cannot return a value",
-               s->loc.file, s->loc.line, s->loc.col);
+               s->loc);
         }
       } else if (fs->fn->ret->k != Type::VOID) {
         // Phase 0b (report §3.2): a valueless `return;` in a non-void
@@ -398,12 +398,12 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         if (fs->fn->name == "main") {
           diag(Diag::Warning, Code::RetMainImplicit,
                "main() returns implicitly 0; prefer an explicit return",
-               s->loc.file, s->loc.line, s->loc.col);
+               s->loc);
         } else {
           diag(Diag::Error, Code::Ret,
                "non-void function '" + fs->fn->name + "' cannot return without "
                "a value (declared -> " + typeToString(fs->fn->ret) + ")",
-               s->loc.file, s->loc.line, s->loc.col);
+               s->loc);
         }
       }
       break;
@@ -415,7 +415,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         diag(Diag::Error, Code::LoopBreakOutside,
              std::string(s->k == Stmt::BREAK ? "break" : "continue") +
              " outside of a loop",
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
       }
       // Phase 3c (report §12/§14): break/continue DIRECTLY inside a
       // parfor body are now lowered — the semantics are lane-local:
@@ -439,7 +439,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         diag(Diag::Error, Code::Match,
              "match scrutinee must be an enum value, got " +
              typeToString(st),
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
         // still walk arm bodies for other errors
         for (auto& arm : s->matchArms) semaBlock(fs, arm.body);
         break;
@@ -466,7 +466,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         if (vidx < 0) {
           diag(Diag::Error, Code::Match,
                "enum " + ed->name + " has no variant " + arm.variantName,
-               arm.loc.file, arm.loc.line, arm.loc.col);
+               arm.loc);
           semaBlock(fs, arm.body);
           continue;
         }
@@ -479,7 +479,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
                std::to_string(v.fields.size()) +
                " payload value(s); arm binds " +
                std::to_string(arm.bindings.size()),
-               arm.loc.file, arm.loc.line, arm.loc.col);
+               arm.loc);
         }
         // declare bindings in the arm scope
         fs->push();
@@ -503,7 +503,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             diag(Diag::Error, Code::Match,
                  "non-exhaustive match on " + ed->name + ": variant " + v.name +
                  " is not covered (add an arm or `_ => ...`)",
-                 s->loc.file, s->loc.line, s->loc.col);
+                 s->loc);
           }
         }
       }
@@ -514,7 +514,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       Type* ct = typeExpr(fs, s->cond);
       if (ct && ct->k != Type::BOOL) {
         diag(Diag::Error, Code::Type, "if condition must be bool",
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
       }
       semaBlock(fs, s->thenB);
       if (s->elseB) {
@@ -528,7 +528,7 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       Type* ct = typeExpr(fs, s->cond);
       if (ct && ct->k != Type::BOOL) {
         diag(Diag::Error, Code::Type, "while condition must be bool",
-             s->loc.file, s->loc.line, s->loc.col);
+             s->loc);
       }
       fs->loops.push_back({"", s});
       semaBlock(fs, s->body);
@@ -613,7 +613,7 @@ static void semaFnBody(Program* p, FnDecl* f) {
            "non-void function '" + f->name + "' can reach the end of its "
            "body without returning a " + typeToString(f->ret) +
            " — every path must return or terminate (e.g. while (true))",
-           f->loc.file, f->loc.line, f->loc.col);
+           f->loc);
     }
   }
 }
@@ -631,7 +631,7 @@ static void pinContextTo(const std::string& mod) {
   setModuleLookupContext(mod, imps);
 }
 
-bool semaProgram(Program* p) {
+bool semaProgram(Program* p, bool requireMain) {
   S = new SemaState();
   S->prog = p;
 
@@ -651,7 +651,7 @@ bool semaProgram(Program* p) {
       if (f.tyName != "") f.ty = bindType(f.ty, f.tyName, f.loc2);
       if (!f.ty) {
         diag(Diag::Error, Code::Type, "field " + f.name + " has invalid type",
-             sd->loc.file, sd->loc.line, sd->loc.col);
+             sd->loc);
       }
     }
     computeStructLayout(sd);
@@ -673,14 +673,14 @@ bool semaProgram(Program* p) {
     if (!g->init->constant) {
       diag(Diag::Error, Code::Global,
            "global initializer must be constant: " + g->name,
-           g->loc.file, g->loc.line, g->loc.col);
+           g->loc);
     }
     auto& v = S->globalMap[g->name];
     bool dup = false;
     for (auto* o : v)
       if (o->module == g->module) {
         diag(Diag::Error, Code::Dup, "duplicate global: " + g->name,
-             g->loc.file, g->loc.line, g->loc.col);
+             g->loc);
         dup = true;
       }
     if (!dup) v.push_back(g);
@@ -693,7 +693,7 @@ bool semaProgram(Program* p) {
     for (auto* o : v)
       if (o->module == f->module) {
         diag(Diag::Error, Code::Dup, "duplicate function: " + f->name,
-             f->loc.file, f->loc.line, f->loc.col);
+             f->loc);
         dup = true;
       }
     if (dup) continue;
@@ -715,7 +715,7 @@ bool semaProgram(Program* p) {
           diag(Diag::Error, Code::Generic,
                "unknown type constraint '" + c + "' on " + f->tparams[i] +
                " (supported: Numeric, Int, Float, Signed)",
-               f->loc.file, f->loc.line, f->loc.col);
+               f->loc);
         }
       }
     }
@@ -728,7 +728,7 @@ bool semaProgram(Program* p) {
   // reusable Freshet modules into a static archive or another executable.
   const bool executableOutput = !g_opts.emitObj && g_opts.irOut.empty() &&
                                 g_opts.projectTarget == "bin";
-  if (!hasMain && executableOutput)
+  if (!hasMain && executableOutput && requireMain)
     diag(Diag::Error, Code::Main, "no 'fn main()' found", p->file, 0, 0);
 
   for (auto* f : p->fns) {

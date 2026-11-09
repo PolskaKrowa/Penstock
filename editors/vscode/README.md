@@ -41,7 +41,7 @@ Open `editors/vscode` in VS Code and press **F5** to launch an Extension Develop
 
 ```sh
 npm run package
-code --install-extension penstock-project.freshet-language-support-0.1.0.vsix
+code --install-extension penstock-project.freshet-language-support-0.1.1.vsix
 ```
 
 The `Freshet: Restart Language Server` command restarts the server after changing its executable configuration.
@@ -49,3 +49,35 @@ The `Freshet: Restart Language Server` command restarts the server after changin
 ## Current LSP feature set
 
 The server currently provides full-document synchronisation, diagnostics, hover, document symbols, definition, references and rename. Completions and semantic tokens are not implemented yet; syntax highlighting is therefore supplied locally by the TextMate grammar.
+
+## Troubleshooting: “reading 'positionEncoding'” during startup
+
+This error means the client did not receive `result.capabilities` from the
+process it actually launched. The fixed source returns a correctly wrapped
+`InitializeResult`. If the error persists, the most likely cause is that VS Code
+is launching a different, older executable (for example one found on `PATH`, or
+one in another Penstock checkout).
+
+Build the server from this checkout (CMake places it in the checkout's `bin/`):
+
+```sh
+cmake -S . -B build
+cmake --build build --target freshet-language-server --parallel
+python3 scripts/lsp_nav_check.py "$PWD/bin/freshet-language-server"
+```
+
+Then explicitly point VS Code at that exact executable in workspace or user
+settings:
+
+```json
+{
+  "freshet.server.path": "/absolute/path/to/Penstock/bin/freshet-language-server"
+}
+```
+
+This extension build logs the configured command, resolved executable path,
+working directory and executable metadata to **View → Output → Freshet Language
+Server**. Compare the logged path with the path passed to the smoke test above.
+If they differ, VS Code is still launching the old binary. Run **Freshet: Restart
+Language Server** or reload the VS Code window. This diagnostic extension build
+is version `0.1.1`.

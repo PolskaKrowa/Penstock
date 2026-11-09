@@ -32,6 +32,13 @@ fn main() {
     let other: i64 = add(total, 4);
     print_i64(other); println();
 }
+fn accepts_string(value: String) { }
+fn nested_scope() {
+    {
+        let hidden: i64 = 9;
+        print_i64(hidden);
+    }
+}
 """
 # line 4: `    let total: i64 = add(2, 3);`   -> add at [21,24)
 # line 6: `    print_i64(other); println();`  -> other at [15,20)
@@ -95,7 +102,42 @@ edits = r["result"]["changes"][uri]
 assert len(edits) == 2, "rename edit count"
 assert all(e["newText"] == "result" for e in edits), "rename text"
 
-send({"jsonrpc": "2.0", "id": 7, "method": "shutdown"})
+# documentSymbol must not include synthetic prelude declarations with
+# SrcLoc{} (for example String is added lazily when a String type is used).
+send({"jsonrpc": "2.0", "id": 7, "method": "textDocument/documentSymbol",
+      "params": {"textDocument": {"uri": uri}}})
+r = recv()
+assert r and isinstance(r.get("result"), list), "documentSymbol response"
+assert {s["name"] for s in r["result"]} >= {"add", "main", "accepts_string"}, \
+    "documentSymbol should include declarations in this document"
+for symbol in r["result"]:
+    for range_key in ("range", "selectionRange"):
+        for endpoint in ("start", "end"):
+            pos = symbol[range_key][endpoint]
+            assert pos["line"] >= 0, "documentSymbol line must be non-negative"
+            assert pos["character"] >= 0, "documentSymbol character must be non-negative"
+assert "String" not in {s["name"] for s in r["result"]}, \
+    "synthetic prelude String must not appear as a document symbol"
+
+# Local identifier annotations must outlive the lexical scopes in which
+# they were declared.  The semantic analyser pops both the nested block and
+# function-body scopes before LSP navigation walks these AST references.
+send({"jsonrpc": "2.0", "id": 9, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri},
+    "position": {"line": 12, "character": 20}}})
+r = recv()
+assert r and r.get("result"), "hover on a nested-scope local returned nothing"
+assert "hidden" in r["result"]["contents"]["value"], "nested local hover name"
+assert "i64" in r["result"]["contents"]["value"], "nested local hover type"
+
+send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/references", "params": {
+    "textDocument": {"uri": uri},
+    "position": {"line": 12, "character": 20},
+    "includeDeclaration": True}})
+r = recv()
+assert r and len(r["result"]) == 2, "nested local references include declaration + use"
+
+send({"jsonrpc": "2.0", "id": 11, "method": "shutdown"})
 send({"jsonrpc": "2.0", "method": "exit"})
 proc.wait(timeout=10)
 sys.exit(0)

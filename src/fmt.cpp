@@ -583,7 +583,7 @@ bool formatSourceFile(const std::string& path, bool checkOnly) {
             "penstock fmt: refusing to rewrite %s — the formatted output "
             "would change the token stream\n", path.c_str());
     g_diags.push_back({Diag::Error, info(Code::Fmt).id,
-                        "fmt: token stream would change", path, 0, 0, ""});
+                        "fmt: token stream would change", path, 0, 0, 0, 0, ""});
     return false;
   }
   if (checkOnly) {

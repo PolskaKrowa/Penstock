@@ -34,6 +34,51 @@ function resolveServerCommand(config, workspaceFolder) {
   return configured;
 }
 
+function resolveExecutableForLog(command, cwd) {
+  // This is diagnostic only; the LanguageClient still receives the original
+  // command so Node's normal PATH lookup semantics are preserved.
+  if (path.isAbsolute(command) || command.includes(path.sep)) {
+    const candidate = path.isAbsolute(command)
+      ? command
+      : path.resolve(cwd || process.cwd(), command);
+    return fs.existsSync(candidate) ? path.resolve(candidate) : candidate;
+  }
+
+  const pathEntries = (process.env.PATH || '').split(path.delimiter);
+  for (const entry of pathEntries) {
+    const candidate = path.join(entry || process.cwd(), command);
+    if (fs.existsSync(candidate)) {
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return fs.realpathSync(candidate);
+      } catch (_) {
+        // Keep searching for an executable PATH entry.
+      }
+    }
+  }
+  return command;
+}
+
+function logServerLaunch(command, args, options) {
+  const cwd = options.cwd || process.cwd();
+  const resolved = resolveExecutableForLog(command, cwd);
+  outputChannel.appendLine('[Freshet] Starting language server');
+  outputChannel.appendLine(`[Freshet] Configured command: ${command}`);
+  outputChannel.appendLine(`[Freshet] Resolved executable: ${resolved}`);
+  outputChannel.appendLine(`[Freshet] Arguments: ${JSON.stringify(args)}`);
+  outputChannel.appendLine(`[Freshet] Working directory: ${cwd}`);
+  try {
+    const stat = fs.statSync(resolved);
+    outputChannel.appendLine(
+      `[Freshet] Executable file: size=${stat.size} bytes, modified=${stat.mtime.toISOString()}`
+    );
+    fs.accessSync(resolved, fs.constants.X_OK);
+    outputChannel.appendLine('[Freshet] Executable permission: OK');
+  } catch (error) {
+    outputChannel.appendLine(`[Freshet] Executable check: ${error.message}`);
+  }
+}
+
 async function startLanguageClient(context) {
   const config = vscode.workspace.getConfiguration('freshet.server');
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -48,6 +93,8 @@ async function startLanguageClient(context) {
     options.cwd = workspaceFolder.uri.fsPath;
   }
   options.env = { ...process.env, ...extraEnv };
+
+  logServerLaunch(command, args, options);
 
   const serverOptions = {
     command,
@@ -70,7 +117,16 @@ async function startLanguageClient(context) {
   );
   client = languageClient;
 
-  await languageClient.start();
+  try {
+    await languageClient.start();
+  } catch (error) {
+    outputChannel.appendLine(`[Freshet] Language server start failed: ${error?.stack || error}`);
+    vscode.window.showErrorMessage(
+      'Freshet language server failed to initialise. Open View → Output → Freshet Language Server for the executable path.'
+    );
+    throw error;
+  }
+  outputChannel.appendLine('[Freshet] Language server initialised successfully.');
   context.subscriptions.push({
     dispose: () => {
       void languageClient.stop();

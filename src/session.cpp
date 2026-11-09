@@ -19,6 +19,8 @@
 // diagnostic stream without touching every diag() call site.
 #include "session.h"
 #include "irgen.h"
+#include <filesystem>
+#include <cctype>
 
 namespace freshet {
 
@@ -80,6 +82,32 @@ TypeInfo buildTypeInfo(Program* p) {
 // affect lex/parse/sema/checks are saved — emit-IR / binary paths are
 // not used by the LSP MVP.
 namespace {
+// The language server analyses individual editor buffers rather than a
+// whole executable target.  Only direct children of the project's `src/`
+// directory whose basename contains `main` as a standalone filename token
+// are treated as entry-point files.  In particular, src/pkg/foo_main.fsh
+// is a reusable child module and must not require fn main().
+bool lspFileRequiresMain(const std::string& filePath) {
+  namespace fs = std::filesystem;
+  const fs::path path = fs::path(filePath).lexically_normal();
+  if (path.extension() != ".fsh" || path.parent_path().filename() != "src")
+    return false;
+
+  std::string stem = path.stem().string();
+  for (char& ch : stem) ch = (char)std::tolower((unsigned char)ch);
+  size_t at = stem.find("main");
+  while (at != std::string::npos) {
+    const bool leftBoundary = at == 0 ||
+        !std::isalnum((unsigned char)stem[at - 1]);
+    const size_t after = at + 4;
+    const bool rightBoundary = after == stem.size() ||
+        !std::isalnum((unsigned char)stem[after]);
+    if (leftBoundary && rightBoundary) return true;
+    at = stem.find("main", at + 1);
+  }
+  return false;
+}
+
 struct GlobalSwap {
   std::vector<Diag> savedDiags;
   Options savedOpts;
@@ -144,7 +172,9 @@ DocumentAnalysis analyseDocument(const WorkspaceConfig& config,
 
   // ----- 3. sema
   if (errorCount() == 0) {
-    semaProgram(prog);
+    // Normal compiler invocations retain the default required-main policy;
+    // the LSP only expects an entry point in src/<name containing `main`>.
+    semaProgram(prog, lspFileRequiresMain(filePath));
   }
 
   // ----- 4. strict checks (always run in LSP mode — they're how the

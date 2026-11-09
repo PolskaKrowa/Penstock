@@ -41,11 +41,14 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 // Tiny JSON-RPC + LSP framing implementation.  We intentionally do NOT
@@ -320,13 +323,20 @@ std::string uriToPath(const std::string& uri) {
 
 // ---------------- diagnostics -> LSP diagnostic conversion --------------
 Json srcLocToRange(const freshet::SrcLoc& loc) {
-  // LSP positions are 0-indexed; Freshet's are 1-indexed.
+  // LSP positions are 0-indexed; Freshet's source locations are 1-indexed.
+  // Synthetic/prelude declarations can have an empty SrcLoc (line/column 0),
+  // so never let an internal/synthetic location create a negative LSP range.
+  const int startLine = loc.line > 0 ? loc.line : 1;
+  const int startCol  = loc.col > 0 ? loc.col : 1;
+  int endLine = loc.endLine > 0 ? loc.endLine : startLine;
+  int endCol  = loc.endCol  > 0 ? loc.endCol  : startCol + 1;
+  if (endLine < startLine) endLine = startLine;
+  if (endLine == startLine && endCol <= startCol) endCol = startCol + 1;
   auto pos = [](int line, int col) -> Json {
-    return Json::object({{"line", Json::num(line - 1)}, {"character", Json::num(col - 1)}});
+    return Json::object({{"line", Json::num(line - 1)},
+                         {"character", Json::num(col - 1)}});
   };
-  int endLine = loc.endLine ? loc.endLine : loc.line;
-  int endCol  = loc.endCol  ? loc.endCol  : loc.col + 1;
-  return Json::object({{"start", pos(loc.line, loc.col)},
+  return Json::object({{"start", pos(startLine, startCol)},
                        {"end",   pos(endLine, endCol)}});
 }
 
@@ -340,7 +350,13 @@ Json diagToLsp(const Diag& d) {
   int lspSev = 1;  // Error by default
   if (std::string(sev) == "Warning")      lspSev = 2;
   if (std::string(sev) == "Information")   lspSev = 3;
-  Json range = srcLocToRange({d.file, d.line, d.col});
+  freshet::SrcLoc loc;
+  loc.file = d.file;
+  loc.line = d.line;
+  loc.col = d.col;
+  loc.endLine = d.endLine;
+  loc.endCol = d.endCol;
+  Json range = srcLocToRange(loc);
   return Json::object({
     {"range",       range},
     {"severity",    Json::num(lspSev)},
@@ -368,11 +384,36 @@ void sendNotification(const std::string& method, const Json& params) {
   writeMessage(serialize(msg));
 }
 
+// Diagnostics from imported modules are produced during the same semantic
+// analysis as the open document.  They must NOT be published against the
+// entry document's URI: LSP ranges are interpreted in the document named by
+// the notification, so an imported module's line 20 would otherwise be drawn
+// over line 20 of the entry file (often a comment or an unrelated expression).
+// Compare canonical paths so relative imports, `..`, and symlinked workspace
+// roots do not make diagnostics leak across files.
+static bool sameSourceFile(const std::string& a, const std::string& b) {
+  if (a.empty() || b.empty()) return false;
+  namespace fs = std::filesystem;
+  auto normalised = [](const std::string& value) {
+    std::error_code ec;
+    fs::path p = fs::absolute(fs::path(value), ec);
+    if (ec) return fs::path(value).lexically_normal();
+    ec.clear();
+    fs::path canonical = fs::weakly_canonical(p, ec);
+    // If canonicalisation fails (for example, a not-yet-created buffer),
+    // compare the absolute lexical paths instead.  Neither path operation
+    // throws because both use error_code overloads.
+    return ec ? p.lexically_normal() : canonical;
+  };
+  return normalised(a) == normalised(b);
+}
+
 void publishDiagnostics(Workspace& ws, const std::string& uri) {
   std::lock_guard<std::mutex> g(ws.mu);
   auto it = ws.docs.find(uri);
   if (it == ws.docs.end()) return;
   Doc& d = it->second;
+  const std::string documentPath = uriToPath(uri);
   if (d.dirty) {
     // Run analysis (synchronously for MVP).
     AnalysisOptions opts;
@@ -380,11 +421,16 @@ void publishDiagnostics(Workspace& ws, const std::string& uri) {
     opts.runOwnershipAnalysis = true;
     opts.runLoopOptPasses = false;  // LSP shows the user's source, not the rewrite
     opts.emitLLVMIR = false;
-    d.analysis = freshet::analyseDocument(ws.config, uriToPath(uri), d.text, opts);
+    d.analysis = freshet::analyseDocument(ws.config, documentPath, d.text, opts);
     d.dirty = false;
   }
   Json arr = Json::array({});
-  for (auto& dg : d.analysis.diagnostics) {
+  for (const auto& dg : d.analysis.diagnostics) {
+    // `analyseDocument` intentionally analyses the entire import graph so
+    // names and types resolve.  Diagnostics, however, are file-scoped in
+    // LSP.  Imported files get their own diagnostics when they are opened
+    // as documents; never reinterpret their coordinates in this buffer.
+    if (!sameSourceFile(dg.file, documentPath)) continue;
     arr.arr.push_back(diagToLsp(dg));
   }
   sendNotification("textDocument/publishDiagnostics",
@@ -552,13 +598,23 @@ void handleDocumentSymbol(Workspace& ws, int id, const Json& params) {
   }
   Json arr = Json::array({});
   if (it->second.analysis.program) {
+    // `analyseDocument()` merges imported modules into one Program, and
+    // semantic analysis may append prelude declarations (for example the
+    // builtin String struct). Those are not symbols declared in this editor
+    // document. In particular, prelude declarations can have SrcLoc{};
+    // converting line 0 to an LSP position used to emit line -1 and crash
+    // vscode-languageclient while it converted DocumentSymbols.
+    const std::string documentPath = uriToPath(uri->s);
     for (auto& e : it->second.analysis.symbols.entries) {
+      if (e.loc.file != documentPath || e.loc.line < 1 || e.loc.col < 1)
+        continue;
+      Json range = srcLocToRange(e.loc);
       arr.arr.push_back(Json::object({
         {"name",          Json::str(e.name)},
         {"kind",          Json::num(e.kind == freshet::SymbolIndex::Entry::FN ? 12 :
                                        e.kind == freshet::SymbolIndex::Entry::STRUCT ? 23 : 13)},
-        {"range",         srcLocToRange(e.loc)},
-        {"selectionRange", srcLocToRange(e.loc)},
+        {"range",         range},
+        {"selectionRange", range},
         {"detail",        Json::str(e.detail)},
       }));
     }
@@ -603,11 +659,19 @@ struct NavWalker {
   SymbolHit hit;
   size_t bestLen = SIZE_MAX;
   // mode B: collect every identifier occurrence of (kind, decl)
-  SymbolHit::Kind wantKind;
+  SymbolHit::Kind wantKind = SymbolHit::LOCAL;
   void* wantDecl = nullptr;
   std::vector<freshet::SrcLoc> refs;
 
-  bool spanContains(freshet::SrcLoc loc) {
+  // The semantic AST is normally a tree, but transformations and shared
+  // subexpressions can make it a graph.  These sets both avoid visiting a
+  // shared node more than once and prevent a malformed cycle from taking
+  // down the language server.  Iterative worklists also avoid consuming the
+  // C++ call stack for very deeply nested expressions / blocks.
+  std::unordered_set<const freshet::Expr*> seenExprs;
+  std::unordered_set<const freshet::Stmt*> seenStmts;
+
+  bool spanContains(freshet::SrcLoc loc) const {
     // single-point spans (endOffset unset) match a cursor at the start
     uint64_t end = loc.endOffset > loc.startOffset ? loc.endOffset
                                                    : loc.startOffset + 1;
@@ -636,102 +700,141 @@ struct NavWalker {
     }
   }
 
-  void expr(freshet::Expr* e, freshet::FnSema* fs) {
-    if (!e) return;
-    switch (e->k) {
-      case freshet::Expr::IDENT:
-        if (e->sym)
-          consider(e->loc, e->sym->k == freshet::Sym::PARAM ? SymbolHit::PARAM
-                                                    : SymbolHit::LOCAL,
-                   e->sym, e->name,
-                   typeToString(e->sym->ty) +
-                       (e->sym->mut ? " (mut)" : ""),
-                   e->sym->declLoc);
-        if (e->globalRef)
-          consider(e->loc, SymbolHit::GLOBAL, e->globalRef, e->name,
-                   (e->globalRef->mut ? "mut global: " : "global: ") +
-                       typeToString(e->globalRef->ty),
-                   e->globalRef->loc);
-        if (e->fnValue)
-          consider(e->loc, SymbolHit::FN, e->fnValue, e->name,
-                   fnSignature(e->fnValue), e->fnValue->loc);
-        break;
-      case freshet::Expr::CALL:
-        if (e->callee)
-          consider(e->loc, SymbolHit::FN, e->callee, e->name,
-                   fnSignature(e->callee), e->callee->loc);
-        if (e->fnPtrSym)
-          consider(e->loc,
-                   e->fnPtrSym->k == freshet::Sym::PARAM ? SymbolHit::PARAM
-                                                : SymbolHit::LOCAL,
-                   e->fnPtrSym, e->name,
-                   typeToString(e->fnPtrSym->ty), e->fnPtrSym->declLoc);
-        if (e->globalRef)
-          consider(e->loc, SymbolHit::GLOBAL, e->globalRef, e->name,
-                   "global: " + typeToString(e->globalRef->ty),
-                   e->globalRef->loc);
-        break;
-      case freshet::Expr::SLIT:
-        if (e->ty && e->ty->k == freshet::Type::STRUCT)
-          consider(e->loc, SymbolHit::STRUCT, e->ty->sdef, e->name,
-                   "struct " + e->name + " { " +
-                       std::to_string(e->ty->sdef->fields.size()) +
-                       " fields }",
-                   e->ty->sdef->loc);
-        break;
-      default: break;
+  void expr(freshet::Expr* root, freshet::FnSema* /*fs*/) {
+    if (!root) return;
+    std::vector<freshet::Expr*> pending;
+    pending.push_back(root);
+    while (!pending.empty()) {
+      freshet::Expr* e = pending.back();
+      pending.pop_back();
+      if (!e || !seenExprs.insert(e).second) continue;
+
+      switch (e->k) {
+        case freshet::Expr::IDENT:
+          if (e->sym)
+            consider(e->loc, e->sym->k == freshet::Sym::PARAM ? SymbolHit::PARAM
+                                                              : SymbolHit::LOCAL,
+                     e->sym, e->name,
+                     typeToString(e->sym->ty) +
+                         (e->sym->mut ? " (mut)" : ""),
+                     e->sym->declLoc);
+          if (e->globalRef)
+            consider(e->loc, SymbolHit::GLOBAL, e->globalRef, e->name,
+                     (e->globalRef->mut ? "mut global: " : "global: ") +
+                         typeToString(e->globalRef->ty),
+                     e->globalRef->loc);
+          if (e->fnValue)
+            consider(e->loc, SymbolHit::FN, e->fnValue, e->name,
+                     fnSignature(e->fnValue), e->fnValue->loc);
+          break;
+        case freshet::Expr::CALL:
+          if (e->callee)
+            consider(e->loc, SymbolHit::FN, e->callee, e->name,
+                     fnSignature(e->callee), e->callee->loc);
+          if (e->fnPtrSym)
+            consider(e->loc,
+                     e->fnPtrSym->k == freshet::Sym::PARAM ? SymbolHit::PARAM
+                                                            : SymbolHit::LOCAL,
+                     e->fnPtrSym, e->name,
+                     typeToString(e->fnPtrSym->ty), e->fnPtrSym->declLoc);
+          if (e->globalRef)
+            consider(e->loc, SymbolHit::GLOBAL, e->globalRef, e->name,
+                     "global: " + typeToString(e->globalRef->ty),
+                     e->globalRef->loc);
+          break;
+        case freshet::Expr::SLIT:
+          // In incomplete/error-recovery ASTs a struct placeholder may
+          // have a STRUCT kind but no bound StructDef.  Do not dereference
+          // it while answering an editor navigation request.
+          if (e->ty && e->ty->k == freshet::Type::STRUCT && e->ty->sdef) {
+            freshet::StructDef* sd = e->ty->sdef;
+            consider(e->loc, SymbolHit::STRUCT, sd, e->name,
+                     "struct " + e->name + " { " +
+                         std::to_string(sd->fields.size()) + " fields }",
+                     sd->loc);
+          }
+          break;
+        default:
+          break;
+      }
+
+      // Push children in reverse visitation order so the walk retains the
+      // previous depth-first order: args, lhs, rhs, then base.
+      if (e->base) pending.push_back(e->base);
+      if (e->rhs) pending.push_back(e->rhs);
+      if (e->lhs) pending.push_back(e->lhs);
+      for (auto it = e->args.rbegin(); it != e->args.rend(); ++it)
+        if (*it) pending.push_back(*it);
     }
-    for (auto* a : e->args) expr(a, fs);
-    expr(e->lhs, fs);
-    expr(e->rhs, fs);
-    expr(e->base, fs);
   }
 
-  void stmt(freshet::Stmt* s, freshet::FnSema* fs) {
-    if (!s) return;
-    switch (s->k) {
-      case freshet::Stmt::LET:
-        // the declaration site itself is a reference for rename
-        if (wantDecl && s->init) {
-          freshet::Expr* id = nullptr;
-          // resolve `let x = ...` where x is the wanted local
-          if (fs) {
-            for (auto& sym : fs->allSyms)
+  void stmt(freshet::Stmt* root, freshet::FnSema* fs) {
+    if (!root) return;
+    std::vector<freshet::Stmt*> pending;
+    pending.push_back(root);
+    while (!pending.empty()) {
+      freshet::Stmt* s = pending.back();
+      pending.pop_back();
+      if (!s || !seenStmts.insert(s).second) continue;
+
+      switch (s->k) {
+        case freshet::Stmt::LET:
+          // The declaration site itself is a reference for rename.
+          if (wantDecl && s->init && fs) {
+            for (auto& sym : fs->allSyms) {
               if (sym.declLoc.startOffset == s->loc.startOffset &&
-                  (void*)&sym == wantDecl)
+                  (void*)&sym == wantDecl) {
                 refs.push_back(s->loc);
+                break;
+              }
+            }
           }
-        }
-        expr(s->init, fs);
-        break;
-      case freshet::Stmt::ASSIGN: expr(s->lhs, fs); expr(s->rhs, fs); break;
-      case freshet::Stmt::RETURN: expr(s->retVal, fs); break;
-      case freshet::Stmt::DEFER: expr(s->deferExpr, fs); break;
-      case freshet::Stmt::EXPR: expr(s->expr, fs); break;
-      case freshet::Stmt::IF: expr(s->cond, fs); stmt(s->thenB, fs); stmt(s->elseB, fs); break;
-      case freshet::Stmt::WHILE: expr(s->cond, fs); stmt(s->body, fs); break;
-      case freshet::Stmt::FOR:
-        if (s->forRange) { expr(s->rangeLo, fs); expr(s->rangeHi, fs); }
-        else { expr(s->forInit, fs); expr(s->forCond, fs); expr(s->forStep, fs); }
-        stmt(s->body, fs);
-        break;
-      case freshet::Stmt::PARFOR:
-        expr(s->plo, fs); expr(s->phi, fs);
-        for (auto& c : s->clauses) expr(c.e, fs);
-        stmt(s->body, fs);
-        break;
-      case freshet::Stmt::MATCH:
-        expr(s->matchOn, fs);
-        for (auto& arm : s->matchArms) stmt(arm.body, fs);
-        break;
-      case freshet::Stmt::BLOCK:
-        for (auto* st : s->stmts) stmt(st, fs);
-        break;
-      default: break;
+          expr(s->init, fs);
+          break;
+        case freshet::Stmt::ASSIGN:
+          expr(s->lhs, fs); expr(s->rhs, fs); break;
+        case freshet::Stmt::RETURN: expr(s->retVal, fs); break;
+        case freshet::Stmt::DEFER: expr(s->deferExpr, fs); break;
+        case freshet::Stmt::EXPR: expr(s->expr, fs); break;
+        case freshet::Stmt::IF:
+          expr(s->cond, fs);
+          if (s->elseB) pending.push_back(s->elseB);
+          if (s->thenB) pending.push_back(s->thenB);
+          break;
+        case freshet::Stmt::WHILE:
+          expr(s->cond, fs);
+          if (s->body) pending.push_back(s->body);
+          break;
+        case freshet::Stmt::FOR:
+          if (s->forRange) {
+            expr(s->rangeLo, fs); expr(s->rangeHi, fs);
+          } else {
+            expr(s->forInit, fs); expr(s->forCond, fs); expr(s->forStep, fs);
+          }
+          if (s->body) pending.push_back(s->body);
+          break;
+        case freshet::Stmt::PARFOR:
+          expr(s->plo, fs); expr(s->phi, fs);
+          for (auto& c : s->clauses) expr(c.e, fs);
+          if (s->body) pending.push_back(s->body);
+          break;
+        case freshet::Stmt::MATCH:
+          expr(s->matchOn, fs);
+          for (auto it = s->matchArms.rbegin(); it != s->matchArms.rend(); ++it)
+            if (it->body) pending.push_back(it->body);
+          break;
+        case freshet::Stmt::BLOCK:
+          for (auto it = s->stmts.rbegin(); it != s->stmts.rend(); ++it)
+            if (*it) pending.push_back(*it);
+          break;
+        default:
+          break;
+      }
     }
   }
 
   static std::string fnSignature(freshet::FnDecl* f) {
+    if (!f) return "fn <invalid>";
     std::string sig = "fn " + f->name + "(";
     for (size_t i = 0; i < f->params.size(); ++i) {
       if (i) sig += ", ";
@@ -741,14 +844,14 @@ struct NavWalker {
     return sig;
   }
 };
-
 // resolve the symbol at a byte offset; also collects ALL references to it
 SymbolHit resolveSymbolAt(Program* prog, size_t offset,
                           std::vector<freshet::SrcLoc>& refsOut) {
+  if (!prog) return {};
   NavWalker finder;
   finder.offset = offset;
   for (auto* f : prog->fns) {
-    if (f->imported || f->isGeneric || !f->body) continue;
+    if (!f || f->imported || f->isGeneric || !f->body) continue;
     freshet::FnSema* fs = freshet::semaForFn(f);
     finder.stmt(f->body, fs);
   }
@@ -758,7 +861,7 @@ SymbolHit resolveSymbolAt(Program* prog, size_t offset,
   collector.wantKind = finder.hit.kind;
   collector.wantDecl = finder.hit.decl;
   for (auto* f : prog->fns) {
-    if (f->imported || f->isGeneric || !f->body) continue;
+    if (!f || f->imported || f->isGeneric || !f->body) continue;
     freshet::FnSema* fs = freshet::semaForFn(f);
     collector.stmt(f->body, fs);
   }
