@@ -24,10 +24,9 @@ penstock [options] input.fsh [more.fsh ...]
   `@reproducible` builds are bit-identical across thread counts.
 - **Embedded Freshet superoptimisation.** CMake bootstraps a no-superopt
   compiler, uses it to compile the Freshet optimisation loop, then links that
-  loop plus the shared Z3/Alive2/LLVM dynamic libraries (compiled from the
-  bundled `third_party/` submodules) into BOTH `penstock` and
-  `freshet-language-server`. No Souper, `alive-tv`, or `z3` runtime
-  executable is required — see [docs/superopt-guide.md](docs/superopt-guide.md).
+  loop with static Z3 and in-process Alive2 into the final executable. No
+  Souper, `alive-tv`, or `z3` runtime executable is required — see
+  [docs/superopt-guide.md](docs/superopt-guide.md).
 - **Observability.** `--report` merges [static]/[backend]/[runtime] layers;
   `--opt-remarks`, `--emit-final-ir` and `--save-temps` expose exactly what
   the backend did.
@@ -40,12 +39,8 @@ penstock [options] input.fsh [more.fsh ...]
 
 ## Quick start
 
-Linux, **CMake ≥ 3.16**. Clone with `--recurse-submodules` (or run
-`git submodule update --init` first): the build compiles Z3, Alive2 and the
-verifier LLVM from the `third_party/` submodules into shared libraries and
-links them into both binaries; without submodules it fetches the same
-sources. On the first configure with no local LLVM 19–23 toolchain, the
-build also downloads the official LLVM 23.1.4 backend SDK automatically
+Linux, **CMake ≥ 3.16**. On the first configure with no local LLVM 19–23
+toolchain, the build downloads the official LLVM 23.1.4 SDK automatically
 (SHA-256-verified, cached under `build/_deps`).
 
 ```sh
@@ -113,11 +108,6 @@ runtime/        libfreshet runtime (frt_rt.c): memory, SoA planes,
 modules/        the `fsh` standard-library module
 plugins/opt/    optional LLVM opt pass plugin (PenstockOptPlugin)
 lean/           Lean proof-kernel sources (PenstockProofs.lean)
-third_party/    git submodules — llvm (verifier LLVM for Alive2),
-                alive2, z3 — compiled into the shared superoptimiser
-                libraries linked into penstock and the language server
-                (`git submodule update --init`; release tarballs omit
-                the contents and the build fetches sources instead)
 cmake/          build modules — LlvmBootstrap, PenstockTargets,
                 PenstockOptPlugin, PenstockTests, PenstockInstall —
                 plus the installed package files

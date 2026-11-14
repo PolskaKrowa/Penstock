@@ -7,25 +7,21 @@ records the selected LLVM prefix, while `LLVM_ROOT` can override it later.
 
 ## Build and install
 
-On Linux, install CMake and the normal system development prerequisites, then
-populate the git submodules — the default build compiles Z3, Alive2 and the
-verifier LLVM from `third_party/` into shared libraries (`libz3.so`, the
-Alive2 libraries and an RTTI/EH `libLLVM.so`) and links them into BOTH
-`penstock` and `freshet-language-server`. If CMake does not find an LLVM
-19–23 installation, it downloads the official LLVM 23.1.4 backend SDK
-automatically (including `clang`, `clang++`, `opt` and the plugin development
-files); a system toolchain can be pinned instead, for example LLVM 20 at
-`/usr/lib/llvm-20`, as shown below. Without populated submodules the
-configure falls back to fetching the same dependency sources with
-FetchContent. The selected backend needs a matching LLVM development SDK
-(headers, `LLVMConfig.cmake` and libraries); CMake fetches a same-major SDK
-when the local Clang installation does not include one. Alive2's source build
-also needs `re2c` at build time. `re2c` is not used by the installed compiler.
-Set `-DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=OFF` only when building a compiler
-without the embedded superoptimiser.
+On Linux, install CMake and the normal system development prerequisites. If
+CMake does not find an LLVM 19–23 installation, it downloads the official
+LLVM 23.1.4 SDK automatically (including `clang`, `clang++`, `opt` and the
+plugin development files). To use a system toolchain instead, for example
+LLVM 20 at `/usr/lib/llvm-20`:
+
+The default CMake build also fetches Z3 and Alive2, builds them as static
+libraries, and embeds them in Penstock. The selected backend needs a matching
+LLVM development SDK (headers, `LLVMConfig.cmake` and libraries); CMake fetches
+a same-major SDK when the local Clang installation does not include one.
+Alive2's source build also needs `re2c` at build time. `re2c` is not used by
+the installed compiler. Set `-DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=OFF` only when
+building a compiler without the embedded superoptimiser.
 
 ```sh
-git submodule update --init
 cmake -S . -B build -DLLVM_ROOT=/usr/lib/llvm-20 \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local"
@@ -48,13 +44,12 @@ local LLVM installation and prevent downloads.
 | `PENSTOCK_LLVM_VERSION` | `23.1.4` | LLVM release to fetch when no local toolchain exists |
 | `PENSTOCK_LLVM_DOWNLOAD_DIR` | `build/_deps` | Download/extraction cache directory |
 | `PENSTOCK_BUILD_OPT_PLUGIN` | `ON` | Build the loadable `opt` pass plugin (a matching SDK is fetched if the local clang lacks development files) |
-| `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Bootstrap and embed Freshet superoptimisation; shared Z3/Alive2/LLVM are linked into penstock AND freshet-language-server |
-| `PENSTOCK_USE_SUBMODULES` | `ON` | Compile Z3/Alive2/LLVM from the `third_party/` submodules when present; FetchContent fallback otherwise |
+| `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Bootstrap and embed Freshet superoptimisation with static Z3 and Alive2 |
 | `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them |
 | `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | empty | Use a local `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
 | `PENSTOCK_ALIVE2_LLVM_BUILD_DIR` | `build/_deps/penstock-alive2-llvm-build` | Private LLVM build directory used by the verifier |
-| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision used by the FetchContent fallback (submodule gitlink pins the build) |
-| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision used by the FetchContent fallback (submodule gitlink pins the build) |
+| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision fetched and statically linked |
+| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and statically linked |
 | `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master |
 | `PENSTOCK_FETCH_ZSTD` | `ON` | Fetch and build zstd when the selected LLVM SDK requires it and no system library is available |
 | `PENSTOCK_ZSTD_VERSION` | `1.5.7` | Pinned zstd release for the fallback build |
@@ -68,11 +63,7 @@ resolved `LLVM_ROOT` so the C baseline compiles with the same backend.
 
 The installed files include:
 
-- `~/.local/bin/penstock`, `~/.local/bin/freshet-language-server` — compiler
-  driver and language server (both RPATH-linked against the embedded shared
-  libraries);
-- `~/.local/lib/penstock/embedded/lib/` — the shared `libLLVM.so`, `libz3.so`
-  and Alive2 dynamic libraries both binaries (and the O4 opt plugin) load;
+- `~/.local/bin/penstock` — compiler driver;
 - `~/.local/share/penstock/runtime/frt_rt.c` — bundled runtime source;
 - `~/.local/lib/libfsh.a` and `~/.local/include/fsh/` — the C runtime API;
 - `~/.local/lib/cmake/Penstock/` — CMake package configuration and imported targets.

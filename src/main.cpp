@@ -508,16 +508,8 @@ static std::string stripUserRtDecls(const std::string& ll) {
 //     |
 //     = help: <text after " — " in the message>
 // Colour: only when stderr is a tty (or CLICOLOR_FORCE); NO_COLOR disables.
-// CLICOLOR_FORCE follows the common convention that "0" and the empty
-// string mean "not forced" — an environment that exports CLICOLOR_FORCE=0
-// (e.g. CI sandboxes) must not paint escape codes into redirected files.
-static bool penstockColourForced() {
-  const char* force = getenv("CLICOLOR_FORCE");
-  return force && *force != '\0' && strcmp(force, "0") != 0;
-}
 static std::string paint(const char* sgr, const std::string& s) {
-  static const bool on =
-    penstockColourForced() || (!getenv("NO_COLOR") && isatty(2));
+  static const bool on = getenv("CLICOLOR_FORCE") || (!getenv("NO_COLOR") && isatty(2));
   return on ? std::string("\x1b[") + sgr + "m" + s + "\x1b[0m" : s;
 }
 static const std::vector<std::string>& srcLines(const std::string& f) {

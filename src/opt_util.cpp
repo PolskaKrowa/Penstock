@@ -556,6 +556,28 @@ Stmt* cloneStmt(const Stmt* s, const std::map<Sym*, Expr*>& substBySym) {
   n->body = cloneStmt(s->body, substBySym);
   n->depth = s->depth;
   n->collapsed = s->collapsed;
+  // loop hints / reproducibility / unsafe scope must survive a clone:
+  // distribution, unroll-jam, tile and LICM clone whole bodies, and a
+  // cloned parfor silently losing @vectorize/@reproducible (or an unsafe
+  // BLOCK losing its flag) changes codegen of the transformed program.
+  n->vectorizeHint = s->vectorizeHint;
+  n->reproducible = s->reproducible;
+  n->isUnsafe = s->isUnsafe;
+  // MATCH: the scrutinee and every arm (bindings + cloned body) used to be
+  // dropped entirely — a cloned match rendered as an empty match and its
+  // arms' effects vanished from the transformed program.
+  n->matchOn = cloneExpr(s->matchOn, substBySym);
+  for (auto& arm : s->matchArms) {
+    MatchArm a2;
+    a2.wildcard = arm.wildcard;
+    a2.enumName = arm.enumName;
+    a2.variantName = arm.variantName;
+    a2.variantIdx = arm.variantIdx;
+    a2.bindings = arm.bindings;
+    a2.body = cloneStmt(arm.body, substBySym);
+    a2.loc = arm.loc;
+    n->matchArms.push_back(std::move(a2));
+  }
   n->expr = cloneExpr(s->expr, substBySym);
   for (auto* st : s->stmts) n->stmts.push_back(cloneStmt(st, substBySym));
   n->parent = s->parent;

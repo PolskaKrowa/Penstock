@@ -270,19 +270,31 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
   for (auto& [code, n] : byCode)
     R << "  " << code << " (" << findCode(code)->slug << ") x" << n << "\n";
 
-  // struct layout table
+  // struct layout table.  Generic STRUCT TEMPLATES (e.g. `struct P<T>`)
+  // carry field names but never get a layout — offsets/sizes are computed
+  // at instantiation only (generics.cpp) — so index them defensively:
+  // a template row shows its fields without offset@size instead of
+  // reading past the end of empty vectors (null-base SEGV).
   if (!p->structs.empty()) {
     std::ostringstream S;
     for (auto* sd : p->structs) {
+      const bool laidOut =
+          sd->offsets.size() == sd->fields.size() &&
+          sd->sizes.size() == sd->fields.size();
       char buf[64];
       snprintf(buf, sizeof buf, "  %-12s %5llu %5llu %5llu   ",
-               sd->name.c_str(), (unsigned long long)sd->size,
-               (unsigned long long)sd->align, (unsigned long long)sd->padBytes);
+               sd->name.c_str(),
+               (unsigned long long)(laidOut ? sd->size : 0),
+               (unsigned long long)(laidOut ? sd->align : 0),
+               (unsigned long long)(laidOut ? sd->padBytes : 0));
       S << buf;
       for (size_t i = 0; i < sd->fields.size(); ++i) {
         if (i) S << ", ";
-        S << sd->fields[i].name << ":" << sd->offsets[i]
-          << "@" << sd->sizes[i];
+        S << sd->fields[i].name;
+        if (laidOut)
+          S << ":" << sd->offsets[i] << "@" << sd->sizes[i];
+        else
+          S << ":(template)";
       }
       S << "\n";
     }

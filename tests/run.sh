@@ -3,9 +3,6 @@
 # usage: tests/run.sh
 set -u
 cd "$(dirname "$0")/.."
-# Diagnostics text must be deterministic: an ambient CLICOLOR_FORCE (even =0)
-# or a tty must not paint escape codes into the captured stderr files.
-export NO_COLOR=1
 PEN=bin/penstock
 PEN_LSP=bin/freshet-language-server
 TMP=$(mktemp -d)
@@ -193,24 +190,6 @@ if $PEN -O4 tests/pos_o4.fsh -o "$TMP/o4" 2>"$TMP/o4.err" \
     ok "-O4 build uses verified-superopt path by default and output is correct"
   else bad "-O4 output wrong (got '$out')"; fi
 else bad "-O4 build failed"; sed -n '1,5p' "$TMP/o4.err"; fi
-
-echo "== superopt dynamic-library parity: penstock + language server =="
-# parity: when the embedded superoptimiser is built, bin/penstock AND
-# bin/freshet-language-server must link the SAME shared Z3/Alive2/LLVM
-# dynamic libraries; the g++ fallback (scripts/build.sh) links neither.
-# A mixed state is a packaging bug the configure would otherwise hide.
-if ldd "$PEN" 2>/dev/null | grep -q 'libz3\.so'; then pen_dyn=yes; else pen_dyn=no; fi
-if ldd "$PEN_LSP" 2>/dev/null | grep -q 'libz3\.so'; then lsp_dyn=yes; else lsp_dyn=no; fi
-if [ "$pen_dyn" != "$lsp_dyn" ]; then
-  bad "superopt linkage mismatch (penstock=$pen_dyn, language-server=$lsp_dyn)"
-elif [ "$pen_dyn" = "yes" ]; then
-  if ldd "$PEN" 2>/dev/null | grep -q 'alive2\|libir\.so' && \
-     ldd "$PEN_LSP" 2>/dev/null | grep -q 'alive2\|libir\.so'; then
-    ok "both binaries link the shared Z3/Alive2 superoptimiser libraries"
-  else bad "shared Z3 present but Alive2 shared libraries missing from a binary"; fi
-else
-  ok "fallback build: neither binary links the shared superoptimiser libraries"
-fi
 
 echo "== R4: loop fusion + full unrolling =="
 # fusion: 3-phase FFT-multiply batch pipeline (fwd / pointwise / inv over

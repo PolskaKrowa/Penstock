@@ -860,7 +860,7 @@ They run post-sema / post-checks / post-Phase-D, pre-IRgen, like every
 other R4 transform, and each applied rewrite records its legality
 premises in the `--proof-log`.
 
-**`--mem-reuse` (`F0919`) — allocation churn elimination.**
+**`--mem-reuse` (F0919) — allocation churn elimination.**
 Two shapes:
 
 - *Loop churn*: a `for`/`while` loop (never `parfor` — its iterations
@@ -881,7 +881,7 @@ Two shapes:
   becomes `let q = p;` — the freed block is reused instead of returned
   to the allocator.  (`--mov-minimize` then forwards the alias.)
 
-**`--mov-minimize` (`F0918`) — redundant value-move elimination.**
+**`--mov-minimize` (F0918) — redundant value-move elimination.**
 Removes the "expensive mov" family at the source level:
 self-assignments (`x = x`, `s.f = s.f` on non-pointer locals — a
 load+store, a whole-aggregate memcpy back into the same slot), dead
@@ -896,7 +896,7 @@ write goes through an immutable non-owned binding).  The mis-grouped
 scalar ops that survive into the vectoriser as lane-crossing shuffles
 are the vectorised-mov half of the family — addressed by `--batch-ops`.
 
-**`--batch-ops` (`F0920`) and `--vector-plan` (`F0921`) — separable-routine
+**`--batch-ops` (F0920) and `--vector-plan` (F0921) — separable-routine
 analysis and SLP batching.**  The vectorisation helper: for every
 straight-line statement list (and loop body) it builds the def-use +
 memory-dependence DAG (scalar names; memory (root, index-canonical +
