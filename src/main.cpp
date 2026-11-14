@@ -80,6 +80,25 @@ static const char* USAGE =
     "  --superopt-objective=<o>  latency | size | balanced (default latency)\n"
     "  --target-cache-line= / --target-l1= / --target-l2= /\n"
     "  --target-vector-width=    profitability-model target overrides\n"
+    "\n"
+    "  mem & vectorisation stage (opt-in; --no-* = differential hatch):\n"
+    "  --mem-stage        enable all three sub-passes below at once\n"
+    "  --mem-reuse        hoist alloc/free churn out of loops, fuse free +\n"
+    "                    identical realloc into one reused buffer (F0919)\n"
+    "  --mov-minimize     remove self-assignments, dead `let a = b` copies\n"
+    "                    and forward immutable movs (incl. whole-aggregate\n"
+    "                    copies that lower to memcpy) (F0918)\n"
+    "  --batch-ops        reorder so isomorphic independent statements sit\n"
+    "                    adjacent — SLP packs them into vector ops instead\n"
+    "                    of lane-crossing shuffles (F0920)\n"
+    "  --vector-plan      advisory: report each function's separable\n"
+    "                    routines, their batchability and dataflow (F0921)\n"
+    "  --smt-interleave   pair adjacent INDEPENDENT parfor regions with\n"
+    "                    complementary memory/compute character: one\n"
+    "                    frt_parfor_pair dispatch lets the runtime run the\n"
+    "                    memory stream on one SMT sibling while the other\n"
+    "                    keeps the shared ALU busy (F0922; runtime env\n"
+    "                    FRT_SMT_INTERLEAVE=1 enables the lane routing)\n"
     "  --strict-performance  treat performance diagnostics (F0401-F0406: the\n"
     "                      arith-div-*, cache-* and loop-* family) as hard errors\n"
     "                      — the HPC mode\n"
@@ -489,8 +508,16 @@ static std::string stripUserRtDecls(const std::string& ll) {
 //     |
 //     = help: <text after " — " in the message>
 // Colour: only when stderr is a tty (or CLICOLOR_FORCE); NO_COLOR disables.
+// CLICOLOR_FORCE follows the common convention that "0" and the empty
+// string mean "not forced" — an environment that exports CLICOLOR_FORCE=0
+// (e.g. CI sandboxes) must not paint escape codes into redirected files.
+static bool penstockColourForced() {
+  const char* force = getenv("CLICOLOR_FORCE");
+  return force && *force != '\0' && strcmp(force, "0") != 0;
+}
 static std::string paint(const char* sgr, const std::string& s) {
-  static const bool on = getenv("CLICOLOR_FORCE") || (!getenv("NO_COLOR") && isatty(2));
+  static const bool on =
+    penstockColourForced() || (!getenv("NO_COLOR") && isatty(2));
   return on ? std::string("\x1b[") + sgr + "m" + s + "\x1b[0m" : s;
 }
 static const std::vector<std::string>& srcLines(const std::string& f) {
@@ -875,6 +902,23 @@ int main(int argc, char** argv) {
     if (a == "--unroll-and-jam")     { g_opts.unrollJamOn = true; continue; }
     if (a == "--no-unroll-and-jam")  { g_opts.unrollJamOn = false; continue; }
     if (a == "--parfor-advisor")     { g_opts.parforAdvisorOn = true; continue; }
+    // ---- mem & vectorisation stage (opt-in, --no-* differential hatches)
+    if (a == "--mem-stage")          { g_opts.memReuseOn = true;
+                                       g_opts.movMinOn = true;
+                                       g_opts.batchOpsOn = true; continue; }
+    if (a == "--no-mem-stage")       { g_opts.memReuseOn = false;
+                                       g_opts.movMinOn = false;
+                                       g_opts.batchOpsOn = false; continue; }
+    if (a == "--mem-reuse")          { g_opts.memReuseOn = true; continue; }
+    if (a == "--no-mem-reuse")       { g_opts.memReuseOn = false; continue; }
+    if (a == "--mov-minimize")       { g_opts.movMinOn = true; continue; }
+    if (a == "--no-mov-minimize")    { g_opts.movMinOn = false; continue; }
+    if (a == "--batch-ops")          { g_opts.batchOpsOn = true; continue; }
+    if (a == "--no-batch-ops")       { g_opts.batchOpsOn = false; continue; }
+    if (a == "--vector-plan")        { g_opts.vectorPlanOn = true; continue; }
+    if (a == "--no-vector-plan")     { g_opts.vectorPlanOn = false; continue; }
+    if (a == "--smt-interleave")     { g_opts.smtInterleaveOn = true; continue; }
+    if (a == "--no-smt-interleave")  { g_opts.smtInterleaveOn = false; continue; }
     if (a.rfind("--proof-log=", 0) == 0) {
       g_opts.proofLogOn = true;
       g_opts.proofLogPath = a.substr(12);
@@ -1289,11 +1333,25 @@ int main(int argc, char** argv) {
   // rewrites struct declarations before names are bound.
   int nConstFold = 0, nFuseUnroll = 0, nLane = 0, nAdvise = 0;
   LoopXformCounts nXform;
+  MemStageCounts nMemStage;
+  int nBatched = 0;
   if (g_opts.optLevel >= 2 && !g_opts.noLoopOpts && !g_opts.profile) {
     nConstFold = runTypedConstFoldPass(prog);
     nFuseUnroll = runFuseUnrollPasses(prog);
     nLane = runLaneAnalysisPass(prog);
     nXform = runLoopTransformPasses(prog);
+    // ---- mem & vectorisation stage (4.6): post-Phase-D, pre-advisor.
+    // mem-reuse first (its fused free/alloc introduces movs), then
+    // mov-minimise (forwards them + the source's own copies), then the
+    // separable-routine analysis: advisory first (reports the
+    // opportunities), the batching transform second (applies them).
+    // SMT pairing last: it marks adjacent independent parfors for the
+    // paired dispatch IRgen emits.
+    nMemStage = runMemStagePasses(prog);
+    if (g_opts.vectorPlanOn || g_opts.batchOpsOn)
+      nBatched = runVectorPlanPass(prog, /*applyBatching=*/true);
+    int nSmtPairs = runSmtInterleavePass(prog);
+    nMemStage.smtPairs = nSmtPairs;
     if (g_opts.parforAdvisorOn) nAdvise = runParforAdvisorPass(prog);
     if (nConstFold + nFuseUnroll + nLane + nXform.total() + nAdvise > 0) {
       fprintf(stderr, "penstock: loop-opts: %d const-fold, %d fusion/unroll, "
@@ -1306,6 +1364,16 @@ int main(int argc, char** argv) {
               nXform.interchange, nXform.tile, nXform.distribute,
               nXform.unrollJam,
               nAdvise > 0 ? ", +parfor advice" : "");
+    }
+    if (nMemStage.total() > 0 || nBatched > 0) {
+      int nVecNotes = 0;
+      for (auto& d : g_diags)
+        if (d.code == "F0921") ++nVecNotes;
+      fprintf(stderr, "penstock: mem-stage: %d reuse, %d mov-min, "
+                      "%d batched list(s), %d vector-plan note(s), "
+                      "%d smt pair(s) applied\n",
+              nMemStage.memReuse, nMemStage.movMin, nBatched,
+              nVecNotes, nMemStage.smtPairs);
     }
   }
 

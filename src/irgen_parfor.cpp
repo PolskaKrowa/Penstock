@@ -227,51 +227,41 @@ static void genCollapsedInner(Stmt* pf) {
   G->curLabelTerminated = false;
 }
 
-void genParfor(Stmt* pf) {
-  // collapsed inner (rectangular): serialized inside the outer chunk fn
-  if (pf->collapsed && G->curFnIsChunkFn) {
-    genCollapsedInner(pf);
-    return;
-  }
-
-  int N = G->parforCounter++;
-  FnDecl* saveFn = G->curFn;
-  FnSema* saveFs = G->curFs;
-  int saveTmp = G->tmp, saveBb = G->bb;
-  auto saveAllocas = G->varAllocas;
-  bool saveChunk = G->curFnIsChunkFn;
-
-  // ---------------- reductions & scheduling
+// New genParfor for irgen_parfor.cpp — replaces lines 230..587
+// (from `void genParfor(Stmt* pf) {` through the closing `}` before
+// `} // namespace freshet`).
+// ---- mem & vectorisation stage: one parfor region's caller-side pieces
+struct PfRegion {
+  Stmt* pf = nullptr;
+  int N = 0;
+  std::string rng, ctxout, nchunks;
   std::vector<std::pair<std::string, std::string>> reds;   // (op, var)
-  std::string affinity = "close";
-  for (auto& c : pf->clauses) {
-    if (c.k == ParForClause::REDUCTION) reds.push_back({c.redOp, c.var});
-    if (c.k == ParForClause::AFFINITY) affinity = c.sval;
-  }
   std::set<std::string> redVars;
-  for (auto& r : reds) redVars.insert(r.second);
-
-  // ---------------- captured vars & body-declared names
   std::set<std::string> bodyDeclared;
   std::vector<std::string> captured;
-  collectCaptured(pf->body, pf->pvar, bodyDeclared, redVars, captured);
-  // body vars also include names of inner-parfor reduction vars that are
-  // NOT declared in the body (they're outer fn vars) — those are captured.
-  uint64_t accBase = alignUp(8 * captured.size(), 64);
-  uint64_t ctxSize = (captured.empty() && reds.empty()) ? 64
-                                                        : accBase + 64 * reds.size();
+  uint64_t accBase = 0, ctxSize = 64;
+  std::string affinity = "close";
+};
 
-  FnSema* fs = G->curFs;
-  std::map<std::string, Type*> varTypes;
-  for (auto& sym : fs->allSyms) varTypes[sym.name] = sym.ty;
-  for (auto* g : G->prog->globals)
-    if (!varTypes.count(g->name)) varTypes[g->name] = g->ty;
-  auto tyOf = [&](const std::string& n) -> Type* {
-    if (varTypes.count(n)) return varTypes[n];
-    return Type::ptr(Type::simple(Type::U8));
-  };
+// caller-context emission: lo/hi, ctx template, range struct (incl. the
+// §6.12 body-cost class and the mem-stage memory/compute class at 72)
+static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
+                             const std::function<Type*(const std::string&)>& tyOf,
+                             PfRegion* r) {
+  r->pf = pf;
+  r->N = N;
+  for (auto& c : pf->clauses) {
+    if (c.k == ParForClause::REDUCTION) r->reds.push_back({c.redOp, c.var});
+    if (c.k == ParForClause::AFFINITY) r->affinity = c.sval;
+  }
+  for (auto& red : r->reds) r->redVars.insert(red.second);
+  collectCaptured(pf->body, pf->pvar, r->bodyDeclared, r->redVars,
+                  r->captured);
+  r->accBase = alignUp(8 * r->captured.size(), 64);
+  r->ctxSize = (r->captured.empty() && r->reds.empty())
+                   ? 64
+                   : r->accBase + 64 * r->reds.size();
 
-  // ================================================== caller dispatch part
   std::string lo = genExpr(pf->plo);
   if (pf->plo->ty && pf->plo->ty->bits() < 64)
     lo = genCastInline(pf->plo, Type::simple(Type::I64), lo);
@@ -281,69 +271,62 @@ void genParfor(Stmt* pf) {
 
   // ctx template
   std::string tmpl = G->t();
-  G->out << "  " << tmpl << " = alloca i8, i64 " << ctxSize << ", align 64\n";
-  for (size_t k = 0; k < captured.size(); ++k) {
+  G->out << "  " << tmpl << " = alloca i8, i64 " << r->ctxSize
+         << ", align 64\n";
+  for (size_t k = 0; k < r->captured.size(); ++k) {
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr " << tmpl << ", i64 "
            << (8 * k) << "\n";
-    std::string srcA = G->varAllocas.count(captured[k])
-                         ? G->varAllocas[captured[k]] : "";
+    std::string srcA = G->varAllocas.count(r->captured[k])
+                           ? G->varAllocas[r->captured[k]] : "";
     if (srcA.empty()) {
       // Phase 3a: captured GLOBAL — use the collision-aware IR symbol
       GlobalVar* cg = nullptr;
       for (auto* g : G->prog->globals)
-        if (g->name == captured[k]) { cg = g; break; }
-      srcA = cg ? ("@" + irGlobalSymbol(cg)) : ("@" + captured[k]);
+        if (g->name == r->captured[k]) { cg = g; break; }
+      srcA = cg ? ("@" + irGlobalSymbol(cg)) : ("@" + r->captured[k]);
     }
     std::string pv = G->t();
     G->out << "  " << pv << " = getelementptr "
-           << G->llvmType(tyOf(captured[k])) << ", ptr " << srcA
+           << G->llvmType(tyOf(r->captured[k])) << ", ptr " << srcA
            << ", i64 0\n";
     G->out << "  store ptr " << pv << ", ptr " << s << "\n";
   }
-  for (size_t k = 0; k < reds.size(); ++k) {
-    Type* at = tyOf(reds[k].second);
+  for (size_t k = 0; k < r->reds.size(); ++k) {
+    Type* at = tyOf(r->reds[k].second);
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr " << tmpl << ", i64 "
-           << (accBase + 64 * k) << "\n";
+           << (r->accBase + 64 * k) << "\n";
     G->out << "  store " << G->llvmType(at) << " "
-           << neutralConst(reds[k].first, at) << ", ptr " << s << "\n";
+           << neutralConst(r->reds[k].first, at) << ", ptr " << s << "\n";
   }
 
   // range struct
-  std::string rng = G->t();
-  G->out << "  " << rng << " = alloca %frt.range\n";
+  r->rng = G->t();
+  G->out << "  " << r->rng << " = alloca %frt.range\n";
   {
     std::string s = G->t();
-    G->out << "  " << s << " = getelementptr i8, ptr " << rng << ", i64 0\n";
+    G->out << "  " << s << " = getelementptr i8, ptr " << r->rng
+           << ", i64 0\n";
     G->out << "  store ptr @__pf_body_" << N << ", ptr " << s << "\n";
   }
   auto setI64 = [&](int off, const std::string& v) {
     std::string s = G->t();
-    G->out << "  " << s << " = getelementptr i8, ptr " << rng << ", i64 "
-           << off << "\n";
+    G->out << "  " << s << " = getelementptr i8, ptr " << r->rng
+           << ", i64 " << off << "\n";
     G->out << "  store i64 " << v << ", ptr " << s << "\n";
   };
   auto setI32 = [&](int off, const std::string& v) {
     std::string s = G->t();
-    G->out << "  " << s << " = getelementptr i8, ptr " << rng << ", i64 "
-           << off << "\n";
+    G->out << "  " << s << " = getelementptr i8, ptr " << r->rng
+           << ", i64 " << off << "\n";
     G->out << "  store i32 " << v << ", ptr " << s << "\n";
   };
   setI64(8, lo);
   setI64(16, hi);
-  // Phase 5 (report §12): @reproducible — set the deterministic-schedule
-  // flag at range offset 44 (see frt_range_t.repro).  The runtime then
-  // partitions [lo,hi) into FIXED blocks (user chunk, else 8192) instead
-  // of thread-count-derived chunks, and the combines below run strict-FP
-  // in ascending block order: bitwise-identical results for any thread
-  // count / affinity / scheduler.
-  if (pf->reproducible) {
-    std::string s = G->t();
-    G->out << "  " << s << " = getelementptr i8, ptr " << rng
-           << ", i64 44\n";
-    G->out << "  store i32 1, ptr " << s << "\n";
-  }
+  // Phase 5 (report §12): @reproducible — deterministic-schedule flag at
+  // range offset 44 (see frt_range_t.repro).
+  if (pf->reproducible) setI32(44, "1");
   std::string chunkVal = "0";
   bool hasUserChunk = false;
   for (auto& c : pf->clauses)
@@ -363,54 +346,61 @@ void genParfor(Stmt* pf) {
         thrVal = genCastInline(c.e, Type::simple(Type::I32), thrVal);
     }
   setI32(32, thrVal);
-  setI32(36, affinity == "spread" ? "1" : "0");
-  setI32(40, std::to_string((int)ctxSize));
-  uint64_t tag = hashName(saveFn->name + ":" + std::to_string(pf->loc.line));
+  setI32(36, r->affinity == "spread" ? "1" : "0");
+  setI32(40, std::to_string((int)r->ctxSize));
+  uint64_t tag = hashName(fn->name + ":" + std::to_string(pf->loc.line));
   setI64(48, std::to_string(tag));
-  G->parforTags.push_back({tag, saveFn->name, pf->loc.line});
+  G->parforTags.push_back({tag, fn->name, pf->loc.line});
   // §6.12 (optimisation-audit): per-iteration body-cost class at offset
-  // 64.  0 would mean "legacy IR" (the runtime then falls back to the
-  // pure iteration-count cutoff); estimateParforBodyCost always returns
-  // >= 1 for a real body, so compiled regions carry a real class.
+  // 64.  0 = legacy IR (pure iteration-count cutoff); the estimator
+  // always returns >= 1 for a real body.
   setI64(64, std::to_string(estimateParforBodyCost(pf->body)));
   {
     std::string s = G->t();
-    G->out << "  " << s << " = getelementptr i8, ptr " << rng << ", i64 56\n";
+    G->out << "  " << s << " = getelementptr i8, ptr " << r->rng
+           << ", i64 56\n";
     G->out << "  store ptr " << tmpl << ", ptr " << s << "\n";
   }
+  // mem & vectorisation stage: memory/compute census class at offset 72
+  // (0 = legacy/unclassified; the runtime routes class-tagged chunks to
+  // SMT sibling lanes under FRT_SMT_INTERLEAVE=1)
+  setI32(72, std::to_string(pf->smtMemClass));
 
-  std::string ctxout = G->t();
-  G->out << "  " << ctxout << " = alloca [" << MAXCTX << " x ptr]\n";
-  std::string nchunks = G->t();
-  G->out << "  " << nchunks << " = call i32 @frt_parfor(ptr " << rng
-         << ", ptr " << ctxout << ", i32 " << MAXCTX << ")\n";
+  // ctxout array (the dispatch call fills it)
+  r->ctxout = G->t();
+  G->out << "  " << r->ctxout << " = alloca [" << MAXCTX << " x ptr]\n";
+}
 
-  // ================================================== chunk fn (separate buf)
+// chunk fn emission (own buffer, fresh numbering) — same instruction
+// sequence as the historical single-region lowering
+static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
+                              const std::function<Type*(const std::string&)>& tyOf) {
+  Stmt* pf = r.pf;
   std::string callerText = G->out.str();
-  int callerTmp = G->tmp;      // continue caller numbering after the chunk fn
-  int callerBb = G->bb;
+  int callerTmp = G->tmp, callerBb = G->bb;
   G->out.str("");
   G->out.clear();
 
   G->curFnIsChunkFn = true;
   G->tmp = 1;
   G->bb = 1;
+  auto saveAllocas = G->varAllocas;
   G->varAllocas.clear();   // fresh symbol map for the chunk fn
 
-  G->out << "define internal void @__pf_body_" << N
+  G->out << "define internal void @__pf_body_" << r.N
          << "(i64 %lo, i64 %hi, ptr %ctx) #50 {\n";
   G->out << "entry:\n";
   G->curLabelTerminated = false;
 
   // shadow allocas for captured vars + init loads from ctx pointers
-  for (size_t k = 0; k < captured.size(); ++k) {
-    Type* vt = tyOf(captured[k]);
-    G->out << "  %" << captured[k] << ".sh = alloca "
+  for (size_t k = 0; k < r.captured.size(); ++k) {
+    Type* vt = tyOf(r.captured[k]);
+    G->out << "  %" << r.captured[k] << ".sh = alloca "
            << (vt->k == Type::STRUCT ? G->structTypes[vt->sdef->name]
                                      : G->llvmType(vt))
            << ", align "
            << (vt->k == Type::STRUCT ? typeAlignOf(vt) : 8) << "\n";
-    G->varAllocas[captured[k]] = "%" + captured[k] + ".sh";
+    G->varAllocas[r.captured[k]] = "%" + r.captured[k] + ".sh";
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr %ctx, i64 " << (8 * k)
            << "\n";
@@ -420,10 +410,10 @@ void genParfor(Stmt* pf) {
     G->out << "  " << v << " = load " << G->llvmType(vt) << ", ptr " << p
            << "\n";
     G->out << "  store " << G->llvmType(vt) << " " << v << ", ptr %"
-           << captured[k] << ".sh\n";
+           << r.captured[k] << ".sh\n";
   }
   // body-declared locals: allocas now (types from sema)
-  for (auto& n : bodyDeclared) {
+  for (auto& n : r.bodyDeclared) {
     if (n == pf->pvar) continue;
     if (G->varAllocas.count(n)) continue;   // captured shadow already
     Type* vt = tyOf(n);
@@ -438,15 +428,15 @@ void genParfor(Stmt* pf) {
     }
   }
   // reduction accumulator allocas (64B slots, register-promotable)
-  for (size_t k = 0; k < reds.size(); ++k) {
-    const std::string& var = reds[k].second;
+  for (size_t k = 0; k < r.reds.size(); ++k) {
+    const std::string& var = r.reds[k].second;
     Type* at = tyOf(var);
     G->out << "  %" << var << ".acc = alloca " << G->llvmType(at)
            << ", align 64\n";
     G->varAllocas[var] = "%" + var + ".acc";
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr %ctx, i64 "
-           << (accBase + 64 * k) << "\n";
+           << (r.accBase + 64 * k) << "\n";
     std::string v = G->t();
     G->out << "  " << v << " = load " << G->llvmType(at) << ", ptr " << s
            << "\n";
@@ -500,12 +490,12 @@ void genParfor(Stmt* pf) {
   G->out << G->l(exit) << ":\n";
   G->curLabelTerminated = false;
   // accs back to ctx
-  for (size_t k = 0; k < reds.size(); ++k) {
-    const std::string& var = reds[k].second;
+  for (size_t k = 0; k < r.reds.size(); ++k) {
+    const std::string& var = r.reds[k].second;
     Type* at = tyOf(var);
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr %ctx, i64 "
-           << (accBase + 64 * k) << "\n";
+           << (r.accBase + 64 * k) << "\n";
     std::string v = G->t();
     G->out << "  " << v << " = load " << G->llvmType(at) << ", ptr %" << var
            << ".acc\n";
@@ -517,18 +507,21 @@ void genParfor(Stmt* pf) {
 
   G->chunkFns.push_back(G->out.str());
 
-  // restore caller stream & state (numbering continues past the dispatch part)
+  // restore caller stream & state (numbering continues past the chunk fn)
   G->out.str(callerText);
   G->out.clear();
   G->out.seekp(0, std::ios::end);
   G->varAllocas = saveAllocas;
-  G->curFnIsChunkFn = saveChunk;
-  G->curFn = saveFn;
-  G->curFs = saveFs;
+  G->curFnIsChunkFn = false;
   G->tmp = callerTmp;
   G->bb = callerBb;
+}
 
-  // ================================================== combine + free loop
+// caller-context combine+free loop over the region's chunk contexts
+static void parforEmitCombine(const PfRegion& r,
+                              const std::function<Type*(const std::string&)>& tyOf,
+                              const std::string& nchunksReg) {
+  Stmt* pf = r.pf;
   std::string ci = G->t();
   G->out << "  " << ci << " = alloca i32\n";
   G->out << "  store i32 0, ptr " << ci << "\n";
@@ -539,7 +532,8 @@ void genParfor(Stmt* pf) {
   G->curLabelTerminated = false;
   std::string cc = G->t(), cndc = G->t();
   G->out << "  " << cc << " = load i32, ptr " << ci << "\n";
-  G->out << "  " << cndc << " = icmp slt i32 " << cc << ", " << nchunks << "\n";
+  G->out << "  " << cndc << " = icmp slt i32 " << cc << ", " << nchunksReg
+         << "\n";
   G->out << "  br i1 " << cndc << ", label %" << G->l(cbody) << ", label %"
          << G->l(cdone) << "\n";
   G->terminate();
@@ -549,15 +543,15 @@ void genParfor(Stmt* pf) {
   G->out << "  " << cci << " = sext i32 " << cc << " to i64\n";
   std::string cp = G->t();
   G->out << "  " << cp << " = getelementptr [" << MAXCTX << " x ptr], ptr "
-         << ctxout << ", i64 0, i64 " << cci << "\n";
+         << r.ctxout << ", i64 0, i64 " << cci << "\n";
   std::string ctxp = G->t();
   G->out << "  " << ctxp << " = load ptr, ptr " << cp << "\n";
-  for (size_t k = 0; k < reds.size(); ++k) {
-    const std::string& var = reds[k].second;
+  for (size_t k = 0; k < r.reds.size(); ++k) {
+    const std::string& var = r.reds[k].second;
     Type* at = tyOf(var);
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr " << ctxp << ", i64 "
-           << (accBase + 64 * k) << "\n";
+           << (r.accBase + 64 * k) << "\n";
     std::string v = G->t();
     G->out << "  " << v << " = load " << G->llvmType(at) << ", ptr " << s
            << "\n";
@@ -565,13 +559,14 @@ void genParfor(Stmt* pf) {
     std::string accv = G->t();
     G->out << "  " << accv << " = load " << G->llvmType(at) << ", ptr "
            << accA << "\n";
-    std::string r = G->t();
+    std::string res = G->t();
     // Phase 5: @reproducible combines run strict-FP in chunk order
     if (pf->reproducible) ++G->forceStrictFp;
-    combineOp(reds[k].first, at, accv, v, r, G->out, pf->reproducible ? "" : G->fflag());
+    combineOp(r.reds[k].first, at, accv, v, res, G->out,
+              pf->reproducible ? "" : G->fflag());
     if (pf->reproducible) --G->forceStrictFp;
-    G->out << "  store " << G->llvmType(at) << " " << r << ", ptr " << accA
-           << "\n";
+    G->out << "  store " << G->llvmType(at) << " " << res << ", ptr "
+           << accA << "\n";
   }
   G->out << "  call void @frt_free(ptr " << ctxp << ")\n";
   G->out << "  br label %" << G->l(clatch) << "\n";
@@ -584,5 +579,82 @@ void genParfor(Stmt* pf) {
   G->out << G->l(cdone) << ":\n";
   G->curLabelTerminated = false;
 }
+
+void genParfor(Stmt* pf) {
+  // collapsed inner (rectangular): serialized inside the outer chunk fn
+  if (pf->collapsed && G->curFnIsChunkFn) {
+    genCollapsedInner(pf);
+    return;
+  }
+  // paired partner (mem & vectorisation stage): the first region's
+  // genParfor already emitted the shared frt_parfor_pair dispatch, both
+  // chunk fns and both combine loops
+  if (pf->smtPaired) return;
+
+  FnDecl* saveFn = G->curFn;
+  FnSema* saveFs = G->curFs;
+  auto saveAllocas = G->varAllocas;
+  bool saveChunk = G->curFnIsChunkFn;
+
+  FnSema* fs = G->curFs;
+  std::map<std::string, Type*> varTypes;
+  for (auto& sym : fs->allSyms) varTypes[sym.name] = sym.ty;
+  for (auto* g : G->prog->globals)
+    if (!varTypes.count(g->name)) varTypes[g->name] = g->ty;
+  auto tyOf = [&](const std::string& n) -> Type* {
+    if (varTypes.count(n)) return varTypes[n];
+    return Type::ptr(Type::simple(Type::U8));
+  };
+
+  // ---------------- caller dispatch part
+  PfRegion A;
+  parforPrepRegion(pf, G->parforCounter++, saveFn, fs, tyOf, &A);
+
+  PfRegion B;
+  const bool paired = pf->smtPairWith != nullptr;
+  if (paired)
+    parforPrepRegion(pf->smtPairWith, G->parforCounter++, saveFn, fs, tyOf,
+                     &B);
+
+  if (paired) {
+    // mem & vectorisation stage: one dispatch covering both regions.
+    // The runtime queues the first region's chunks on the memory lane
+    // and the second's on the compute lane, then the caller helps until
+    // both drain — on an SMT core one hardware thread streams memory
+    // while its sibling keeps the shared ALU busy.  The two regions were
+    // proven independent at the source level; each region's chunk
+    // partition and combine order are unchanged.  The return packs the
+    // two chunk counts as (nB << 32) | nA.
+    std::string packed = G->t();
+    G->out << "  " << packed << " = call i64 @frt_parfor_pair(ptr " << A.rng
+           << ", ptr " << A.ctxout << ", ptr " << B.rng << ", ptr "
+           << B.ctxout << ", i32 " << MAXCTX << ")\n";
+    A.nchunks = G->t();
+    G->out << "  " << A.nchunks << " = trunc i64 " << packed << " to i32\n";
+    std::string shifted = G->t();
+    G->out << "  " << shifted << " = lshr i64 " << packed << ", 32\n";
+    B.nchunks = G->t();
+    G->out << "  " << B.nchunks << " = trunc i64 " << shifted << " to i32\n";
+  } else {
+    A.nchunks = G->t();
+    G->out << "  " << A.nchunks << " = call i32 @frt_parfor(ptr " << A.rng
+           << ", ptr " << A.ctxout << ", i32 " << MAXCTX << ")\n";
+  }
+
+  // ---------------- chunk fns (separate buffers)
+  parforEmitChunkFn(A, saveFn, fs, tyOf);
+  if (paired) parforEmitChunkFn(B, saveFn, fs, tyOf);
+
+  // restore caller state (numbering continues past the dispatch part)
+  G->varAllocas = saveAllocas;
+  G->curFnIsChunkFn = saveChunk;
+  G->curFn = saveFn;
+  G->curFs = saveFs;
+
+  // ---------------- combine + free loops
+  parforEmitCombine(A, tyOf, A.nchunks);
+  if (paired) parforEmitCombine(B, tyOf, B.nchunks);
+}
+
 
 } // namespace freshet

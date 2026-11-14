@@ -167,7 +167,9 @@ typedef struct frt_range_s frt_range_t_;  /* forward */
 
 /* The actual frt_range_t struct lives in runtime/frt_rt.c; the compiler
  * knows its layout.  We mirror it here so libfsh can construct one
- * without depending on the compiler-generated header. */
+ * without depending on the compiler-generated header.  Keep the tail
+ * fields (body_cost @64, mem_class @72) in sync: frt_parfor READS them,
+ * so a short mirror would be an out-of-bounds stack read. */
 #pragma pack(push, 8)
 typedef struct {
   void (*body)(int64_t, int64_t, void*);
@@ -176,6 +178,9 @@ typedef struct {
   int32_t repro;            /* @reproducible flag (Phase 5, offset 44) */
   int64_t tag;
   void* ctx_template;
+  int64_t body_cost;        /* §6.12 body-cost class (offset 64) */
+  int32_t mem_class;        /* mem-stage memory/compute class (offset 72) */
+  int32_t _pad;
 } fsh_frt_range;
 #pragma pack(pop)
 
@@ -184,6 +189,7 @@ extern int32_t frt_parfor(fsh_frt_range* r, void** ctxout, int32_t maxctx);
 int32_t fsh_parallel_for(const fsh_range* r, fsh_body_fn body, void* ctx) {
   if (!r || !body) return 0;
   fsh_frt_range rr;
+  memset(&rr, 0, sizeof rr);
   rr.body = body;
   rr.lo = r->lo; rr.hi = r->hi;
   rr.chunk = r->chunk;
@@ -193,6 +199,8 @@ int32_t fsh_parallel_for(const fsh_range* r, fsh_body_fn body, void* ctx) {
   rr.ctx_size = 64;   /* must match IrGen's MAXCTX-1 padding */
   rr.tag = 0;
   rr.ctx_template = ctx;
+  rr.body_cost = 0;   /* legacy range: iteration cutoff applies */
+  rr.mem_class = 0;   /* unclassified: any lane */
   void* ctxout[64];
   return frt_parfor(&rr, ctxout, 64);
 }
@@ -249,6 +257,7 @@ double fsh_reduce(int64_t lo, int64_t hi, fsh_red_op op, fsh_red_mode mode,
              (op == FSH_RED_MIN) ? INFINITY :
              (op == FSH_RED_MAX) ? -INFINITY : 0.0;
   fsh_frt_range rr;
+  memset(&rr, 0, sizeof rr);
   rr.body = fsh_reduce_chunk;
   rr.lo = lo; rr.hi = hi;
   rr.chunk = 0;
@@ -258,6 +267,8 @@ double fsh_reduce(int64_t lo, int64_t hi, fsh_red_op op, fsh_red_mode mode,
   rr.ctx_size = sizeof(fsh_red_ctx);
   rr.tag = 0;
   rr.ctx_template = &tmpl;
+  rr.body_cost = 0;   /* legacy range */
+  rr.mem_class = 0;   /* unclassified */
   void* ctxout[64];
   int32_t n = frt_parfor((fsh_frt_range*)&rr, ctxout, 64);
   double acc = tmpl.acc;

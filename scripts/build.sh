@@ -9,8 +9,13 @@
 set -e
 cd "$(dirname "$0")/.."
 # front-end shared by the CLI and the language server (no main/evo/lsp):
-SHARED_SRCS="src/checks.cpp src/checks_parfor.cpp src/effects.cpp src/fuse_unroll.cpp src/irgen.cpp src/irgen_call.cpp src/irgen_expr.cpp src/irgen_parfor.cpp src/irgen_pgo.cpp src/irgen_stmt.cpp src/lane_analysis.cpp src/lexer.cpp src/opt_util.cpp src/ownership.cpp src/parser.cpp src/preproc.cpp src/report.cpp src/sema.cpp src/sema_expr.cpp src/soa_auto.cpp src/types.cpp src/session.cpp src/superopt.cpp src/precompute.cpp src/generics.cpp src/modules.cpp src/fmt.cpp src/profit_model.cpp src/loop_analysis.cpp src/loop_transforms.cpp"
+SHARED_SRCS="src/checks.cpp src/checks_parfor.cpp src/effects.cpp src/fuse_unroll.cpp src/irgen.cpp src/irgen_call.cpp src/irgen_expr.cpp src/irgen_parfor.cpp src/irgen_pgo.cpp src/irgen_stmt.cpp src/lane_analysis.cpp src/lexer.cpp src/opt_util.cpp src/ownership.cpp src/parser.cpp src/preproc.cpp src/report.cpp src/sema.cpp src/sema_expr.cpp src/soa_auto.cpp src/types.cpp src/session.cpp src/superopt.cpp src/precompute.cpp src/generics.cpp src/modules.cpp src/fmt.cpp src/profit_model.cpp src/loop_analysis.cpp src/loop_transforms.cpp src/mem_stage.cpp src/vector_plan.cpp"
 mkdir -p bin
 g++ -std=c++17 -O1 -Wall -Wno-unused-variable -o bin/penstock $SHARED_SRCS src/evo.cpp src/main.cpp
 g++ -std=c++17 -O1 -o bin/freshet-language-server $SHARED_SRCS src/lsp/server.cpp
-echo "build OK: bin/penstock bin/freshet-language-server"
+# fecheck: frontend-only driver (parse -> sema -> checks -> loop+mem passes
+# -> IRgen) for environments with no LLVM 19-23 backend — validation and
+# sandbox testing of the source-level passes without driving clang.
+# (-Isrc: fecheck.cpp lives outside src/ and includes common.h.)
+g++ -std=c++17 -O1 -Isrc -o bin/fecheck $SHARED_SRCS scripts/fecheck.cpp
+echo "build OK: bin/penstock bin/freshet-language-server bin/fecheck"

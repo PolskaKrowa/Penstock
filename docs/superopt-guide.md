@@ -18,14 +18,16 @@ CMake deliberately uses a three-stage bootstrap:
 1. `penstock-bootstrap` is built from the normal compiler sources with
    superoptimisation disabled.
 2. That bootstrap compiler compiles `src/superopt.fsh` to a native object.
-3. The final `penstock` executable links the Freshet object, the native LLVM
-   bridge, Alive2's static libraries, and static Z3.
+3. The final `penstock` AND `freshet-language-server` executables link the
+   Freshet object, the native LLVM bridge, and the shared Z3/Alive2/LLVM
+   dynamic libraries compiled from the `third_party/` submodules.
 
-The final executable therefore contains the Freshet optimiser, Alive2 verifier
-and Z3 solver. The build also installs the corresponding static archives,
-headers and licence files for downstream CMake consumers. The compiler still
-uses the selected Clang/LLVM toolchain as its normal code-generation backend;
-that is separate from the embedded superoptimiser.
+Both binaries therefore run the Freshet optimiser, Alive2 verifier and Z3
+solver against one shared dynamic-library ABI. The build also installs those
+shared libraries (plus the bridge archive, headers and licence files) for
+downstream CMake consumers. The compiler still uses the selected Clang/LLVM
+toolchain as its normal code-generation backend; that is separate from the
+embedded superoptimiser.
 
 ## What the current search covers
 
@@ -80,9 +82,10 @@ compiler's intermediate IR and diagnostic artefacts.
 | Option | Default | Purpose |
 |---|---|---|
 | `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Build the Freshet engine and embedded solver/verifier |
-| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision, statically linked |
-| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and linked into Penstock |
-| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master |
+| `PENSTOCK_USE_SUBMODULES` | `ON` | Prefer the `third_party/{z3,alive2,llvm}` submodule checkouts when present; FetchContent is the fallback |
+| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision used by the FetchContent fallback (the submodule gitlink pins the actual build) |
+| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision used by the FetchContent fallback (the submodule gitlink pins the actual build) |
+| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM branch tracked by the `third_party/llvm` submodule (and the FetchContent fallback) |
 | `PENSTOCK_FETCH_LLVM` | `ON` | Fetch a matching LLVM development SDK when necessary |
 | `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them |
 | `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | empty | Use an existing `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
@@ -92,36 +95,80 @@ compiler's intermediate IR and diagnostic artefacts.
 The build requires a matching LLVM development SDK for Penstock's selected
 Clang backend. Alive2's LLVM adapter requires RTTI and exception handling, and
 its development branch tracks LLVM `main` rather than necessarily the latest
-numbered LLVM release. By default CMake therefore fetches
-`PENSTOCK_ALIVE2_LLVM_GIT_TAG` (default `main`) and builds it privately with
-both RTTI and exceptions enabled, even when the backend SDK already has those
-features. The private build supplies the LLVM headers/libraries for the
-in-process verifier and the matching `opt` host when the optional O4 plugin is
-enabled. Penstock's normal `LLVM_ROOT` and Clang backend remain unchanged.
+numbered LLVM release. By default CMake therefore uses the `third_party/llvm`
+submodule (or, without submodules, fetches `PENSTOCK_ALIVE2_LLVM_GIT_TAG`)
+and builds it privately with both RTTI and exceptions enabled, even when the
+backend SDK already has those features. The private build supplies the LLVM
+headers/libraries for the in-process verifier and the matching `opt` host when
+the optional O4 plugin is enabled. Penstock's normal `LLVM_ROOT` and Clang
+backend remain unchanged.
 
-Z3 and Alive2 are fetched and built as static libraries. Z3's internal
-`opt` component is namespaced in the fetched build tree because LLVM already
-exports an imported executable target with that name; its API component
-reference is updated at the same time. Alive2's `smt` and `util` targets are
-likewise namespaced as `penstock_alive2_smt` and `penstock_alive2_util`, since
-Z3 already owns the unqualified target names in the shared CMake build. The
-Alive2 dependency list and Penstock link/install rules are updated with those
-names. Alive2 is pointed at the in-tree `z3::libz3` target through a small
-config package, avoiding a configure-time probe for an archive that has not
-been built yet. The private verifier LLVM's shared library
-and (when enabled) matching `opt` host are installed under
-`lib/penstock/embedded`, with relative runtime search paths. Use that installed
-`opt` with Penstock's plugin; do not load the plugin into the unrelated system
-`opt`. The build-time `re2c` tool is not a runtime dependency.
+## Submodule sources
+
+Z3, Alive2 and the verifier LLVM are git submodules of this repository:
 
 ```sh
+git clone --recurse-submodules <penstock-url>   # or, in an existing checkout:
+git submodule update --init                     # (add --depth 1 for the
+                                                #  shallow third_party/llvm)
+```
+
+The pinned gitlink revisions — not the `PENSTOCK_*_GIT_TAG` cache strings —
+select what is compiled from `third_party/z3`, `third_party/alive2` and
+`third_party/llvm`. Move a pin with:
+
+```sh
+git -C third_party/alive2 checkout <revision>   # e.g. origin/master
+git add third_party/alive2
+```
+
+`third_party/llvm` is marked `shallow = true` in `.gitmodules` so a fresh
+`submodule update` fetches a depth-1 clone of the monorepo; unshallow it with
+`git -C third_party/llvm fetch --unshallow` when history is needed. Setting
+`-DPENSTOCK_USE_SUBMODULES=OFF` (or an empty `third_party/`, as in the release
+tarball) makes the configure fetch the same revisions via FetchContent
+instead.
+
+## Dynamic libraries
+
+Z3 and Alive2 are compiled as SHARED libraries — `libz3.so`, `libir.so`,
+`libpenstock_alive2_smt.so`, `libtools.so`, `libpenstock_alive2_util.so` and
+`libllvm_util.so` — and the verifier LLVM is built as the monolithic
+`libLLVM.so` with RTTI/EH. `penstock`, `freshet-language-server` and the O4
+`opt` plugin all link this one set of dynamic libraries, so a single solver
+and LLVM instance serve every Penstock process. The binaries carry
+`$ORIGIN`-relative RPATH entries resolving to the installed
+`lib/penstock/embedded/lib` directory, which contains `libLLVM.so`,
+`libz3.so` and the Alive2 shared libraries next to the optional `opt` host.
+Use that installed `opt` with Penstock's plugin; do not load the plugin into
+the unrelated system `opt`. The bundled Z3 carries the upstream
+`libz3.so.4.15` SONAME (major.minor), so it never collides with a system
+`libz3.so.4`; still, the RPATH guarantees the bundled build is preferred.
+
+Z3's internal `opt` component is namespaced in the build tree because LLVM
+already exports an imported executable target with that name; its API
+component reference is updated at the same time. Alive2's `smt` and `util`
+targets are likewise namespaced as `penstock_alive2_smt` and
+`penstock_alive2_util`, since Z3 already owns the unqualified target names in
+the shared CMake build; the same configure pass rewrites their `STATIC`
+library kinds (and those of `ir`, `tools` and `llvm_util`) to `SHARED`.
+Alive2 is pointed at the in-tree `z3::libz3` target through a small config
+package, avoiding a configure-time probe for a library that has not been
+built yet. These adjustments patch the submodule checkouts in place and are
+idempotent; restore a checkout with `git submodule update --checkout` and
+the next configure simply reapplies them. The build-time `re2c` tool is not
+a runtime dependency.
+
+```sh
+git submodule update --init
 cmake -S . -B build -DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=ON
 cmake --build build --parallel
 cmake --install build
 ```
 
-To use a local LLVM source checkout instead of having CMake fetch the
-configured Alive2-compatible LLVM revision (by default `main`):
+`third_party/llvm` supplies the verifier LLVM by default. To point at
+another `llvm-project` checkout instead (matching the selected Alive2
+revision and having RTTI/EH enabled):
 
 ```sh
 cmake -S . -B build \

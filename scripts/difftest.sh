@@ -11,6 +11,8 @@
 #   o3            -O3                                   (full pipeline)
 #   phaseD        -O2 --licm --partial-unroll --peel --interchange --tile \
 #                     --distribute --unroll-and-jam     (all new transforms)
+#   memstage      -O2 --mem-stage --batch-ops --vector-plan \
+#                     --smt-interleave                   (mem & vec stage)
 #
 # usage: scripts/difftest.sh [test files...]   (default: tests/pos_*.fsh)
 set -u
@@ -42,7 +44,10 @@ for src in "${files[@]}"; do
   d=$(run_cfg o3 -O3)
   e=$(run_cfg phaseD -O2 --licm --partial-unroll --peel --interchange \
         --tile --distribute --unroll-and-jam)
-  if [ "$a" = "$b" ] && [ "$a" = "$c" ] && [ "$a" = "$d" ] && [ "$a" = "$e" ]; then
+  f=$(run_cfg memstage -O2 --mem-stage --batch-ops --vector-plan \
+        --smt-interleave)
+  if [ "$a" = "$b" ] && [ "$a" = "$c" ] && [ "$a" = "$d" ] && [ "$a" = "$e" ] \
+     && [ "$a" = "$f" ]; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
@@ -52,6 +57,7 @@ for src in "${files[@]}"; do
     echo "    -O2-noopt  : $(echo "$c" | head -2 | tr '\n' ' ')"
     echo "    -O3        : $(echo "$d" | head -2 | tr '\n' ' ')"
     echo "    -O2-phaseD : $(echo "$e" | head -2 | tr '\n' ' ')"
+    echo "    -O2-memstage: $(echo "$f" | head -2 | tr '\n' ' ')"
   fi
 done
 echo "difftest: passed $pass, differed $fail, skipped $skip"

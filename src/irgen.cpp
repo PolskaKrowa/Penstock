@@ -34,6 +34,12 @@ declare void @frt_pause()
 declare void @frt_assert(i1)
 declare void @frt_init()
 declare i32 @frt_parfor(ptr, ptr, i32)
+; mem & vectorisation stage (--smt-interleave): paired dispatch of two
+; independent parfor regions — the runtime queues the first region's
+; chunks on the memory lane and the second's on the compute lane so an
+; SMT core can overlap memory streaming with ALU work on the sibling
+; hardware thread.  Returns (nB << 32) | nA packed into one i64.
+declare i64 @frt_parfor_pair(ptr, ptr, ptr, ptr, i32)
 ; Phase 4 (report §10.3): @test runner harness (runtime/frt_rt.c).
 ; frt_test_run takes the { ptr, i64 } str view + the test fn as a C
 ; function pointer (the harness passes the @test fn by name).
@@ -408,11 +414,16 @@ bool irgenProgram(Program* p, const std::string& outLl) {
     out << "%enum." << ed->name << " = type { i64, [" << ed->paySize
         << " x i8] }\n";
   }
-  out << "%frt.range = type { ptr, i64, i64, i64, i32, i32, i32, i32, i64, ptr, i64 }\n"
+  out << "%frt.range = type { ptr, i64, i64, i64, i32, i32, i32, i32, i64, ptr, i64, i32 }\n"
          "  ; ^8th field i32 @44: Phase 5 @reproducible flag (matches\n"
          "  ;   frt_range_t.repro — 1 = fixed-block deterministic schedule)\n"
          "  ; ^10th field i64: §6.12 per-iteration body-cost class (matches\n"
-         "  ;   frt_range_t.body_cost in runtime/frt_rt.c — 0 = legacy IR)\n";
+         "  ;   frt_range_t.body_cost in runtime/frt_rt.c — 0 = legacy IR)\n"
+         "  ; ^12th field i32 @72: mem & vectorisation stage memory/compute\n"
+         "  ;   census class (matches frt_range_t.mem_class — 0 = unknown,\n"
+         "  ;   1 = memory-bound, 2 = compute-bound, 3 = balanced); drives\n"
+         "  ;   the runtime's SMT sibling lane routing when\n"
+         "  ;   FRT_SMT_INTERLEAVE=1\n";
   out << "@__frt_env_threads = external global i32\n";
   out << "\n";
 

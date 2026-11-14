@@ -91,7 +91,12 @@ namespace freshet {
   X(Tile,             "F0914", "tile",                "loop nest tiled", true) \
   X(Distribute,       "F0915", "distribute",          "loop distributed", true) \
   X(UnrollJam,        "F0916", "unroll-jam",          "loop nest unrolled and jammed", true) \
-  X(ConstFold,        "F0917", "const-fold",          "constants folded at exact source width", true)
+  X(ConstFold,        "F0917", "const-fold",          "constants folded at exact source width", true) \
+  X(MovMin,           "F0918", "mov-min",            "redundant value move removed", true) \
+  X(MemReuse,         "F0919", "mem-reuse",          "allocation reused instead of freed and reallocated", true) \
+  X(Batch,            "F0920", "batch",              "operations batched for vectorisation", true) \
+  X(VecPlan,          "F0921", "vec-plan",           "separable-routine batchability report", true) \
+  X(SmtPair,          "F0922", "smt-pair",           "memory/compute parfor regions paired on SMT siblings", true)
 
 enum class Code {
 #define X(name, id, slug, title, remark) name,

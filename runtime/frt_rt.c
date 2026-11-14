@@ -112,6 +112,7 @@ typedef struct {
   int64_t lo, hi;
   void* ctx;
   _Atomic int64_t* remaining;
+  int32_t cls;               /* SMT lane class (FRT_CLS_*) */
 } frt_task_t;
 
 typedef struct {
@@ -134,7 +135,20 @@ typedef struct {
    * cheap and 100 expensive iterations no longer make the same
    * dispatch decision. */
   int64_t body_cost;
+  /* mem & vectorisation stage (--smt-interleave): memory/compute census
+   * class of the body (0 = unknown, 1 = memory-bound, 2 = compute-bound,
+   * 3 = balanced).  Under FRT_SMT_INTERLEAVE=1 the scheduler tags the
+   * region's chunk tasks with this class so workers pinned to an SMT
+   * sibling that shares its core's ALU prefer the complementary lane:
+   * one hardware thread streams memory while the other computes.
+   * Offset 72 matches %frt.range field 12. */
+  int32_t mem_class;
 } frt_range_t;
+
+/* task class for the SMT lanes (0 = any, 1 = memory, 2 = compute) */
+#define FRT_CLS_ANY    0
+#define FRT_CLS_MEM    1
+#define FRT_CLS_COMP   2
 
 /* ---------------- memory ------------------------------------------------ */
 void* frt_malloc(int64_t size, int64_t align) {
@@ -233,6 +247,124 @@ static int g_qtail = 0;      /* ring: next push slot */
 static _Atomic int64_t g_activeRegions = 0;
 static int g_pinFails = 0;
 
+/* ---------------- mem & vectorisation stage: SMT memory/compute lanes ----
+ * Exploits the fact that one physical core may carry two hardware
+ * threads that share the core's ALUs and caches: when a memory-bound
+ * region and a compute-bound region run concurrently, placing them on
+ * the two siblings of one core lets the compute stream fill the memory
+ * stream's stall cycles (cache misses / prefetcher turnaround).
+ *
+ * Topology comes from sysfs:
+ *   /sys/devices/system/cpu/cpuN/topology/thread_siblings_list
+ * e.g. "0,2" means logical cpus 0 and 2 are the two hardware threads of
+ * one physical core.  When FRT_SMT_INTERLEAVE=1 AND siblings exist:
+ *   - workers are pinned one per logical cpu (best effort);
+ *   - a worker pinned to the LOWER sibling of a pair prefers COMPUTE
+ *     tasks, one pinned to the HIGHER sibling prefers MEMORY tasks;
+ *   - pop falls back to the queue head after a bounded scan, so the
+ *     pool stays work-conserving and can never idle while tasks exist.
+ * Without SMT (or with the env off) every task is class 0 and the pop
+ * degenerates to the historical FIFO — zero behavioural change. */
+#define FRT_MAX_CPU 128
+static int g_smtSibling[FRT_MAX_CPU];   /* logical cpu -> sibling or -1 */
+static int g_ncpu = 0;                  /* logical cpus seen */
+static int g_smtInterleave = 0;         /* env FRT_SMT_INTERLEAVE=1 */
+static int g_smtOn = 0;                 /* interleave requested AND found */
+static int g_workerPref[FRT_MAX_THREADS];  /* per-worker preferred class */
+static _Atomic int64_t g_statPairedRegions = 0;
+static _Atomic int64_t g_memLaneChunks = 0;
+static _Atomic int64_t g_compLaneChunks = 0;
+
+/* parse a comma-separated cpu list with N and N-M ranges into out[]
+ * ("0-3,7"); returns the element count, -1 on syntax error.  Pure and
+ * unit-testable: no sysfs involved. */
+int frt_parse_cpu_list(const char* s, int* out, int cap);
+
+int frt_parse_cpu_list(const char* s, int* out, int cap) {
+  if (!s || !out || cap <= 0) return -1;
+  int n = 0;
+  const char* p = s;
+  while (*p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n') ++p;
+    if (!*p || *p == ',') { if (*p == ',') ++p; continue; }
+    long a = -1, b = -1;
+    char* end = NULL;
+    a = strtol(p, &end, 10);
+    if (end == p) return -1;
+    p = end;
+    if (*p == '-') {
+      ++p;
+      char* end2 = NULL;
+      b = strtol(p, &end2, 10);
+      if (end2 == p) return -1;
+      p = end2;
+    } else {
+      b = a;
+    }
+    for (long c = a; c <= b; ++c) {
+      if (c < 0 || c >= FRT_MAX_CPU) continue;
+      if (n < cap) out[n++] = (int)c;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\n') ++p;
+    if (*p && *p != ',') return -1;
+    if (*p == ',') ++p;
+  }
+  return n;
+}
+
+/* read one logical cpu's sibling list from sysfs; fills sibling[] with
+ * the OTHER hardware thread(s) of the same physical core.  Returns the
+ * sibling count (0 = none / file missing = offline or no SMT). */
+static int read_smt_sibling(int cpu, int* sibling, int cap) {
+  if (cpu < 0 || cpu >= FRT_MAX_CPU) return 0;
+  char path[160];
+  snprintf(path, sizeof path,
+           "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list",
+           cpu);
+  FILE* f = fopen(path, "r");
+  if (!f) return 0;
+  char buf[256];
+  const char* got = fgets(buf, sizeof buf, f);
+  fclose(f);
+  if (!got) return 0;
+  int list[FRT_MAX_CPU];
+  int n = frt_parse_cpu_list(buf, list, FRT_MAX_CPU);
+  if (n <= 0) return 0;
+  int m = 0;
+  for (int i = 0; i < n && m < cap; ++i)
+    if (list[i] != cpu) sibling[m++] = list[i];
+  return m;
+}
+
+static void detect_smt(void) {
+  for (int c = 0; c < FRT_MAX_CPU; ++c) g_smtSibling[c] = -1;
+  g_ncpu = 0;
+  int sib[FRT_MAX_CPU];
+  for (int c = 0; c < FRT_MAX_CPU; ++c) {
+    int n = read_smt_sibling(c, sib, FRT_MAX_CPU);
+    if (n < 0) continue;
+    /* n == 0: cpu exists without SMT (or offline) — count it if the
+     * topology dir exists at all (read_smt_sibling returns 0 for both;
+     * distinguishing would need another stat; either way a no-sibling
+     * cpu never participates in lane pairing) */
+    ++g_ncpu;
+    if (n > 0 && sib[0] < FRT_MAX_CPU) g_smtSibling[c] = sib[0];
+  }
+  g_smtOn = 0;
+  if (g_smtInterleave) {
+    for (int c = 0; c < FRT_MAX_CPU; ++c)
+      if (g_smtSibling[c] >= 0) { g_smtOn = 1; break; }
+  }
+}
+
+/* lane class for a region's chunks (0 when routing is off) */
+static inline int laneClassOf(const frt_range_t* r) {
+  if (!g_smtOn || !r) return FRT_CLS_ANY;
+  if (r->mem_class == 1) return FRT_CLS_MEM;
+  if (r->mem_class == 2) return FRT_CLS_COMP;
+  return FRT_CLS_ANY;
+}
+
 static inline int ringCount(void) {
   int d = g_qtail - g_qhead;
   return d < 0 ? d + FRT_MAXQ : d;
@@ -253,16 +385,45 @@ static void push_task(frt_task_t t) {
   pthread_mutex_unlock(&g_qmu);
 }
 
-static int pop_task(frt_task_t* out) {
-  pthread_mutex_lock(&g_qmu);
-  if (g_qhead == g_qtail) {
-    pthread_mutex_unlock(&g_qmu);
-    return 0;
+static int pop_locked(int pref, frt_task_t* out) {
+  /* g_qmu must be held.  Class-aware pop: scan a bounded window from
+   * the head for a task matching the worker's preferred SMT lane
+   * (cls==pref, or cls==ANY which fits any lane); fall back to the
+   * head so the pool stays work-conserving.  pref == FRT_CLS_ANY is
+   * exactly the historical FIFO pop. */
+  if (g_qhead == g_qtail) return 0;
+  if (pref != FRT_CLS_ANY) {
+    const int scan = 16;
+    int checked = 0;
+    for (int s = g_qhead; s != g_qtail && checked < scan; ) {
+      if (g_queue[s].cls == pref || g_queue[s].cls == FRT_CLS_ANY) {
+        *out = g_queue[s];
+        /* close the hole by shifting the kept prefix [g_qhead, s) one
+         * slot to the right (towards s); the scanned window is tiny
+         * (≤ 16 slots), so this stays cheap under the mutex */
+        int pos = s;
+        while (pos != g_qhead) {
+          int prev = (pos == 0) ? FRT_MAXQ - 1 : pos - 1;
+          g_queue[pos] = g_queue[prev];
+          pos = prev;
+        }
+        g_qhead = (g_qhead + 1) % FRT_MAXQ;
+        return 1;
+      }
+      s = (s + 1) % FRT_MAXQ;
+      ++checked;
+    }
   }
   *out = g_queue[g_qhead];
   g_qhead = (g_qhead + 1) % FRT_MAXQ;
-  pthread_mutex_unlock(&g_qmu);
   return 1;
+}
+
+static int pop_task(frt_task_t* out) {
+  pthread_mutex_lock(&g_qmu);
+  int ok = pop_locked(FRT_CLS_ANY, out);
+  pthread_mutex_unlock(&g_qmu);
+  return ok;
 }
 
 static void run_task(frt_task_t* t) {
@@ -271,15 +432,16 @@ static void run_task(frt_task_t* t) {
 }
 
 static void* worker_main(void* arg) {
-  (void)arg;
+  int idx = (int)(intptr_t)arg;
+  int pref = (idx >= 0 && idx < FRT_MAX_THREADS) ? g_workerPref[idx]
+                                                 : FRT_CLS_ANY;
   for (;;) {
     frt_task_t t;
     pthread_mutex_lock(&g_qmu);
     while (g_qhead == g_qtail && atomic_load(&g_activeRegions) == 0)
       pthread_cond_wait(&g_qcv, &g_qmu);
     if (g_qhead != g_qtail) {
-      t = g_queue[g_qhead];
-      g_qhead = (g_qhead + 1) % FRT_MAXQ;
+      pop_locked(pref, &t);
       pthread_mutex_unlock(&g_qmu);
       run_task(&t);
     } else {
@@ -309,11 +471,27 @@ static void init_pool_body(void) {
   g_nworkers = T - 1;   /* caller participates */
   const char* aff = getenv("FRT_AFFINITY");
   int pin = (aff && aff[0] == '1') || FRT_TUNED_AFFINITY;
+  /* mem & vectorisation stage: lane pairing is only meaningful when
+   * the runtime controls WHERE workers sit, so interleave mode turns
+   * pinning on (best effort — cgroups may refuse, counted in
+   * g_pinFails).  Workers pinned to the lower sibling of an SMT pair
+   * prefer COMPUTE chunks; the higher sibling prefers MEMORY chunks
+   * (one thread keeps the shared ALU busy while the other waits on
+   * memory). */
+  if (g_smtOn) pin = 1;
   for (int i = 0; i < g_nworkers; i++) {
-    pthread_create(&g_workers[i], NULL, worker_main, NULL);
+    int cpu = (i + 1) % T;
+    g_workerPref[i] = FRT_CLS_ANY;
+    if (g_smtOn && cpu >= 0 && cpu < FRT_MAX_CPU) {
+      int sib = g_smtSibling[cpu];
+      if (sib >= 0)
+        g_workerPref[i] = (sib > cpu) ? FRT_CLS_COMP : FRT_CLS_MEM;
+    }
+    pthread_create(&g_workers[i], NULL, worker_main,
+                   (void*)(intptr_t)i);
     if (pin) {
       /* spread workers over cores 1..T-1, main stays near 0 */
-      pin_thread(g_workers[i], (i + 1) % T);
+      pin_thread(g_workers[i], cpu);
     }
   }
 }
@@ -349,60 +527,58 @@ static pthread_mutex_t g_timing_mu = PTHREAD_MUTEX_INITIALIZER;
 #endif
 static int64_t g_workCutoff = FRT_WORK_CUTOFF_DEFAULT;
 
-int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
-  ensure_pool();
-  int64_t total = r->hi - r->lo;
-  if (total <= 0) return 0;
+/* ---- shared region helpers (frt_parfor + frt_parfor_pair) -------------- */
 
-  /* §10.1 serial cutoff: below the threshold the whole range runs inline
-   * in the caller — one context, no queue, no wake-up signalling, no
-   * active-region accounting.  The combine loop in the compiled caller
-   * sees nchunks == 1, so reductions keep their exact serial semantics.
-   * Nested regions inside worker threads also take this path, which
-   * removes the historical queue contention for small inner regions.
-   *
-   * §6.12 upgrade: when the compiler filled in body_cost (>0), the
-   * decision uses the estimated TOTAL WORK, not the bare iteration
-   * count — the limitation documented above is resolved.  The bare
-   * iteration cutoff remains as the fallback for legacy ranges. */
-  if (maxctx >= 1 &&
-      ((r->body_cost > 0 && g_workCutoff > 0 &&
-        total <= g_workCutoff / r->body_cost) ||
-       (r->body_cost <= 0 && g_serialCutoff > 0 && total <= g_serialCutoff))) {
-    void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
-    memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
-    ctxout[0] = ctx;
-    uint64_t t0 = 0;
-    if (g_timingOn) t0 = frt_rdtsc();
-    r->body(r->lo, r->hi, ctx);
-    if (g_timingOn) {
-      uint64_t dt = frt_rdtsc() - t0;
-      pthread_mutex_lock(&g_timing_mu);
-      int found = 0;
-      for (int i = 0; i < g_ntiming; i++) {
-        if (g_timing[i].tag == r->tag) {
-          g_timing[i].cycles += dt;
-          g_timing[i].count++;
-          g_timing[i].nchunks += 1;
-          found = 1;
-          break;
-        }
+/* §10.1/§6.12 serial-cutoff decision for one region */
+static int region_should_inline(const frt_range_t* r, int64_t total,
+                                int32_t maxctx) {
+  if (maxctx < 1) return 0;
+  if (r->body_cost > 0 && g_workCutoff > 0)
+    return total <= g_workCutoff / r->body_cost;
+  if (r->body_cost <= 0 && g_serialCutoff > 0)
+    return total <= g_serialCutoff;
+  return 0;
+}
+
+/* run a region inline in the calling thread (timing + stats included) */
+static void region_run_inline(frt_range_t* r, void** ctxout) {
+  void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
+  memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
+  ctxout[0] = ctx;
+  uint64_t t0 = 0;
+  if (g_timingOn) t0 = frt_rdtsc();
+  r->body(r->lo, r->hi, ctx);
+  if (g_timingOn) {
+    uint64_t dt = frt_rdtsc() - t0;
+    pthread_mutex_lock(&g_timing_mu);
+    int found = 0;
+    for (int i = 0; i < g_ntiming; i++) {
+      if (g_timing[i].tag == r->tag) {
+        g_timing[i].cycles += dt;
+        g_timing[i].count++;
+        g_timing[i].nchunks += 1;
+        found = 1;
+        break;
       }
-      if (!found && g_ntiming < 4096) {
-        g_timing[g_ntiming].tag = r->tag;
-        g_timing[g_ntiming].cycles = dt;
-        g_timing[g_ntiming].count = 1;
-        g_timing[g_ntiming].nchunks = 1;
-        g_ntiming++;
-      }
-      pthread_mutex_unlock(&g_timing_mu);
     }
-    atomic_fetch_add(&g_statSerialRegions, 1);
-    return 1;
+    if (!found && g_ntiming < 4096) {
+      g_timing[g_ntiming].tag = r->tag;
+      g_timing[g_ntiming].cycles = dt;
+      g_timing[g_ntiming].count = 1;
+      g_timing[g_ntiming].nchunks = 1;
+      g_ntiming++;
+    }
+    pthread_mutex_unlock(&g_timing_mu);
   }
+  atomic_fetch_add(&g_statSerialRegions, 1);
+}
 
-  atomic_fetch_add(&g_statDispatchedRegions, 1);
-
+/* compute the chunk partition (same policy as the historical single
+ * region path — reproducible fixed blocks, spread/close affinity,
+ * user chunk hints, maxctx clamp); mutates r->chunk exactly like
+ * frt_parfor always did and returns nchunks + the block size */
+static int region_chunk_plan(frt_range_t* r, int64_t total, int32_t maxctx,
+                             int64_t* bsOut) {
   int T = (r->nthreads > 0 && r->nthreads <= g_nworkers + 1)
             ? r->nthreads : g_nworkers + 1;
   if (T < 1) T = 1;
@@ -438,13 +614,14 @@ int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
   int64_t bs = (total + nchunks - 1) / nchunks;
   if (bs < 1) bs = 1;
   nchunks = (int)((total + bs - 1) / bs);
+  *bsOut = bs;
+  return nchunks;
+}
 
-  _Atomic int64_t remaining = nchunks;
-  atomic_fetch_add(&g_activeRegions, 1);
-
-  uint64_t t0 = 0;
-  if (g_timingOn) t0 = frt_rdtsc();
-
+/* push a region's chunks (lane-class tagged) and fill ctxout */
+static void region_dispatch(frt_range_t* r, void** ctxout, int nchunks,
+                            int64_t bs, _Atomic int64_t* remaining,
+                            int cls) {
   for (int c = 0; c < nchunks; c++) {
     int64_t clo = r->lo + (int64_t)c * bs;
     int64_t chi = clo + bs;
@@ -452,15 +629,22 @@ int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
     void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
     memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
     ctxout[c] = ctx;
-    frt_task_t t = {r->body, clo, chi, ctx, &remaining};
+    frt_task_t t = {r->body, clo, chi, ctx, remaining, cls};
     push_task(t);
   }
+  if (g_smtOn) {
+    if (cls == FRT_CLS_MEM)
+      atomic_fetch_add(&g_memLaneChunks, nchunks);
+    else if (cls == FRT_CLS_COMP)
+      atomic_fetch_add(&g_compLaneChunks, nchunks);
+  }
+}
 
-  /* help until this region drains (never block) */
-  /* Stage R2 fix: was `static int spin = 0` — shared across all callers,
-   * race-prone.  Now thread_local: each worker's back-off is independent. */
+/* caller-helps loop over one remaining counter (never blocks) */
+static void help_drain(_Atomic int64_t* remaining) {
+  /* Stage R2 fix: thread_local so each caller's back-off is independent */
   static __thread int spin = 0;
-  while (atomic_load_explicit(&remaining, memory_order_acquire) > 0) {
+  while (atomic_load_explicit(remaining, memory_order_acquire) > 0) {
     frt_task_t t;
     if (pop_task(&t)) {
       run_task(&t);
@@ -471,34 +655,191 @@ int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
       if (++spin % 8192 == 0) sched_yield();
     }
   }
+}
+
+/* timing-table update for a dispatched region (Stage R2: under
+ * g_timing_mu so concurrent regions cannot race the slot array) */
+static void timing_record(const frt_range_t* r, uint64_t dt, int nchunks) {
+  if (!g_timingOn) return;
+  pthread_mutex_lock(&g_timing_mu);
+  for (int i = 0; i < g_ntiming; i++) {
+    if (g_timing[i].tag == r->tag) {
+      g_timing[i].cycles += dt;
+      g_timing[i].count++;
+      g_timing[i].nchunks += nchunks;
+      pthread_mutex_unlock(&g_timing_mu);
+      return;
+    }
+  }
+  if (g_ntiming < 4096) {
+    g_timing[g_ntiming].tag = r->tag;
+    g_timing[g_ntiming].cycles = dt;
+    g_timing[g_ntiming].count = 1;
+    g_timing[g_ntiming].nchunks = nchunks;
+    g_ntiming++;
+  }
+  pthread_mutex_unlock(&g_timing_mu);
+}
+
+int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
+  ensure_pool();
+  int64_t total = r->hi - r->lo;
+  if (total <= 0) return 0;
+
+  /* §10.1 serial cutoff: below the threshold the whole range runs inline
+   * in the caller — one context, no queue, no wake-up signalling, no
+   * active-region accounting.  The combine loop in the compiled caller
+   * sees nchunks == 1, so reductions keep their exact serial semantics.
+   * Nested regions inside worker threads also take this path, which
+   * removes the historical queue contention for small inner regions.
+   *
+   * §6.12 upgrade: when the compiler filled in body_cost (>0), the
+   * decision uses the estimated TOTAL WORK, not the bare iteration
+   * count — the limitation documented above is resolved.  The bare
+   * iteration cutoff remains as the fallback for legacy ranges. */
+  if (region_should_inline(r, total, maxctx)) {
+    region_run_inline(r, ctxout);
+    return 1;
+  }
+
+  atomic_fetch_add(&g_statDispatchedRegions, 1);
+
+  int64_t bs = 1;
+  int nchunks = region_chunk_plan(r, total, maxctx, &bs);
+
+  _Atomic int64_t remaining = nchunks;
+  atomic_fetch_add(&g_activeRegions, 1);
+
+  uint64_t t0 = 0;
+  if (g_timingOn) t0 = frt_rdtsc();
+
+  region_dispatch(r, ctxout, nchunks, bs, &remaining, laneClassOf(r));
+
+  /* help until this region drains (never block) */
+  help_drain(&remaining);
 
   atomic_fetch_sub(&g_activeRegions, 1);
 
   /* Stage R2: timing-table update is now under g_timing_mu so concurrent
    * parfor regions (nested or sibling) cannot race on the slot array or
    * on g_ntiming. */
-  if (g_timingOn) {
-    uint64_t dt = frt_rdtsc() - t0;
-    pthread_mutex_lock(&g_timing_mu);
-    for (int i = 0; i < g_ntiming; i++) {
-      if (g_timing[i].tag == r->tag) {
-        g_timing[i].cycles += dt;
-        g_timing[i].count++;
-        g_timing[i].nchunks += nchunks;
-        pthread_mutex_unlock(&g_timing_mu);
-        return nchunks;
+  if (g_timingOn)
+    timing_record(r, frt_rdtsc() - t0, nchunks);
+  return nchunks;
+}
+
+/* ---------------- mem & vectorisation stage: paired dispatch ------------- */
+/* frt_parfor_pair dispatches TWO independent parfor regions together.
+ *
+ * The compiler only emits this for adjacent regions it PROVED
+ * independent (no shared read/write roots between them, later bounds
+ * read nothing the earlier writes).  Semantics: identical to running
+ * the two frt_parfor calls in order —
+ *   - a region under its serial cutoff runs inline, in source order;
+ *   - each dispatched region keeps its own chunk partition and its own
+ *     reduction combine order (unchanged by pairing);
+ *   - the call returns only when both regions have drained, so the
+ *     caller's combine loops see exactly the chunk counts returned.
+ *
+ * The SMT win: the first region's chunks carry its memory/compute class
+ * tag, and so do the second's; with FRT_SMT_INTERLEAVE=1 on an SMT
+ * host, workers pinned to sibling hardware threads of one physical
+ * core pick complementary lanes, so one thread streams memory (its
+ * stalls are cache-miss latency) while the sibling keeps the core's
+ * shared ALU executing the other region's arithmetic.
+ *
+ * Returns (nB << 32) | nA so the compiled caller unpacks both chunk
+ * counts from one call. */
+int64_t frt_parfor_pair(frt_range_t* a, void** ctxA,
+                        frt_range_t* b, void** ctxB, int32_t maxctx) {
+  ensure_pool();
+  int64_t totalA = a->hi - a->lo;
+  int64_t totalB = b->hi - b->lo;
+
+  /* degenerate ranges behave exactly like their frt_parfor calls */
+  if (totalA <= 0 && totalB <= 0) return 0;
+  if (totalA <= 0) {
+    int32_t nB = frt_parfor(b, ctxB, maxctx);
+    return (int64_t)(uint32_t)nB << 32;
+  }
+  if (totalB <= 0) {
+    int32_t nA = frt_parfor(a, ctxA, maxctx);
+    return (int64_t)(uint32_t)nA;
+  }
+
+  uint64_t t0 = 0;
+  if (g_timingOn) t0 = frt_rdtsc();
+
+  /* serial cutoff per region, in source order */
+  int inlineA = region_should_inline(a, totalA, maxctx);
+  int inlineB = region_should_inline(b, totalB, maxctx);
+
+  if (inlineA) region_run_inline(a, ctxA);
+
+  _Atomic int64_t remainingA = 0, remainingB = 0;
+  int nA = 0, nB = 0;
+  int64_t bsA = 1, bsB = 1;
+  int clsA = laneClassOf(a), clsB = laneClassOf(b);
+
+  if (!inlineA) {
+    atomic_fetch_add(&g_statDispatchedRegions, 1);
+    nA = region_chunk_plan(a, totalA, maxctx, &bsA);
+    remainingA = nA;
+  }
+  if (!inlineB) {
+    atomic_fetch_add(&g_statDispatchedRegions, 1);
+    nB = region_chunk_plan(b, totalB, maxctx, &bsB);
+    remainingB = nB;
+  }
+
+  if (!inlineA || !inlineB) {
+    atomic_fetch_add(&g_activeRegions, 1);
+    /* queue BOTH regions before helping: workers on sibling lanes start
+     * consuming immediately while the caller is still dispatching */
+    if (!inlineA) region_dispatch(a, ctxA, nA, bsA, &remainingA, clsA);
+    if (!inlineB) region_dispatch(b, ctxB, nB, bsB, &remainingB, clsB);
+
+    if (inlineB) {
+      /* B runs inline in the caller thread WHILE A's chunks execute on
+       * the pool — the caller is one of the participants, so this is
+       * the classic "compute on this thread, memory on the workers"
+       * overlap; A was proven independent of B */
+      region_run_inline(b, ctxB);
+    }
+
+    /* help until BOTH regions drain (never block on either) */
+    for (;;) {
+      int64_t ra = atomic_load_explicit(&remainingA, memory_order_acquire);
+      int64_t rb = atomic_load_explicit(&remainingB, memory_order_acquire);
+      if (ra <= 0 && rb <= 0) break;
+      frt_task_t t;
+      if (pop_task(&t)) {
+        run_task(&t);
+      } else {
+        FRT_ARCH_PAUSE();
       }
     }
-    if (g_ntiming < 4096) {
-      g_timing[g_ntiming].tag = r->tag;
-      g_timing[g_ntiming].cycles = dt;
-      g_timing[g_ntiming].count = 1;
-      g_timing[g_ntiming].nchunks = nchunks;
-      g_ntiming++;
-    }
-    pthread_mutex_unlock(&g_timing_mu);
+    atomic_fetch_sub(&g_activeRegions, 1);
+  } else {
+    /* both under the serial cutoff: plain sequential execution in
+     * source order — exactly what two frt_parfor calls would do */
+    region_run_inline(b, ctxB);
   }
-  return nchunks;
+
+  atomic_fetch_add(&g_statPairedRegions, 1);
+  if (g_timingOn) {
+    /* one wall-clock entry under the FIRST region's tag; the pair note
+     * (SI line) separates paired regions from ordinary ones */
+    timing_record(a, frt_rdtsc() - t0, nA + nB + (inlineA ? 1 : 0) +
+                                           (inlineB ? 1 : 0));
+  }
+  /* an inline region reports nchunks == 1 exactly like frt_parfor would
+   * (the caller's combine loop then visits its single ctx) */
+  {
+    int32_t effA = inlineA ? 1 : (int32_t)nA;
+    int32_t effB = inlineB ? 1 : (int32_t)nB;
+    return ((int64_t)(uint32_t)effB << 32) | (uint32_t)effA;
+  }
 }
 
 /* ---------------- misc runtime ------------------------------------------ */
@@ -623,6 +964,15 @@ static void frt_timing_write(void) {
   fprintf(f, "ST %lld %lld\n",
           (long long)atomic_load(&g_statSerialRegions),
           (long long)atomic_load(&g_statDispatchedRegions));
+  /* mem & vectorisation stage: SMT interleave stats — paired dispatches
+   * and how many chunks were routed to each lane (absent when the
+   * feature never ran; the report treats it as optional). */
+  if (atomic_load(&g_statPairedRegions) > 0) {
+    fprintf(f, "SI %lld %lld %lld\n",
+            (long long)atomic_load(&g_statPairedRegions),
+            (long long)atomic_load(&g_memLaneChunks),
+            (long long)atomic_load(&g_compLaneChunks));
+  }
   fclose(f);
 }
 
@@ -662,6 +1012,15 @@ void frt_init(void) {
   if (tim && tim[0] == '1') {
     g_timingOn = 1;
     atexit(frt_timing_write);
+  }
+  /* mem & vectorisation stage: SMT memory/compute interleave.  Off by
+   * default; when enabled, the sysfs topology is probed once and the
+   * worker pool gains lane preferences (see the SMT lanes block).  The
+   * probe is skipped entirely for default runs — zero cost. */
+  const char* si = getenv("FRT_SMT_INTERLEAVE");
+  if (si && si[0] == '1') {
+    g_smtInterleave = 1;
+    detect_smt();
   }
 }
 

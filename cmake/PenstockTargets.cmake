@@ -108,14 +108,17 @@ add_dependencies(penstock-bootstrap rt_ir)
 # Built from src/lsp/server.cpp + the same frontend library used by the
 # CLI (FRONTEND_SOURCES above): one list, both targets — the LSP can
 # never again miss a file the compiler gained.  Same C++17 + same host
-# compiler as penstock; links no LLVM libraries (it analyses via the
-# frontend API only and never invokes clang itself).
+# compiler as penstock.  When PENSTOCK_BUILD_EMBEDDED_SUPEROPT is ON,
+# PenstockSuperopt.cmake additionally links the Freshet engine object and
+# the shared Z3/Alive2/LLVM dynamic libraries into this binary, exactly as
+# for the compiler (it used to set PENSTOCK_SUPEROPT_BOOTSTRAP and carry
+# only stubs).  With the superoptimiser disabled the shared sources fall
+# back to their no-op stubs and the server links nothing extra.
 set(LSP_SOURCES
   ${FRONTEND_SOURCES}
   src/lsp/server.cpp)
 add_executable(freshet-language-server ${LSP_SOURCES})
 target_include_directories(freshet-language-server PRIVATE src)
-target_compile_definitions(freshet-language-server PRIVATE PENSTOCK_SUPEROPT_BOOTSTRAP=1)
 target_compile_options(freshet-language-server PRIVATE -Wall -Wno-unused-function)
 # Same output dir as penstock so editors can find both binaries together.
 set_target_properties(freshet-language-server PROPERTIES

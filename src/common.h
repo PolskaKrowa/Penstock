@@ -439,6 +439,17 @@ struct Stmt {
   // computed with a fixed block partition and strict-FP combines, so
   // the result is bitwise identical for any thread count / scheduler.
   bool reproducible = false;
+  // ---- SMT memory/compute interleave (mem & vectorisation stage) ---------
+  // Set by the --smt-interleave pairing pass on the FIRST region of a
+  // legal adjacent pair: IRgen emits ONE frt_parfor_pair dispatch covering
+  // both regions instead of two synchronous frt_parfor calls.  The partner
+  // is marked smtPaired and generates no dispatch of its own.
+  Stmt* smtPairWith = nullptr;    // this region dispatches together with...
+  bool smtPaired = false;         // ...this region's dispatch lives elsewhere
+  // memory/compute census class of the body (filled by the pairing pass;
+  // IRgen bakes it into frt_range_t.mem_class at offset 72):
+  //   0 = unknown, 1 = memory-bound, 2 = compute-bound, 3 = balanced
+  int smtMemClass = 0;
   // Phase MEM (report §5.1): `unsafe { ... }` is represented as a BLOCK
   // with this flag — every existing AST walker already visits BLOCKs, so
   // no pass silently skips an unsafe scope.
@@ -739,6 +750,21 @@ struct Options {
   bool parforAdvisorOn = false;   // --parfor-advisor: advice only (§6.10)
   bool soaAosoa = false;          // --soa=aosoa: advisory only (§6.11)
 
+  // ---- mem & vectorisation stage (mov-min / mem-reuse / batch) ----------
+  // Opt-in like every Phase-D transform (audit §11-D), each with a --no-*
+  // differential hatch.  --mem-stage is the umbrella that turns the three
+  // sub-passes on together.
+  bool movMinOn = false;          // --mov-minimize: redundant mov removal
+  bool memReuseOn = false;        // --mem-reuse: free/alloc churn reuse
+  bool batchOpsOn = false;       // --batch-ops: SLP-oriented statement batching
+  bool vectorPlanOn = false;      // --vector-plan: separable-routine advisory
+  // ---- SMT memory/compute interleave --------------------------------------
+  // Pair adjacent independent parfor regions with complementary
+  // memory/compute character; the runtime co-schedules their chunks on the
+  // two hardware threads of one physical core (one stream keeps the shared
+  // ALU busy while the other waits on memory).
+  bool smtInterleaveOn = false;   // --smt-interleave
+
   // §10.4 pass remarks / §5.2 proof artefacts:
   // --proof-log[=<file>] records, per APPLIED source-level transform, the
   // legality premises it relied on (one JSON-ish line each).  The Lean
@@ -888,6 +914,37 @@ bool runPrecomputeRewriter(const std::string& clang, const std::string& llvmRoot
 //                      unswitching + same-condition predicate reuse
 int runFuseUnrollPasses(Program* p);
 int runLaneAnalysisPass(Program* p);
+
+// mem & vectorisation stage (mem_stage.cpp / vector_plan.cpp), post-sema
+// pre-irgen like the R4 passes, all opt-in:
+//   --mem-reuse   alloc-churn hoisting: a loop that malloc/soa_news a fresh
+//                 buffer every iteration and frees it at iteration end
+//                 reuses ONE allocation (reads must be covered by
+//                 same-iteration writes); free->alloc pairs of identical
+//                 shape fuse into a reuse.
+//   --mov-minimize redundant value moves removed: self-assignments,
+//                 dead `let a = b` copies, immutable mov forwarding
+//                 (incl. aggregate copies that lower to memcpy), chained.
+//   --batch-ops   SLP-oriented statement batching driven by the
+//                 separable-routine analysis (vector_plan.cpp).
+//   --vector-plan advisory: reports each function's separable routines,
+//                 their batchability and dataflow (never rewrites).
+//   --smt-interleave pairs adjacent independent parfor regions with
+//                 complementary memory/compute character so the runtime
+//                 can co-schedule them on SMT siblings of one core.
+struct MemStageCounts {
+  int memReuse = 0;
+  int movMin = 0;
+  int batched = 0;
+  int vecPlanNotes = 0;
+  int smtPairs = 0;
+  int total() const {
+    return memReuse + movMin + batched + vecPlanNotes + smtPairs;
+  }
+};
+MemStageCounts runMemStagePasses(Program* p);   // mem-reuse + mov-minimize
+int runVectorPlanPass(Program* p, bool applyBatching);  // B analysis (+A3)
+int runSmtInterleavePass(Program* p);              // parfor pairing marks
 // irgen
 bool irgenProgram(Program* p, const std::string& outLl);
 // report

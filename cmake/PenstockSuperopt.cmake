@@ -2,7 +2,9 @@
 # The stage graph is intentionally self-hosting:
 #   A. penstock-bootstrap is built without superoptimisation;
 #   B. that compiler compiles src/superopt.fsh to a native object;
-#   C. final penstock links the Freshet object plus static Z3/Alive2 libraries.
+#   C. the final penstock AND freshet-language-server executables link the
+#      Freshet object, the native bridge and the shared Z3/Alive2/LLVM
+#      dynamic libraries compiled from the third_party/ submodules.
 # No Souper package, alive-tv executable, or z3 executable is used at runtime.
 
 include(FetchContent)
@@ -15,10 +17,14 @@ set(PENSTOCK_ALIVE2_GIT_TAG "master" CACHE STRING
   "Alive2 revision used for the embedded verifier")
 set(PENSTOCK_ALIVE2_LLVM_GIT_TAG "main" CACHE STRING
   "LLVM revision paired with Alive2 (upstream recommends LLVM main for Alive2 master)")
+option(PENSTOCK_USE_SUBMODULES
+  "Prefer the third_party/{llvm,alive2,z3} submodule checkouts over FetchContent" ON)
+set(PENSTOCK_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
-  # Z3 is linked into both the executable and the optional LLVM plugin.
-  # Ensure its component object libraries are suitable for a shared plugin.
+  # Z3 and Alive2 become dynamic libraries linked into penstock, the
+  # language server and the optional LLVM plugin: every component object
+  # library must be position independent for the shared-lib link.
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
   # Alive2's LLVM adapter is tightly coupled to LLVM headers and C++ APIs.
@@ -125,6 +131,17 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   # checkout at PENSTOCK_ALIVE2_LLVM_GIT_TAG even when the user's backend SDK
   # already has RTTI/EH. The selected LLVM_ROOT/clang remains Penstock's
   # backend; only the in-process verifier uses this private LLVM runtime.
+  #
+  # The third_party/llvm submodule is the preferred source for this private
+  # verifier LLVM: no network fetch, and the pinned gitlink keeps the
+  # Alive2/LLVM pairing reproducible. PENSTOCK_ALIVE2_LLVM_GIT_TAG documents
+  # the tracked branch and is only used by the FetchContent fallback.
+  if(PENSTOCK_USE_SUBMODULES AND NOT PENSTOCK_RTTI_LLVM_SOURCE_DIR
+     AND EXISTS "${PENSTOCK_THIRD_PARTY_DIR}/llvm/llvm/CMakeLists.txt")
+    set(PENSTOCK_RTTI_LLVM_SOURCE_DIR "${PENSTOCK_THIRD_PARTY_DIR}/llvm")
+    message(STATUS "Alive2 LLVM source: third_party/llvm submodule "
+      "(tracking '${PENSTOCK_ALIVE2_LLVM_GIT_TAG}')")
+  endif()
   if(PENSTOCK_BUILD_RTTI_LLVM)
     message(STATUS
       "Building private Alive2 LLVM revision '${PENSTOCK_ALIVE2_LLVM_GIT_TAG}' "
@@ -350,32 +367,47 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   endif()
   set(RE2C "${PENSTOCK_RE2C_EXECUTABLE}" CACHE FILEPATH "re2c executable for Alive2" FORCE)
 
-  # Build Z3 as a static archive. Its C++ API include directory is added
-  # explicitly because z3++.h lives in src/api/c++ in upstream's source tree.
-  set(Z3_BUILD_LIBZ3_SHARED OFF CACHE BOOL "Build static Z3" FORCE)
+  # Build Z3 as a shared library (libz3.so): penstock, the language server
+  # and the opt plugin all link the same dynamic solver instance, and the
+  # installed lib/penstock/embedded/lib tree carries exactly one Z3 ABI.
+  # Its C++ API include directory is added explicitly because z3++.h lives
+  # in src/api/c++ in upstream's source tree.
+  set(Z3_BUILD_LIBZ3_SHARED ON CACHE BOOL "Build shared Z3 (libz3.so)" FORCE)
   set(Z3_BUILD_LIBZ3_CORE ON CACHE BOOL "Build the Z3 core library" FORCE)
   set(Z3_BUILD_EXECUTABLE OFF CACHE BOOL "Do not build the Z3 CLI" FORCE)
   set(Z3_BUILD_TEST_EXECUTABLES OFF CACHE BOOL "Do not build Z3 tests" FORCE)
   set(Z3_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Do not build Z3 Python bindings" FORCE)
   set(Z3_ENABLE_EXAMPLE_TARGETS OFF CACHE BOOL "Do not build Z3 examples" FORCE)
-  FetchContent_Declare(penstock_z3
-    GIT_REPOSITORY https://github.com/Z3Prover/z3.git
-    GIT_TAG "${PENSTOCK_Z3_GIT_TAG}"
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(penstock_z3)
-  if(NOT penstock_z3_POPULATED)
-    # Populate first so we can apply a narrow target-name compatibility patch
-    # before Z3 creates its component targets in Penstock's CMake directory.
-    # LLVMConfig exports an imported executable target named `opt`; Z3 4.15.x
-    # also names one of its object-library components `opt`. Those names are
-    # globally unique in CMake, so keep the Z3 component namespaced.
-    if(POLICY CMP0169)
-      cmake_policy(PUSH)
-      cmake_policy(SET CMP0169 OLD)
-      FetchContent_Populate(penstock_z3)
-      cmake_policy(POP)
-    else()
-      FetchContent_Populate(penstock_z3)
+  # Source resolution: the third_party/z3 submodule wins when populated
+  # (git submodule update --init); FetchContent is the fallback for trees
+  # shipped without submodules (e.g. the release tarball).
+  if(PENSTOCK_USE_SUBMODULES AND
+     EXISTS "${PENSTOCK_THIRD_PARTY_DIR}/z3/CMakeLists.txt")
+    set(penstock_z3_SOURCE_DIR "${PENSTOCK_THIRD_PARTY_DIR}/z3")
+    set(penstock_z3_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/third_party-build/z3")
+    set(PENSTOCK_Z3_SOURCE_DESC "third_party/z3 submodule")
+    message(STATUS "Z3 source: ${PENSTOCK_Z3_SOURCE_DESC}")
+  else()
+    set(PENSTOCK_Z3_SOURCE_DESC "FetchContent ${PENSTOCK_Z3_GIT_TAG}")
+    FetchContent_Declare(penstock_z3
+      GIT_REPOSITORY https://github.com/Z3Prover/z3.git
+      GIT_TAG "${PENSTOCK_Z3_GIT_TAG}"
+      GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(penstock_z3)
+    if(NOT penstock_z3_POPULATED)
+      # Populate first so we can apply a narrow target-name compatibility patch
+      # before Z3 creates its component targets in Penstock's CMake directory.
+      # LLVMConfig exports an imported executable target named `opt`; Z3 4.15.x
+      # also names one of its object-library components `opt`. Those names are
+      # globally unique in CMake, so keep the Z3 component namespaced.
+      if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+        FetchContent_Populate(penstock_z3)
+        cmake_policy(POP)
+      else()
+        FetchContent_Populate(penstock_z3)
+      endif()
     endif()
   endif()
   set(_penstock_z3_opt_cmake "${penstock_z3_SOURCE_DIR}/src/opt/CMakeLists.txt")
@@ -466,30 +498,46 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   set(Z3_CXX_INCLUDE_DIRS "${penstock_z3_SOURCE_DIR}/src/api/c++")
   set(Z3_LIBRARIES z3::libz3)
 
-  # Alive2 currently builds C++20 static libraries (IR, SMT, tools, util and
-  # llvm_util). BUILD_TV is OFF: the compiler calls the verifier API directly,
-  # not its command-line executable or LLVM opt plugin.
+  # Alive2 is built as C++20 SHARED libraries (ir, penstock_alive2_smt,
+  # tools, penstock_alive2_util and llvm_util): penstock, the language
+  # server and the opt plugin all bind one dynamic verifier ABI. BUILD_TV is
+  # OFF: the compiler calls the verifier API directly, not its command-line
+  # executable or LLVM opt plugin. The patches below rewrite the explicit
+  # STATIC library kinds to SHARED; BUILD_SHARED_LIBS stays OFF so the flag
+  # cannot leak into other projects added to this build.
   set(BUILD_TV OFF CACHE BOOL "Do not build Alive2's opt plugin" FORCE)
   set(BUILD_LLVM_UTILS ON CACHE BOOL "Build Alive2's in-process LLVM adapter" FORCE)
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build Alive2 static libraries" FORCE)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "Alive2 libraries use explicit SHARED kinds below" FORCE)
   # LLVM_DIR is already scoped to the selected (possibly private) SDK above.
   # Do not force it into the cache: the next configure must rediscover the
   # user's original backend SDK and recreate the private fallback target.
-  FetchContent_Declare(penstock_alive2
-    GIT_REPOSITORY https://github.com/AliveToolkit/alive2.git
-    GIT_TAG "${PENSTOCK_ALIVE2_GIT_TAG}"
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(penstock_alive2)
-  if(NOT penstock_alive2_POPULATED)
-    # FetchContent_Populate is used intentionally: Alive2's standalone
-    # executable install rules are patched before its add_subdirectory call.
-    if(POLICY CMP0169)
-      cmake_policy(PUSH)
-      cmake_policy(SET CMP0169 OLD)
-      FetchContent_Populate(penstock_alive2)
-      cmake_policy(POP)
-    else()
-      FetchContent_Populate(penstock_alive2)
+  # Source resolution mirrors Z3: third_party/alive2 submodule first, then
+  # the FetchContent fallback.
+  if(PENSTOCK_USE_SUBMODULES AND
+     EXISTS "${PENSTOCK_THIRD_PARTY_DIR}/alive2/CMakeLists.txt")
+    set(penstock_alive2_SOURCE_DIR "${PENSTOCK_THIRD_PARTY_DIR}/alive2")
+    set(penstock_alive2_BINARY_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/third_party-build/alive2")
+    set(PENSTOCK_ALIVE2_SOURCE_DESC "third_party/alive2 submodule")
+    message(STATUS "Alive2 source: ${PENSTOCK_ALIVE2_SOURCE_DESC}")
+  else()
+    set(PENSTOCK_ALIVE2_SOURCE_DESC "FetchContent ${PENSTOCK_ALIVE2_GIT_TAG}")
+    FetchContent_Declare(penstock_alive2
+      GIT_REPOSITORY https://github.com/AliveToolkit/alive2.git
+      GIT_TAG "${PENSTOCK_ALIVE2_GIT_TAG}"
+      GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(penstock_alive2)
+    if(NOT penstock_alive2_POPULATED)
+      # FetchContent_Populate is used intentionally: Alive2's standalone
+      # executable install rules are patched before its add_subdirectory call.
+      if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+        FetchContent_Populate(penstock_alive2)
+        cmake_policy(POP)
+      else()
+        FetchContent_Populate(penstock_alive2)
+      endif()
     endif()
   endif()
   # Alive2's standalone project creates a generic `check` target. Penstock
@@ -519,10 +567,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   string(FIND "${_penstock_alive2_cmake_text}"
     "add_library(smt STATIC \${SMT_SRCS})" _penstock_alive2_smt_decl)
   string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(penstock_alive2_smt STATIC \${SMT_SRCS})" _penstock_alive2_smt_decl_renamed)
+    "add_library(penstock_alive2_smt SHARED \${SMT_SRCS})" _penstock_alive2_smt_decl_renamed)
   if(NOT _penstock_alive2_smt_decl EQUAL -1)
     string(REPLACE "add_library(smt STATIC \${SMT_SRCS})"
-                   "add_library(penstock_alive2_smt STATIC \${SMT_SRCS})"
+                   "add_library(penstock_alive2_smt SHARED \${SMT_SRCS})"
       _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
   elseif(_penstock_alive2_smt_decl_renamed EQUAL -1)
     message(FATAL_ERROR
@@ -533,10 +581,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   string(FIND "${_penstock_alive2_cmake_text}"
     "add_library(util STATIC \${UTIL_SRCS})" _penstock_alive2_util_decl)
   string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(penstock_alive2_util STATIC \${UTIL_SRCS})" _penstock_alive2_util_decl_renamed)
+    "add_library(penstock_alive2_util SHARED \${UTIL_SRCS})" _penstock_alive2_util_decl_renamed)
   if(NOT _penstock_alive2_util_decl EQUAL -1)
     string(REPLACE "add_library(util STATIC \${UTIL_SRCS})"
-                   "add_library(penstock_alive2_util STATIC \${UTIL_SRCS})"
+                   "add_library(penstock_alive2_util SHARED \${UTIL_SRCS})"
       _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
   elseif(_penstock_alive2_util_decl_renamed EQUAL -1)
     message(FATAL_ERROR
@@ -568,6 +616,52 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   elseif(_penstock_alive2_libs_renamed EQUAL -1)
     message(FATAL_ERROR
       "Could not update Alive2's ALIVE_LIBS list for the namespaced targets.")
+  endif()
+
+  # Dynamic-library conversion, paired with the renames above: every Alive2
+  # library is built SHARED so penstock, the language server and the opt
+  # plugin link one dynamic verifier ABI instead of embedding archives. Each
+  # replacement is idempotent and fails closed when the layout changes.
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(ir STATIC \${IR_SRCS})" _penstock_alive2_ir_decl)
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(ir SHARED \${IR_SRCS})" _penstock_alive2_ir_decl_shared)
+  if(NOT _penstock_alive2_ir_decl EQUAL -1)
+    string(REPLACE "add_library(ir STATIC \${IR_SRCS})"
+                   "add_library(ir SHARED \${IR_SRCS})"
+      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
+  elseif(_penstock_alive2_ir_decl_shared EQUAL -1)
+    message(FATAL_ERROR
+      "Could not convert Alive2's ir library to SHARED. The selected Alive2 "
+      "source layout has changed; refusing an inconsistent static/dynamic mix.")
+  endif()
+
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(tools STATIC \${TOOLS_SRCS})" _penstock_alive2_tools_decl)
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(tools SHARED \${TOOLS_SRCS})" _penstock_alive2_tools_decl_shared)
+  if(NOT _penstock_alive2_tools_decl EQUAL -1)
+    string(REPLACE "add_library(tools STATIC \${TOOLS_SRCS})"
+                   "add_library(tools SHARED \${TOOLS_SRCS})"
+      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
+  elseif(_penstock_alive2_tools_decl_shared EQUAL -1)
+    message(FATAL_ERROR
+      "Could not convert Alive2's tools library to SHARED. The selected "
+      "Alive2 source layout has changed; refusing an inconsistent mix.")
+  endif()
+
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(llvm_util STATIC \${LLVM_UTIL_SRCS})" _penstock_alive2_lu_decl)
+  string(FIND "${_penstock_alive2_cmake_text}"
+    "add_library(llvm_util SHARED \${LLVM_UTIL_SRCS})" _penstock_alive2_lu_decl_shared)
+  if(NOT _penstock_alive2_lu_decl EQUAL -1)
+    string(REPLACE "add_library(llvm_util STATIC \${LLVM_UTIL_SRCS})"
+                   "add_library(llvm_util SHARED \${LLVM_UTIL_SRCS})"
+      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
+  elseif(_penstock_alive2_lu_decl_shared EQUAL -1)
+    message(FATAL_ERROR
+      "Could not convert Alive2's llvm_util library to SHARED. The selected "
+      "Alive2 source layout has changed; refusing an inconsistent mix.")
   endif()
 
   # Force Alive2 to consume Penstock's in-tree Z3 target through the config
@@ -609,10 +703,11 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   endif()
 
   # Z3 and Alive2 both use the C++ namespace `smt`. In particular, Z3's
-  # static archive defines smt::context::init(), and Alive2's own SMT wrapper
+  # libz3 defines smt::context::init(), and Alive2's own SMT wrapper
   # (smt/ctx.cpp) defines a different function with the exact same mangled
-  # name. Renaming the CMake targets above is not sufficient: with static
-  # linking the linker still sees duplicate C++ symbols. Compile every
+  # name. Renaming the CMake targets above is not sufficient: once both
+  # dynamic libraries are linked into one process their symbols would still
+  # collide at the final link. Compile every
   # Alive2-owned target with a token-level namespace remap. This changes only
   # Alive2 translation units and headers; Z3 is built without this definition
   # and retains its original namespace and ABI. The Penstock bridge uses the
@@ -742,6 +837,22 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   target_link_libraries(penstock PRIVATE penstock_superopt_core)
   target_compile_definitions(penstock PRIVATE
     PENSTOCK_HAS_FSH_SUPEROPT=1 PENSTOCK_HAS_ALIVE2=1)
+
+  # ---- the language server embeds the same superoptimiser ----
+  # freshet-language-server links the same Freshet engine object, native
+  # bridge and shared Z3/Alive2/LLVM dynamic libraries as the compiler: one
+  # verifier ABI across both binaries. (Its former
+  # PENSTOCK_SUPEROPT_BOOTSTRAP define was removed for this; when the
+  # superoptimiser is disabled the shared sources compile the same no-op
+  # stubs as before and the server links nothing extra.)
+  if(TARGET freshet-language-server)
+    add_dependencies(freshet-language-server penstock_superopt_freshet)
+    target_sources(freshet-language-server PRIVATE
+      "${_penstock_freshet_superopt_obj}")
+    target_link_libraries(freshet-language-server PRIVATE penstock_superopt_core)
+    target_compile_definitions(freshet-language-server PRIVATE
+      PENSTOCK_HAS_FSH_SUPEROPT=1 PENSTOCK_HAS_ALIVE2=1)
+  endif()
   if(PENSTOCK_RTTI_LLVM_IN_USE)
     file(RELATIVE_PATH _penstock_embedded_llvm_relpath
       "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}"
@@ -753,6 +864,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
     endif()
     set_property(TARGET penstock APPEND PROPERTY INSTALL_RPATH
       "${_penstock_embedded_llvm_rpath}")
+    if(TARGET freshet-language-server)
+      set_property(TARGET freshet-language-server APPEND PROPERTY INSTALL_RPATH
+        "${_penstock_embedded_llvm_rpath}")
+    endif()
     install(DIRECTORY "${PENSTOCK_RTTI_LLVM_LIBRARY_DIR}/"
       DESTINATION "${CMAKE_INSTALL_LIBDIR}/penstock/embedded/lib"
       FILES_MATCHING
@@ -769,15 +884,17 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
     endif()
   endif()
 
-  # Install the in-process libraries and public headers too, even though the
-  # Penstock executable statically contains the required code. This supports
-  # downstream CMake consumers and makes the vendored dependency footprint
-  # explicit in the install tree.
-  install(TARGETS penstock_superopt_core ir penstock_alive2_smt tools
-    penstock_alive2_util llvm_util
+  # Install the in-process libraries and public headers too: the bridge is a
+  # static archive, while Z3 and the Alive2 libraries are shared and land in
+  # embedded/lib next to the verifier's libLLVM.so — the single directory the
+  # $ORIGIN-relative INSTALL_RPATH of penstock, freshet-language-server and
+  # the opt plugin resolves every dynamic dependency from.
+  install(TARGETS penstock_superopt_core
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/penstock/embedded")
+  install(TARGETS ir penstock_alive2_smt tools penstock_alive2_util llvm_util
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/penstock/embedded/lib")
   install(TARGETS libz3
-    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/penstock/embedded"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/penstock/embedded/lib"
     PUBLIC_HEADER DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/penstock/z3/api")
   install(DIRECTORY "${penstock_z3_SOURCE_DIR}/src/api/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/penstock/z3/api"
@@ -820,9 +937,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
       DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/penstock-z3")
   endif()
 
-  message(STATUS "Embedded superoptimiser: Freshet + static Z3 + in-process Alive2")
-  message(STATUS "  Z3 revision    : ${PENSTOCK_Z3_GIT_TAG}")
-  message(STATUS "  Alive2 revision: ${PENSTOCK_ALIVE2_GIT_TAG}")
+  message(STATUS "Embedded superoptimiser: Freshet engine + shared Z3/Alive2/LLVM")
+  message(STATUS "  Linked into    : penstock + freshet-language-server")
+  message(STATUS "  Z3 source      : ${PENSTOCK_Z3_SOURCE_DESC}")
+  message(STATUS "  Alive2 source  : ${PENSTOCK_ALIVE2_SOURCE_DESC}")
   message(STATUS "  LLVM backend   : ${_penstock_sdk_version} (${LLVM_ROOT})")
   if(PENSTOCK_RTTI_LLVM_IN_USE)
     message(STATUS "  Alive2 LLVM ref: ${PENSTOCK_ALIVE2_LLVM_GIT_TAG} (${PENSTOCK_ALIVE2_LLVM_VERSION})")

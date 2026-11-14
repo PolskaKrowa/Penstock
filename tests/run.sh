@@ -3,6 +3,9 @@
 # usage: tests/run.sh
 set -u
 cd "$(dirname "$0")/.."
+# Diagnostics text must be deterministic: an ambient CLICOLOR_FORCE (even =0)
+# or a tty must not paint escape codes into the captured stderr files.
+export NO_COLOR=1
 PEN=bin/penstock
 PEN_LSP=bin/freshet-language-server
 TMP=$(mktemp -d)
@@ -190,6 +193,24 @@ if $PEN -O4 tests/pos_o4.fsh -o "$TMP/o4" 2>"$TMP/o4.err" \
     ok "-O4 build uses verified-superopt path by default and output is correct"
   else bad "-O4 output wrong (got '$out')"; fi
 else bad "-O4 build failed"; sed -n '1,5p' "$TMP/o4.err"; fi
+
+echo "== superopt dynamic-library parity: penstock + language server =="
+# parity: when the embedded superoptimiser is built, bin/penstock AND
+# bin/freshet-language-server must link the SAME shared Z3/Alive2/LLVM
+# dynamic libraries; the g++ fallback (scripts/build.sh) links neither.
+# A mixed state is a packaging bug the configure would otherwise hide.
+if ldd "$PEN" 2>/dev/null | grep -q 'libz3\.so'; then pen_dyn=yes; else pen_dyn=no; fi
+if ldd "$PEN_LSP" 2>/dev/null | grep -q 'libz3\.so'; then lsp_dyn=yes; else lsp_dyn=no; fi
+if [ "$pen_dyn" != "$lsp_dyn" ]; then
+  bad "superopt linkage mismatch (penstock=$pen_dyn, language-server=$lsp_dyn)"
+elif [ "$pen_dyn" = "yes" ]; then
+  if ldd "$PEN" 2>/dev/null | grep -q 'alive2\|libir\.so' && \
+     ldd "$PEN_LSP" 2>/dev/null | grep -q 'alive2\|libir\.so'; then
+    ok "both binaries link the shared Z3/Alive2 superoptimiser libraries"
+  else bad "shared Z3 present but Alive2 shared libraries missing from a binary"; fi
+else
+  ok "fallback build: neither binary links the shared superoptimiser libraries"
+fi
 
 echo "== R4: loop fusion + full unrolling =="
 # fusion: 3-phase FFT-multiply batch pipeline (fwd / pointwise / inv over
@@ -646,6 +667,44 @@ run_okf "distribution fissions independent groups" tests/pos_distribute.fsh "22|
 run_okf "parfor advisor: parallel-safe + reduction" tests/pos_parfor_advisor.fsh "18 2016" "-O2 --parfor-advisor" "F0905"
 run_ok "body-cost-aware parfor cutoff" tests/pos_bodycost.fsh "19900|186900"
 run_okf "proof log records premises" tests/pos_prooflog.fsh "440" "-O2 --partial-unroll --proof-log" ""
+
+# ---------------------------------------------------------------------------
+# mem & vectorisation stage: mem-reuse (F0919), mov-minimize (F0918),
+# batch-ops (F0920), vector-plan advisory (F0921), SMT interleave (F0922)
+# ---------------------------------------------------------------------------
+echo "== mem & vectorisation stage =="
+run_okf "mem-reuse hoists loop alloc churn" tests/pos_mem_reuse.fsh "2044.00" "-O2 --mem-reuse" "F0919"
+run_okf "mem-reuse never-written read vetoes reuse" tests/neg_mem_reuse_readfirst.fsh "28" "-O2 --mem-reuse" "!F0919"
+run_okf "mov-minimize: copies/self-assign/memcpy-forward" tests/pos_mov_min.fsh "4.50|3.00" "-O2 --mov-minimize" "F0918"
+run_okf "batch-ops de-interleaves isomorphic chains" tests/pos_batch.fsh "202.00" "-O2 --batch-ops" "F0920"
+run_okf "vector-plan reports separable routines" tests/pos_vector_plan.fsh "202.00" "-O2 --vector-plan" "F0921"
+run_okf "smt-interleave pairs complementary regions" tests/pos_smt_pair.fsh "2.02" "-O2 --smt-interleave" "F0922"
+run_okf "smt pairing vetoed on inter-region dependence" tests/neg_smt_pair_alias.fsh "3.00" "-O2 --smt-interleave" "!F0922"
+# the paired dispatch is visible in the IR: ONE frt_parfor_pair call and
+# exactly two chunk fns for the pair (the third belongs to the init region)
+if $PEN -S --smt-interleave tests/pos_smt_pair.fsh -o "$TMP/smt.ll" 2>/dev/null \
+    && grep -q "frt_parfor_pair" "$TMP/smt.ll" \
+    && [ "$(grep -c 'define internal void @__pf_body' "$TMP/smt.ll")" = "3" ]; then
+  ok "smt-interleave lowers to frt_parfor_pair (IR check)"
+else bad "smt-interleave IR check (frt_parfor_pair / chunk fns)"; fi
+# mem_class tags land at range offset 72 (1=memory, 2=compute)
+if $PEN -S --smt-interleave tests/pos_smt_pair.fsh -o "$TMP/smt2.ll" 2>/dev/null \
+    && grep -q "i64 72" "$TMP/smt2.ll"; then
+  ok "smt-interleave bakes mem_class at offset 72 (IR check)"
+else bad "smt-interleave mem_class IR check"; fi
+# runtime-level SMT semantics (pure C, no LLVM needed): the sysfs cpu-list
+# parser and every inline/dispatch combination of a paired dispatch must
+# match the sequential reference
+if command -v gcc >/dev/null 2>&1; then
+  if gcc -std=c11 -D_GNU_SOURCE -w -o "$TMP/rt_smt_test" \
+      scripts/rt_smt_test.c runtime/frt_rt.c -lpthread -lm 2>/dev/null \
+      && "$TMP/rt_smt_test" >"$TMP/rt_smt.out" 2>&1 \
+      && grep -q "ALL RUNTIME SMT TESTS PASSED" "$TMP/rt_smt.out"; then
+    ok "runtime SMT: cpu-list parser + pair semantics vs sequential"
+  else bad "runtime SMT unit tests"; sed -n '1,4p' "$TMP/rt_smt.out" 2>/dev/null; fi
+else
+  echo "  SKIP  runtime SMT unit tests (no gcc on PATH)"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 3/4/5 feature tests (report §6/§9/§10/§12) — modules, fn pointers,

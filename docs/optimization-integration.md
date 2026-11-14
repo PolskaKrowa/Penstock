@@ -376,3 +376,132 @@ advisor → IRgen → LLVM -O3 → superopt/precompute → PGO.
 - **General polyhedral transforms, blanket fast-math, speculative
   `noalias`/`nsw`/`nuw`, auto-prefetch from static strides** — §12's
   "would not implement yet" list is respected verbatim.
+
+---
+
+# Mem & vectorisation stage integration (14 Nov 2026)
+
+This part maps the requested "optimisation stage" (expensive `mov`
+minimisation incl. vectorised variants, unnecessary `free` elimination
+via memory reuse, operation batching for vectorisation), the
+"vectorisation helper" (separable-routine detection, batchability,
+dataflow-driven optimisation) and the SMT memory/compute interleave to
+the implementation.  Everything is opt-in with `--no-*` differential
+hatches, runs post-sema/post-checks/post-Phase-D/pre-IRgen at `-O2+`,
+emits N-notes (F0918–F0922) and `--proof-log` premise lines.
+
+## Part A — the optimisation stage (`src/mem_stage.cpp`)
+
+**`--mem-reuse` (F0919).**  Loop-churn hoisting: a sequential loop
+(never `parfor` — concurrent iterations would share the hoisted buffer)
+that `malloc`/`soa_new`s a fresh buffer per iteration and frees it at
+iteration end keeps ONE allocation (alloc hoisted before the loop, one
+free after).  Escape analysis: every access must be direct `b[...]`
+indexing or `soa_len(b)` — a bare `b` in any call arg, `&b[..]`,
+`give`, an aliasing re-binding LET or any unknown-effect call vetoes;
+the pointer must never be rebound; the count expression must be
+loop-invariant; and every read index must be matched by a write index
+(or a write-only fill loop) — documented as a quality gate over the
+"unspecified contents" contract (malloc does not zero).  Free/alloc
+fuse: `free(p)` immediately followed by an identical-shape binding
+becomes `let q = p;`.
+
+**`--mov-minimize` (F0918).**  Self-assignment removal (incl. the
+aggregate memcpy-to-self; INDEX chains excluded — they can trap under
+`--checked`/null deref), dead mov removal, and immutable mov forwarding
+with typed gates: aggregate movs (the by-address ABI copies that lower
+to `llvm.memcpy`) require no writes through either binding and no
+whole-binding call args; span/str pairs may reach borrowed calls;
+scalar/pointer movs ride on the F0208 immutability diagnostics.  The
+"vectorised mov" half of the family — mis-grouped scalar ops that
+become lane-crossing shuffles after vectorisation — is handled by the
+batching pass below.
+
+## Part B — the vectorisation helper (`src/vector_plan.cpp`)
+
+Per statement list / loop body: a def-use + memory-dependence DAG
+(scalar names; (root, canon-index + field-path) access keys; distinct
+address proofs via field disjointness or equal-coefficient affine
+indices in the loop ivar), split into **separable routines**
+(undirected components = independent strands), grouped into
+**batchable** sets (isomorphic shapes, pairwise independent, matching
+types — the SLP-packable sets).  `--vector-plan` (F0921) reports the
+strands, batch groups and per-strand dataflow (inputs incl. memory read
+roots / outputs) and never rewrites; `--batch-ops` (F0920) reorders by
+Kahn's algorithm over the same DAG with (group-anchor, source-order)
+priority — batch members pulled adjacent, every other statement keeps
+its relative order, only effect-free statements may move (pure
+builtins / `@pure` will-return callees; I/O, give, defer, unknown
+memory are barriers).
+
+## Part C — SMT memory/compute interleave
+
+- *Compiler* (`--smt-interleave`, F0922): every parfor body gets a
+  memory/compute census class (1/2/3) baked into
+  `frt_range_t.mem_class` (offset 72; the `%frt.range` type grows a
+  12th i32 field).  Adjacent, outermost, non-`@reproducible` parfors
+  with complementary classes AND proven region independence (no shared
+  write/read roots in either direction, the later region's bounds read
+  nothing the earlier writes, no unknown effects) are marked as a pair;
+  `genParfor` (refactored into prep/chunk-fn/combine phases) emits ONE
+  `frt_parfor_pair(rangeA, ctxoutA, rangeB, ctxoutB, MAXCTX)` returning
+  `(nB << 32) | nA`, with each region's chunk partition and combine
+  order unchanged.
+- *Runtime* (`runtime/frt_rt.c`): sysfs topology detection
+  (`thread_siblings_list`, pure `frt_parse_cpu_list` parser),
+  class-tagged tasks (`frt_task_t.cls`), lane-preference pop
+  (`pop_locked`: bounded 16-slot scan for the worker's preferred class
+  — compute on the lower sibling, memory on the higher — falling back
+  to the head so the pool stays work-conserving; class 0 degenerates to
+  the historical FIFO), and `frt_parfor_pair` implementing the paired
+  dispatch: serial-cutoff regions run inline in source order (an
+  inline-B even overlaps with in-flight A chunks on the pool), both
+  dispatched regions queue before the caller helps, and the caller
+  drains both.  `FRT_SMT_INTERLEAVE=1` enables topology probing + lane
+  routing + pinning (best effort); default runs are untouched (probe
+  skipped, all tasks class 0).  `SI <paired> <memLane> <compLane>` in
+  the timing file surfaces the statistics.
+- *libfsh ABI*: the `fsh_frt_range` mirror is extended with
+  `body_cost` + `mem_class` and zero-initialised — fixing a latent
+  out-of-bounds stack read (the mirror was 8 bytes shorter than the
+  struct `frt_parfor` reads) predating this change.
+
+## Evidence
+
+- `tests/pos_mem_reuse.fsh` (+F0919, one `frt_malloc` before the loop /
+  one `frt_free` after in the IR); `tests/neg_mem_reuse_readfirst.fsh`
+  (never-written read vetoes, !F0919).
+- `tests/pos_mov_min.fsh` (4 rewrites: self-assign, aggregate-memcpy
+  forward, scalar forward, dead mov; the forwarding is visible as the
+  dropped `llvm.memcpy`).
+- `tests/pos_batch.fsh` (+F0920, 2+2 wide de-interleave) and
+  `tests/pos_vector_plan.fsh` (+F0921 with strand/group/dataflow
+  report).
+- `tests/pos_smt_pair.fsh` (+F0922 clsA=1/clsB=2; IR shows one
+  `frt_parfor_pair` call, 3 chunk fns, mem_class stores at offsets
+  72); `tests/neg_smt_pair_alias.fsh` (flow dependence between regions
+  vetoes, !F0922).
+- `scripts/rt_smt_test.c`: pure-C runtime tests — the sysfs cpu-list
+  parser, and paired dispatch matching the sequential reference for
+  every inline/dispatch combination; wired into `tests/run.sh`.
+- `scripts/fecheck.cpp` (`bin/fecheck`): frontend-only driver
+  (parse → sema → checks → loop+mem passes → IRgen) for no-LLVM
+  environments; the full positive suite compiles through it at `-O2`
+  with every new pass enabled (75/76; the one exclusion needs the
+  `penstock test` harness synthesiser).
+
+## Known limitations (deliberate)
+
+- Loop-churn hoisting is sequential loops only (`for`/`while`); a
+  `parfor` body churning buffers would need per-iteration privatisation
+  analysis.
+- Mov forwarding is name-unique bindings only (shadowing vetoes);
+  read-before-write of buffer elements rides the documented
+  "unspecified contents" contract (malloc is not zeroed) rather than a
+  positional coverage proof.
+- SMT pairing covers adjacent outermost parfors in v1; nested-region
+  pairing (legal, but subtler concurrency reasoning) and a
+  runtime-side fallback that pairs *any* two concurrent regions by
+  class (not just compiler-marked pairs) are future work.
+- The lane preference is a static census (ops vs memory-op counts);
+  PGO-driven class refinement would improve the routing decisions.

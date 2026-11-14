@@ -92,6 +92,8 @@ static IrMetrics scanIr(const std::string& irPath) {
 // FRESHET-TIMING 1
 // PF <tag> <cycles> <count> <nchunks> <pinfails>
 // ST <serial> <dispatched>     (§10.1 scheduler stats; absent on old runs)
+// SI <paired> <memLane> <compLane>   (mem & vectorisation stage: SMT
+//     interleave stats; absent when no paired dispatch ever ran)
 struct TimingEnt {
   uint64_t tag, cycles;
   int64_t count, nchunks;
@@ -101,6 +103,9 @@ struct TimingEnt {
 struct TimingStats {
   int64_t serial = 0, dispatched = 0;
   bool present = false;
+  // mem & vectorisation stage: SMT interleave (optional)
+  int64_t smtPaired = 0, smtMemLane = 0, smtCompLane = 0;
+  bool smtPresent = false;
 };
 
 static std::vector<TimingEnt> readTiming(const std::string& binPath,
@@ -116,6 +121,12 @@ static std::vector<TimingEnt> readTiming(const std::string& binPath,
   while (f >> kind) {
     if (kind == "ST") {
       if (stats && (f >> stats->serial >> stats->dispatched)) stats->present = true;
+      continue;
+    }
+    if (kind == "SI") {
+      if (stats && (f >> stats->smtPaired >> stats->smtMemLane >>
+                    stats->smtCompLane))
+        stats->smtPresent = true;
       continue;
     }
     if (kind != "PF") { continue; }
@@ -362,6 +373,15 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
       R << "  parfor regions [runtime]: " << tstats.serial
         << " inline (serial cutoff), " << tstats.dispatched
         << " dispatched to pool\n";
+    }
+    if (tstats.smtPresent) {
+      // mem & vectorisation stage: SMT interleave stats — paired
+      // dispatches and the per-lane chunk counts (memory lane vs
+      // compute lane on sibling hardware threads)
+      R << "  smt interleave [runtime]: " << tstats.smtPaired
+        << " paired dispatch(es), " << tstats.smtMemLane
+        << " memory-lane chunk(s), " << tstats.smtCompLane
+        << " compute-lane chunk(s)\n";
     }
   }
 

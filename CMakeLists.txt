@@ -21,9 +21,13 @@
 #   cmake -B build -ULLVM_ROOT                    # unpin -> autodetection/download
 #
 # The core compiler still drives the Clang backend as a subprocess. Its
-# embedded superoptimiser is the exception: the CMake bootstrap builds the
-# Freshet control loop with penstock-bootstrap and statically links Z3/Alive2
-# plus the LLVM IR adapter into the final compiler.
+# embedded superoptimiser is the exception: the build compiles the
+# third_party/{z3,alive2,llvm} submodules into dynamic libraries (libz3.so,
+# the Alive2 shared libraries and the RTTI/EH-enabled libLLVM.so) and links
+# them, together with the Freshet control loop, into BOTH bin/penstock and
+# bin/freshet-language-server. Populate the submodules with
+# `git submodule update --init` (or clone with --recurse-submodules);
+# without them the configure falls back to fetching the same sources.
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -134,7 +138,9 @@ set(FRONTEND_SOURCES
   src/fmt.cpp    # Phase 4: `penstock fmt` formatter (report §10.2)
   src/profit_model.cpp # optimisation-audit §8: shared profitability model
   src/loop_analysis.cpp # audit §6.1/§6.3/§6.10: typed const fold, ranges, parfor advisor
-  src/loop_transforms.cpp) # audit §6.4–§6.9: LICM/partial-unroll/peel/interchange/tile/distribute/unroll-and-jam
+  src/loop_transforms.cpp # audit §6.4–§6.9: LICM/partial-unroll/peel/interchange/tile/distribute/unroll-and-jam
+  src/mem_stage.cpp # mem & vectorisation stage: alloc-churn reuse, mov-min, SMT parfor pairing
+  src/vector_plan.cpp) # mem & vectorisation stage: separable-routine analysis + SLP batching
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockTargets.cmake")
 
@@ -160,6 +166,7 @@ message(STATUS "    Penstock binary  : ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock"
 if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   message(STATUS "    Bootstrap binary: ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock-bootstrap")
   message(STATUS "    Superopt source : src/superopt.fsh (compiled during final link)")
+  message(STATUS "    Shared superopt : libz3.so + Alive2 libs + libLLVM.so -> penstock AND freshet-language-server")
 endif()
 if(PENSTOCK_OPT_PLUGIN_BUILT)
   message(STATUS "    O4 opt plugin    : ${CMAKE_CURRENT_BINARY_DIR}/plugins/opt/PenstockOptPlugin.so")

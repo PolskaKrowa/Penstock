@@ -852,6 +852,89 @@ vectorised" / "vectorisation missed" (**[backend]** results — what the
 backend actually did, parsed from `--opt-remarks` records).  An
 annotation is a request, not proof of vectorisation.
 
+### 14.4 Mem & vectorisation stage (`F0918`–`F0922`)
+
+A fourth group of opt-in source-level passes (all with `--no-*`
+differential hatches; `--mem-stage` enables the first three together).
+They run post-sema / post-checks / post-Phase-D, pre-IRgen, like every
+other R4 transform, and each applied rewrite records its legality
+premises in the `--proof-log`.
+
+**`--mem-reuse` (`F0919`) — allocation churn elimination.**
+Two shapes:
+
+- *Loop churn*: a `for`/`while` loop (never `parfor` — its iterations
+  are concurrent and would share the hoisted buffer) whose body
+  allocates a fresh buffer per iteration and frees it at iteration end
+  keeps ONE allocation: the `malloc`/`soa_new` is hoisted before the
+  loop, the per-iteration `free` becomes one `free` after it.
+  Premises: the buffer never escapes the iteration (every access is
+  direct `b[...]` indexing or `soa_len(b)`; a bare `b` passed to any
+  call, `&b[..]`, `give`, an aliasing re-binding, or an unknown-effect
+  call vetoes), the pointer is never rebound, the count expression is
+  loop-invariant, and every read `b[i]` is matched by a write `b[i]`
+  (or covered by a write-only fill loop) — a *quality* gate: elements
+  that are only ever read carry unspecified contents in both forms,
+  because `malloc` does not zero memory.
+- *Free/alloc fuse*: `free(p);` immediately followed by
+  `let q = malloc(T, m);` with `p`'s declaration of identical shape
+  becomes `let q = p;` — the freed block is reused instead of returned
+  to the allocator.  (`--mov-minimize` then forwards the alias.)
+
+**`--mov-minimize` (`F0918`) — redundant value-move elimination.**
+Removes the "expensive mov" family at the source level:
+self-assignments (`x = x`, `s.f = s.f` on non-pointer locals — a
+load+store, a whole-aggregate memcpy back into the same slot), dead
+movs (`let a = b;` with no uses), and immutable mov forwarding
+(`let a = b;` — every use of `a` reads `b` directly; chained movs
+forward across rounds).  Aggregate movs (struct/enum/array — the
+by-address ABI copies that lower to `llvm.memcpy`) require that no
+assignment writes through either binding and no call receives either
+whole binding; span/str pairs may reach non-owning (borrowed) calls;
+scalar and pointer movs need no extra gate (F0208 already proves no
+write goes through an immutable non-owned binding).  The mis-grouped
+scalar ops that survive into the vectoriser as lane-crossing shuffles
+are the vectorised-mov half of the family — addressed by `--batch-ops`.
+
+**`--batch-ops` (`F0920`) and `--vector-plan` (`F0921`) — separable-routine
+analysis and SLP batching.**  The vectorisation helper: for every
+straight-line statement list (and loop body) it builds the def-use +
+memory-dependence DAG (scalar names; memory (root, index-canonical +
+field-path) pairs; distinct-address proofs via field disjointness or
+equal-coefficient affine indices), splits it into **separable
+routines** (connected components — statements with no dataflow between
+them), and groups **batchable** statements (isomorphic shapes, pairwise
+independent, matching types).  `--vector-plan` reports the strands,
+the batch groups and their dataflow (inputs/outputs) and never
+rewrites; `--batch-ops` performs a stable topological reorder that
+pulls each batch group adjacent (Kahn's algorithm over the same DAG,
+priority = group anchor then source order), so the backend's SLP
+vectoriser packs the isomorphic operations into vector units instead
+of scalarising interleaved chains.  Only effect-free statements
+(pure builtins / `@pure` will-return callees, no I/O/give/defer) may
+move at all; every other statement is a barrier.
+
+**`--smt-interleave` (F0922) — SMT memory/compute interleave.**
+Classifies every `parfor` body by a memory/compute census
+(memory-bound = 1, compute-bound = 2, balanced = 3, baked into
+`frt_range_t.mem_class` at offset 72) and pairs **adjacent, provably
+independent** regions with complementary classes (memory+compute,
+memory+balanced, balanced+compute) into a single
+`frt_parfor_pair(rangeA, ctxA, rangeB, ctxB)` dispatch: the runtime
+queues the first region's chunks on the memory lane and the second's
+on the compute lane, and on an SMT host (env `FRT_SMT_INTERLEAVE=1`)
+workers pinned to the two hardware threads of one physical core pick
+complementary lanes — one thread streams memory (its stalls are cache
+misses) while the sibling keeps the core's **shared ALU** executing
+the other region's arithmetic.  Premises: regions are adjacent and
+outermost, not `@reproducible`, fully independent (no root written by
+one is read or written by the other; the later region's bounds read
+nothing the earlier writes; no unknown-memory effects), and each
+region's chunk partition and reduction combine order are unchanged —
+only the execution overlap differs.  Without SMT (or with the env off)
+the pair degenerates to dispatching both regions' chunks on the
+ordinary FIFO queue: identical semantics, no placement control.
+
 ## 15. Toolchain support
 
 Penstock emits textual LLVM IR and drives `clang` as its backend; it
