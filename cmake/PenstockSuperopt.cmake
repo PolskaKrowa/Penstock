@@ -7,14 +7,19 @@
 
 include(FetchContent)
 
+# Submodule-aware dependency resolution (third_party/{z3,alive2,llvm});
+# LlvmBootstrap.cmake already included this before project(), the guard
+# makes the double include safe.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ThirdPartySubmodules.cmake")
+
 option(PENSTOCK_BUILD_EMBEDDED_SUPEROPT
   "Build the Freshet-hosted in-process Z3/Alive2 superoptimiser" ON)
 set(PENSTOCK_Z3_GIT_TAG "z3-4.15.3" CACHE STRING
-  "Z3 tag used for the embedded static solver")
+  "Z3 tag used for the embedded static solver (ignored when third_party/z3 is initialised)")
 set(PENSTOCK_ALIVE2_GIT_TAG "master" CACHE STRING
-  "Alive2 revision used for the embedded verifier")
+  "Alive2 revision used for the embedded verifier (ignored when third_party/alive2 is initialised)")
 set(PENSTOCK_ALIVE2_LLVM_GIT_TAG "main" CACHE STRING
-  "LLVM revision paired with Alive2 (upstream recommends LLVM main for Alive2 master)")
+  "LLVM revision paired with Alive2 (ignored when an LLVM source dir or the third_party/llvm submodule provides it)")
 
 if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   # Z3 is linked into both the executable and the optional LLVM plugin.
@@ -125,10 +130,38 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   # checkout at PENSTOCK_ALIVE2_LLVM_GIT_TAG even when the user's backend SDK
   # already has RTTI/EH. The selected LLVM_ROOT/clang remains Penstock's
   # backend; only the in-process verifier uses this private LLVM runtime.
+  #
+  # EXCEPTION: when the backend toolchain itself was built from the
+  # third_party/llvm submodule (see LlvmBootstrap.cmake), that SDK already IS
+  # the Alive2-matched revision with RTTI/EH enabled — building a second
+  # LLVM from the same sources would double the cost for nothing. Reuse it.
+  if(PENSTOCK_BUILD_RTTI_LLVM AND PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE)
+    message(STATUS
+      "Alive2 LLVM: reusing the backend SDK built from the third_party/llvm "
+      "submodule (${LLVM_ROOT}); no private LLVM build is required")
+    # Normal variable: deliberately shadows the cached option for this
+    # configure only (the same decision is re-derived on every configure).
+    set(PENSTOCK_BUILD_RTTI_LLVM FALSE)
+  endif()
   if(PENSTOCK_BUILD_RTTI_LLVM)
     message(STATUS
       "Building private Alive2 LLVM revision '${PENSTOCK_ALIVE2_LLVM_GIT_TAG}' "
       "with RTTI/EH (backend SDK remains LLVM ${_penstock_sdk_version})")
+
+    # An initialised third_party/llvm submodule replaces the network fetch
+    # of the Alive2-matched LLVM sources. (Not reached when the backend was
+    # already built from the submodule — see the reuse block above.)
+    if(NOT PENSTOCK_RTTI_LLVM_SOURCE_DIR)
+      penstock_third_party_submodule(llvm "llvm/CMakeLists.txt"
+        _penstock_alive2_llvm_submodule)
+      if(_penstock_alive2_llvm_submodule)
+        set(PENSTOCK_RTTI_LLVM_SOURCE_DIR "${_penstock_alive2_llvm_submodule}")
+        message(STATUS
+          "Alive2 LLVM source: third_party/llvm submodule "
+          "(PENSTOCK_ALIVE2_LLVM_GIT_TAG='${PENSTOCK_ALIVE2_LLVM_GIT_TAG}' "
+          "is not fetched while the submodule is in use)")
+      endif()
+    endif()
 
     if(PENSTOCK_RTTI_LLVM_SOURCE_DIR)
       if(EXISTS "${PENSTOCK_RTTI_LLVM_SOURCE_DIR}/llvm/CMakeLists.txt")
@@ -312,7 +345,11 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
     get_filename_component(_penstock_llvm_config_dir
       "${_penstock_llvm_config_file}" DIRECTORY)
     set(LLVM_DIR "${_penstock_llvm_config_dir}")
-    if(COMMAND penstock_prepare_llvm_zstd_dependency)
+    # The from-submodule backend SDK is built with LLVM_ENABLE_ZSTD=OFF, so
+    # its exports never reference zstd::libzstd_static; preparing zstd here
+    # would otherwise try a network fetch on fully-offline submodule builds.
+    if(NOT PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE AND
+       COMMAND penstock_prepare_llvm_zstd_dependency)
       penstock_prepare_llvm_zstd_dependency()
     endif()
     find_package(LLVM CONFIG REQUIRED
@@ -326,10 +363,26 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
         "both. Enable PENSTOCK_BUILD_RTTI_LLVM or provide an LLVM checkout "
         "that matches PENSTOCK_ALIVE2_GIT_TAG.")
     endif()
-    message(WARNING
-      "Using the selected LLVM SDK directly for Alive2. Ensure it matches "
-      "the API revision expected by Alive2 '${PENSTOCK_ALIVE2_GIT_TAG}'. "
-      "The default private LLVM build avoids this compatibility risk.")
+    if(PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE)
+      # One LLVM serves everything: the backend toolchain, the verifier and
+      # the opt plugin were all built from the same third_party/llvm sources.
+      message(STATUS
+        "Using the third_party/llvm backend SDK for Alive2 "
+        "(same revision as the compiler backend, RTTI/EH enabled)")
+      # Point the embedded-runtime install rules at the from-source SDK.
+      set(PENSTOCK_RTTI_LLVM_BUILD_DIR "${LLVM_ROOT}")
+      set(PENSTOCK_RTTI_LLVM_LIBRARY_DIR "${LLVM_ROOT}/lib")
+      penstock_third_party_submodule(llvm "llvm/CMakeLists.txt"
+        _penstock_backend_llvm_submodule)
+      if(_penstock_backend_llvm_submodule)
+        set(PENSTOCK_RTTI_LLVM_SOURCE_ROOT "${_penstock_backend_llvm_submodule}")
+      endif()
+    else()
+      message(WARNING
+        "Using the selected LLVM SDK directly for Alive2. Ensure it matches "
+        "the API revision expected by Alive2 '${PENSTOCK_ALIVE2_GIT_TAG}'. "
+        "The default private LLVM build avoids this compatibility risk.")
+    endif()
   endif()
 
   if(NOT LLVM_FOUND)
@@ -358,67 +411,43 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   set(Z3_BUILD_TEST_EXECUTABLES OFF CACHE BOOL "Do not build Z3 tests" FORCE)
   set(Z3_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Do not build Z3 Python bindings" FORCE)
   set(Z3_ENABLE_EXAMPLE_TARGETS OFF CACHE BOOL "Do not build Z3 examples" FORCE)
-  FetchContent_Declare(penstock_z3
-    GIT_REPOSITORY https://github.com/Z3Prover/z3.git
-    GIT_TAG "${PENSTOCK_Z3_GIT_TAG}"
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(penstock_z3)
-  if(NOT penstock_z3_POPULATED)
-    # Populate first so we can apply a narrow target-name compatibility patch
-    # before Z3 creates its component targets in Penstock's CMake directory.
-    # LLVMConfig exports an imported executable target named `opt`; Z3 4.15.x
-    # also names one of its object-library components `opt`. Those names are
-    # globally unique in CMake, so keep the Z3 component namespaced.
-    if(POLICY CMP0169)
-      cmake_policy(PUSH)
-      cmake_policy(SET CMP0169 OLD)
-      FetchContent_Populate(penstock_z3)
-      cmake_policy(POP)
-    else()
-      FetchContent_Populate(penstock_z3)
+  # Source resolution: an initialised third_party/z3 submodule wins over the
+  # network fetch; both paths produce the same penstock_z3_* variable contract
+  # as FetchContent_GetProperties would.
+  penstock_resolve_z3_sources()
+  if(PENSTOCK_Z3_FROM_SUBMODULE)
+    set(_penstock_z3_origin "third_party/z3 submodule")
+    if(PENSTOCK_Z3_SUBMODULE_DESCRIPTION)
+      string(APPEND _penstock_z3_origin " (${PENSTOCK_Z3_SUBMODULE_DESCRIPTION})")
+    endif()
+    message(STATUS "Penstock: building Z3 from the ${_penstock_z3_origin}")
+  else()
+    message(STATUS
+      "Penstock: fetching Z3 ${PENSTOCK_Z3_GIT_TAG} "
+      "(no initialised third_party/z3 submodule)")
+    FetchContent_Declare(penstock_z3
+      GIT_REPOSITORY https://github.com/Z3Prover/z3.git
+      GIT_TAG "${PENSTOCK_Z3_GIT_TAG}"
+      GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(penstock_z3)
+    if(NOT penstock_z3_POPULATED)
+      # Populate first so we can apply a narrow target-name compatibility patch
+      # before Z3 creates its component targets in Penstock's CMake directory.
+      if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+        FetchContent_Populate(penstock_z3)
+        cmake_policy(POP)
+      else()
+        FetchContent_Populate(penstock_z3)
+      endif()
     endif()
   endif()
-  set(_penstock_z3_opt_cmake "${penstock_z3_SOURCE_DIR}/src/opt/CMakeLists.txt")
-  if(NOT EXISTS "${_penstock_z3_opt_cmake}")
-    message(FATAL_ERROR
-      "The selected Z3 source revision does not contain src/opt/CMakeLists.txt; "
-      "cannot apply the LLVM `opt` target collision workaround.")
-  endif()
-  file(READ "${_penstock_z3_opt_cmake}" _penstock_z3_opt_cmake_text)
-  string(FIND "${_penstock_z3_opt_cmake_text}" "z3_add_component(opt" _penstock_z3_opt_decl)
-  string(FIND "${_penstock_z3_opt_cmake_text}" "z3_add_component(penstock_z3_opt" _penstock_z3_opt_renamed_decl)
-  if(NOT _penstock_z3_opt_decl EQUAL -1)
-    string(REPLACE "z3_add_component(opt"
-                   "z3_add_component(penstock_z3_opt"
-      _penstock_z3_opt_cmake_text "${_penstock_z3_opt_cmake_text}")
-    file(WRITE "${_penstock_z3_opt_cmake}" "${_penstock_z3_opt_cmake_text}")
-  elseif(_penstock_z3_opt_renamed_decl EQUAL -1)
-    message(FATAL_ERROR
-      "Could not find Z3's expected `z3_add_component(opt ...)` declaration in "
-      "${_penstock_z3_opt_cmake}. The Z3 source layout has changed; refusing "
-      "to continue with a possible CMake target collision.")
-  endif()
-  # Z3's API component declares an explicit dependency on the `opt`
-  # component. Keep its component graph consistent with the renamed target.
-  set(_penstock_z3_api_cmake "${penstock_z3_SOURCE_DIR}/src/api/CMakeLists.txt")
-  if(NOT EXISTS "${_penstock_z3_api_cmake}")
-    message(FATAL_ERROR "The selected Z3 source revision has no src/api/CMakeLists.txt.")
-  endif()
-  file(READ "${_penstock_z3_api_cmake}" _penstock_z3_api_cmake_text)
-  string(FIND "${_penstock_z3_api_cmake_text}"
-    "COMPONENT_DEPENDENCIES\n    opt" _penstock_z3_api_opt_dep)
-  string(FIND "${_penstock_z3_api_cmake_text}"
-    "COMPONENT_DEPENDENCIES\n    penstock_z3_opt" _penstock_z3_api_opt_dep_renamed)
-  if(NOT _penstock_z3_api_opt_dep EQUAL -1)
-    string(REPLACE "COMPONENT_DEPENDENCIES\n    opt"
-                   "COMPONENT_DEPENDENCIES\n    penstock_z3_opt"
-      _penstock_z3_api_cmake_text "${_penstock_z3_api_cmake_text}")
-    file(WRITE "${_penstock_z3_api_cmake}" "${_penstock_z3_api_cmake_text}")
-  elseif(_penstock_z3_api_opt_dep_renamed EQUAL -1)
-    message(FATAL_ERROR
-      "Could not update Z3's API dependency on the renamed opt component. "
-      "The selected Z3 source layout may have changed.")
-  endif()
+  # LLVMConfig exports an imported executable target named `opt`; Z3 4.15.x
+  # also names one of its object-library components `opt`. Those names are
+  # globally unique in CMake, so keep the Z3 component namespaced
+  # (idempotent; see cmake/ThirdPartySubmodules.cmake).
+  penstock_patch_z3_for_embedded_build("${penstock_z3_SOURCE_DIR}")
   add_subdirectory("${penstock_z3_SOURCE_DIR}" "${penstock_z3_BINARY_DIR}" EXCLUDE_FROM_ALL)
   if(NOT TARGET libz3)
     message(FATAL_ERROR "The selected Z3 source revision did not create target libz3.")
@@ -442,10 +471,16 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   set(_penstock_z3_package_dir "${CMAKE_CURRENT_BINARY_DIR}/penstock-z3-package")
   file(MAKE_DIRECTORY "${_penstock_z3_package_dir}")
   set(_penstock_z3_default_version "4.15.3")
-  string(REGEX MATCH "[0-9]+[.][0-9]+[.][0-9]+" _penstock_z3_tag_version
-    "${PENSTOCK_Z3_GIT_TAG}")
-  if(_penstock_z3_tag_version)
-    set(_penstock_z3_default_version "${_penstock_z3_tag_version}")
+  if(PENSTOCK_Z3_FROM_SUBMODULE AND PENSTOCK_Z3_SUBMODULE_VERSION)
+    # Parsed from `git describe` on the submodule (e.g. "z3-4.14.6" or
+    # "z3-4.15.3-3-gabcdef-dirty"); only the version feeds the config package.
+    set(_penstock_z3_default_version "${PENSTOCK_Z3_SUBMODULE_VERSION}")
+  else()
+    string(REGEX MATCH "[0-9]+[.][0-9]+[.][0-9]+" _penstock_z3_tag_version
+      "${PENSTOCK_Z3_GIT_TAG}")
+    if(_penstock_z3_tag_version)
+      set(_penstock_z3_default_version "${_penstock_z3_tag_version}")
+    endif()
   endif()
   set(PENSTOCK_Z3_PACKAGE_VERSION "${_penstock_z3_default_version}")
   file(WRITE "${_penstock_z3_package_dir}/Z3Config.cmake"
@@ -475,129 +510,42 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   # LLVM_DIR is already scoped to the selected (possibly private) SDK above.
   # Do not force it into the cache: the next configure must rediscover the
   # user's original backend SDK and recreate the private fallback target.
-  FetchContent_Declare(penstock_alive2
-    GIT_REPOSITORY https://github.com/AliveToolkit/alive2.git
-    GIT_TAG "${PENSTOCK_ALIVE2_GIT_TAG}"
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(penstock_alive2)
-  if(NOT penstock_alive2_POPULATED)
-    # FetchContent_Populate is used intentionally: Alive2's standalone
-    # executable install rules are patched before its add_subdirectory call.
-    if(POLICY CMP0169)
-      cmake_policy(PUSH)
-      cmake_policy(SET CMP0169 OLD)
-      FetchContent_Populate(penstock_alive2)
-      cmake_policy(POP)
-    else()
-      FetchContent_Populate(penstock_alive2)
+  # Source resolution: an initialised third_party/alive2 submodule wins over
+  # the network fetch; the variable contract matches FetchContent_GetProperties.
+  penstock_resolve_alive2_sources()
+  if(PENSTOCK_ALIVE2_FROM_SUBMODULE)
+    set(_penstock_alive2_origin "third_party/alive2 submodule")
+    if(PENSTOCK_ALIVE2_SUBMODULE_DESCRIPTION)
+      string(APPEND _penstock_alive2_origin
+        " (${PENSTOCK_ALIVE2_SUBMODULE_DESCRIPTION})")
+    endif()
+    message(STATUS "Penstock: building Alive2 from the ${_penstock_alive2_origin}")
+  else()
+    message(STATUS
+      "Penstock: fetching Alive2 ${PENSTOCK_ALIVE2_GIT_TAG} "
+      "(no initialised third_party/alive2 submodule)")
+    FetchContent_Declare(penstock_alive2
+      GIT_REPOSITORY https://github.com/AliveToolkit/alive2.git
+      GIT_TAG "${PENSTOCK_ALIVE2_GIT_TAG}"
+      GIT_SHALLOW TRUE)
+    FetchContent_GetProperties(penstock_alive2)
+    if(NOT penstock_alive2_POPULATED)
+      # FetchContent_Populate is used intentionally: Alive2's standalone
+      # executable install rules are patched before its add_subdirectory call.
+      if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+        FetchContent_Populate(penstock_alive2)
+        cmake_policy(POP)
+      else()
+        FetchContent_Populate(penstock_alive2)
+      endif()
     endif()
   endif()
-  # Alive2's standalone project creates a generic `check` target. Penstock
-  # has its own regression-suite target with that name, so give Alive2's
-  # optional source tests a distinct name before adding its project.
-  set(_penstock_alive2_cmake "${penstock_alive2_SOURCE_DIR}/CMakeLists.txt")
-  file(READ "${_penstock_alive2_cmake}" _penstock_alive2_cmake_text)
-  string(REPLACE "add_custom_target(\"check\""
-                 "add_custom_target(\"alive2-check\""
-                 _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  # Penstock consumes Alive2's static libraries directly. Do not build or
-  # install its standalone CLI tools (alive, alive-tv, alive-exec, etc.).
-  string(REPLACE "install(TARGETS alive alive-jobserver)"
-                 "# Penstock embeds Alive2; standalone CLI install disabled."
-                 _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  string(REPLACE "install(TARGETS alive-tv quick-fuzz alive-exec)"
-                 "# Penstock embeds Alive2; standalone LLVM tool install disabled."
-                 _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  # Alive2 and Z3 are both added to the same CMake directory hierarchy.
-  # Alive2's own libraries are unfortunately named `smt` and `util`, which
-  # collide with Z3 4.15.x component targets of the same names. Namespace the
-  # two Alive2 targets in its top-level CMakeLists before add_subdirectory();
-  # keep its source lists and library contents unchanged. Patch every target
-  # reference in the root file so the dependencies remain internally
-  # consistent. This is intentionally idempotent for an existing FetchContent
-  # checkout that has already been configured once.
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(smt STATIC \${SMT_SRCS})" _penstock_alive2_smt_decl)
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(penstock_alive2_smt STATIC \${SMT_SRCS})" _penstock_alive2_smt_decl_renamed)
-  if(NOT _penstock_alive2_smt_decl EQUAL -1)
-    string(REPLACE "add_library(smt STATIC \${SMT_SRCS})"
-                   "add_library(penstock_alive2_smt STATIC \${SMT_SRCS})"
-      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  elseif(_penstock_alive2_smt_decl_renamed EQUAL -1)
-    message(FATAL_ERROR
-      "Could not namespace Alive2's smt target. The selected Alive2 source "
-      "layout has changed; refusing to configure with a Z3 target collision.")
-  endif()
-
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(util STATIC \${UTIL_SRCS})" _penstock_alive2_util_decl)
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_library(penstock_alive2_util STATIC \${UTIL_SRCS})" _penstock_alive2_util_decl_renamed)
-  if(NOT _penstock_alive2_util_decl EQUAL -1)
-    string(REPLACE "add_library(util STATIC \${UTIL_SRCS})"
-                   "add_library(penstock_alive2_util STATIC \${UTIL_SRCS})"
-      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  elseif(_penstock_alive2_util_decl_renamed EQUAL -1)
-    message(FATAL_ERROR
-      "Could not namespace Alive2's util target. The selected Alive2 source "
-      "layout has changed; refusing to configure with a Z3 target collision.")
-  endif()
-
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_dependencies(util generate_version)" _penstock_alive2_util_dependency)
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "add_dependencies(penstock_alive2_util generate_version)" _penstock_alive2_util_dependency_renamed)
-  if(NOT _penstock_alive2_util_dependency EQUAL -1)
-    string(REPLACE "add_dependencies(util generate_version)"
-                   "add_dependencies(penstock_alive2_util generate_version)"
-      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  elseif(_penstock_alive2_util_dependency_renamed EQUAL -1)
-    message(FATAL_ERROR
-      "Could not update Alive2's util dependency on generate_version.")
-  endif()
-
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "set(ALIVE_LIBS ir smt tools util)" _penstock_alive2_libs)
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "set(ALIVE_LIBS ir penstock_alive2_smt tools penstock_alive2_util)" _penstock_alive2_libs_renamed)
-  if(NOT _penstock_alive2_libs EQUAL -1)
-    string(REPLACE "set(ALIVE_LIBS ir smt tools util)"
-                   "set(ALIVE_LIBS ir penstock_alive2_smt tools penstock_alive2_util)"
-      _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  elseif(_penstock_alive2_libs_renamed EQUAL -1)
-    message(FATAL_ERROR
-      "Could not update Alive2's ALIVE_LIBS list for the namespaced targets.")
-  endif()
-
-  # Force Alive2 to consume Penstock's in-tree Z3 target through the config
-  # package above. Module mode would select LLVM's FindZ3.cmake, which probes
-  # for a prebuilt on-disk archive at configure time and cannot work with this
-  # not-yet-built FetchContent target.
-  string(REPLACE "find_package(Z3 4.8.5 REQUIRED)"
-                 "find_package(Z3 4.8.5 CONFIG REQUIRED)"
-                 _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  string(FIND "${_penstock_alive2_cmake_text}" "find_package(Z3 4.8.5 CONFIG REQUIRED)" _penstock_alive2_z3_config_lookup)
-  if(_penstock_alive2_z3_config_lookup EQUAL -1)
-    message(FATAL_ERROR
-      "Could not patch Alive2's Z3 lookup to CONFIG mode. Its CMakeLists.txt "
-      "has changed; refusing to fall back to the invalid -llibz3 probe.")
-  endif()
-  # Upstream's FindZ3 normally points at an installed include directory where
-  # z3++.h is flattened into the include root. Our in-tree source checkout
-  # keeps it under src/api/c++, so add that include directory explicitly.
-  string(REPLACE "include_directories(\${Z3_INCLUDE_DIR})"
-                 "include_directories(\${Z3_INCLUDE_DIR} \${Z3_CXX_INCLUDE_DIRS})"
-                 _penstock_alive2_cmake_text "${_penstock_alive2_cmake_text}")
-  string(FIND "${_penstock_alive2_cmake_text}"
-    "include_directories(\${Z3_INCLUDE_DIR} \${Z3_CXX_INCLUDE_DIRS})"
-    _penstock_alive2_z3_cpp_include)
-  if(_penstock_alive2_z3_cpp_include EQUAL -1)
-    message(FATAL_ERROR
-      "Could not add Z3's in-tree C++ API include directory to Alive2. "
-      "Its CMakeLists.txt has changed; refusing a build that may not find z3++.h.")
-  endif()
-  file(WRITE "${_penstock_alive2_cmake}" "${_penstock_alive2_cmake_text}")
+  # Patch Alive2's standalone install rules and `check` target name, and
+  # namespace the target names colliding with Z3's components (idempotent;
+  # see cmake/ThirdPartySubmodules.cmake).
+  penstock_patch_alive2_for_embedded_build("${penstock_alive2_SOURCE_DIR}")
   add_subdirectory("${penstock_alive2_SOURCE_DIR}"
                    "${penstock_alive2_BINARY_DIR}" EXCLUDE_FROM_ALL)
 
@@ -742,7 +690,10 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   target_link_libraries(penstock PRIVATE penstock_superopt_core)
   target_compile_definitions(penstock PRIVATE
     PENSTOCK_HAS_FSH_SUPEROPT=1 PENSTOCK_HAS_ALIVE2=1)
-  if(PENSTOCK_RTTI_LLVM_IN_USE)
+  # The embedded LLVM runtime must be installed beside penstock whenever the
+  # verifier links a from-source libLLVM: the private Alive2 build, or the
+  # backend SDK built from the third_party/llvm submodule.
+  if(PENSTOCK_RTTI_LLVM_IN_USE OR PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE)
     file(RELATIVE_PATH _penstock_embedded_llvm_relpath
       "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}"
       "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/penstock/embedded/lib")
@@ -803,11 +754,13 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   install(FILES
     "${penstock_alive2_SOURCE_DIR}/LICENSE"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/penstock-alive2")
-  if(PENSTOCK_RTTI_LLVM_IN_USE AND
+  if((PENSTOCK_RTTI_LLVM_IN_USE OR PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE) AND
+     PENSTOCK_RTTI_LLVM_SOURCE_ROOT AND
      EXISTS "${PENSTOCK_RTTI_LLVM_SOURCE_ROOT}/LICENSE.TXT")
     install(FILES "${PENSTOCK_RTTI_LLVM_SOURCE_ROOT}/LICENSE.TXT"
       DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/penstock-llvm")
-  elseif(PENSTOCK_RTTI_LLVM_IN_USE AND
+  elseif((PENSTOCK_RTTI_LLVM_IN_USE OR PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE) AND
+         PENSTOCK_RTTI_LLVM_SOURCE_ROOT AND
          EXISTS "${PENSTOCK_RTTI_LLVM_SOURCE_ROOT}/LICENSE")
     install(FILES "${PENSTOCK_RTTI_LLVM_SOURCE_ROOT}/LICENSE"
       DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/penstock-llvm")
@@ -821,10 +774,20 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   endif()
 
   message(STATUS "Embedded superoptimiser: Freshet + static Z3 + in-process Alive2")
-  message(STATUS "  Z3 revision    : ${PENSTOCK_Z3_GIT_TAG}")
-  message(STATUS "  Alive2 revision: ${PENSTOCK_ALIVE2_GIT_TAG}")
+  if(PENSTOCK_Z3_FROM_SUBMODULE)
+    message(STATUS "  Z3 source      : third_party/z3 submodule (${PENSTOCK_Z3_SUBMODULE_DESCRIPTION})")
+  else()
+    message(STATUS "  Z3 revision    : ${PENSTOCK_Z3_GIT_TAG} (fetched)")
+  endif()
+  if(PENSTOCK_ALIVE2_FROM_SUBMODULE)
+    message(STATUS "  Alive2 source  : third_party/alive2 submodule (${PENSTOCK_ALIVE2_SUBMODULE_DESCRIPTION})")
+  else()
+    message(STATUS "  Alive2 revision: ${PENSTOCK_ALIVE2_GIT_TAG} (fetched)")
+  endif()
   message(STATUS "  LLVM backend   : ${_penstock_sdk_version} (${LLVM_ROOT})")
-  if(PENSTOCK_RTTI_LLVM_IN_USE)
+  if(PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE)
+    message(STATUS "  Alive2 LLVM SDK: third_party/llvm submodule backend (${LLVM_PACKAGE_VERSION})")
+  elseif(PENSTOCK_RTTI_LLVM_IN_USE)
     message(STATUS "  Alive2 LLVM ref: ${PENSTOCK_ALIVE2_LLVM_GIT_TAG} (${PENSTOCK_ALIVE2_LLVM_VERSION})")
     message(STATUS "  Alive2 LLVM dir: ${PENSTOCK_ALIVE2_LLVM_BUILD_DIR}")
   else()

@@ -1,9 +1,12 @@
-[submodule "third_party/llvm"]
-	path = third_party/llvm
-	url = https://github.com/llvm/llvm-project.git
-[submodule "third_party/alive2"]
-	path = third_party/alive2
-	url = https://github.com/AliveToolkit/alive2.git
 [submodule "third_party/z3"]
 	path = third_party/z3
 	url = https://github.com/Z3Prover/z3.git
+	shallow = true
+[submodule "third_party/alive2"]
+	path = third_party/alive2
+	url = https://github.com/AliveToolkit/alive2.git
+	shallow = true
+[submodule "third_party/llvm"]
+	path = third_party/llvm
+	url = https://github.com/llvm/llvm-project.git
+	shallow = true

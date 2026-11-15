@@ -80,14 +80,30 @@ compiler's intermediate IR and diagnostic artefacts.
 | Option | Default | Purpose |
 |---|---|---|
 | `PENSTOCK_BUILD_EMBEDDED_SUPEROPT` | `ON` | Build the Freshet engine and embedded solver/verifier |
-| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision, statically linked |
-| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and linked into Penstock |
-| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master |
+| `PENSTOCK_Z3_GIT_TAG` | `z3-4.15.3` | Z3 source revision, statically linked (unused when `third_party/z3` is initialised) |
+| `PENSTOCK_ALIVE2_GIT_TAG` | `master` | Alive2 source revision fetched and linked into Penstock (unused when `third_party/alive2` is initialised) |
+| `PENSTOCK_ALIVE2_LLVM_GIT_TAG` | `main` | LLVM revision paired with Alive2 master (unused when an LLVM source dir or submodule provides it) |
 | `PENSTOCK_FETCH_LLVM` | `ON` | Fetch a matching LLVM development SDK when necessary |
-| `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them |
-| `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | empty | Use an existing `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
+| `PENSTOCK_BUILD_RTTI_LLVM` | `ON` | Build a private LLVM revision for Alive2 with RTTI/EH, even when the backend SDK already has them (skipped automatically when the backend is built from `third_party/llvm`) |
+| `PENSTOCK_RTTI_LLVM_SOURCE_DIR` | `third_party/llvm` when initialised | Use an existing `llvm-project` checkout matching `PENSTOCK_ALIVE2_LLVM_GIT_TAG` |
 | `PENSTOCK_ALIVE2_LLVM_BUILD_DIR` | `build/_deps/penstock-alive2-llvm-build` | Private LLVM build directory used by the verifier |
 | `PENSTOCK_RTTI_LLVM_TARGETS_TO_BUILD` | `Native` | LLVM code-generation backends built in the private SDK |
+
+### Vendored submodules
+
+`third_party/z3`, `third_party/alive2` and `third_party/llvm` (all optional
+git submodules) replace the corresponding network fetches when initialised:
+Z3 and Alive2 build straight from the submodule checkouts, and the LLVM
+submodule becomes the source of the private Alive2 LLVM build. When the
+clang *backend* is also built from `third_party/llvm`
+(`PENSTOCK_BUILD_LLVM_FROM_SUBMODULE`, the default when the submodule is
+initialised), that one SDK — same revision, RTTI/EH enabled, monolithic
+libLLVM — serves the backend, the verifier and the opt plugin, so no second
+private LLVM build and no release tarball download happen at all.
+`-DPENSTOCK_USE_SUBMODULES=OFF` restores the fetched/fetched/downloaded
+behaviour; see [install.md](install.md#vendored-dependency-submodules).
+The namespacing patches described above are applied to the submodule
+checkouts in place and are idempotent.
 
 The build requires a matching LLVM development SDK for Penstock's selected
 Clang backend. Alive2's LLVM adapter requires RTTI and exception handling, and
@@ -99,8 +115,9 @@ features. The private build supplies the LLVM headers/libraries for the
 in-process verifier and the matching `opt` host when the optional O4 plugin is
 enabled. Penstock's normal `LLVM_ROOT` and Clang backend remain unchanged.
 
-Z3 and Alive2 are fetched and built as static libraries. Z3's internal
-`opt` component is namespaced in the fetched build tree because LLVM already
+Z3 and Alive2 are built as static libraries from either the vendored
+submodules (when initialised) or a FetchContent clone. Z3's internal
+`opt` component is namespaced in the source tree because LLVM already
 exports an imported executable target with that name; its API component
 reference is updated at the same time. Alive2's `smt` and `util` targets are
 likewise namespaced as `penstock_alive2_smt` and `penstock_alive2_util`, since

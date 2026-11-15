@@ -4,9 +4,12 @@
 # compiler for the tools themselves:
 #
 #   1. explicit -DLLVM_ROOT=... / $LLVM_ROOT (a leading ~/ is expanded)
-#   2. local LLVM autodetection: ../tools/llvmNN beside the project, then
+#   2. third_party/llvm submodule: build the complete clang backend
+#      toolchain from source (no download; skip with
+#      -DPENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF)
+#   3. local LLVM autodetection: ../tools/llvmNN beside the project, then
 #      system prefixes /usr/lib/llvm-NN, newest first (majors 23..19)
-#   3. verified download of an official LLVM release into the
+#   4. verified download of an official LLVM release into the
 #      PENSTOCK_LLVM_DOWNLOAD_DIR cache when no local toolchain exists
 #
 # If a local clang exists without its development SDK, the matching SDK is
@@ -18,6 +21,12 @@
 # This file is included from the top-level CMakeLists.txt BEFORE project()
 # so the backend's clang++ can be selected as the host compiler; it
 # executes in the includer's scope.
+
+# Optional in-tree dependency submodules (third_party/llvm, third_party/z3,
+# third_party/alive2). Included first: the backend discovery below prefers
+# a configured third_party/llvm checkout over downloading a release tarball,
+# and PenstockSuperopt.cmake re-includes this (guarded) module later.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ThirdPartySubmodules.cmake")
 # Keep configure-time bootstrap output consistent across CMake 3.16+.
 # The output is deliberately plain ASCII so it remains readable in IDEs,
 # redirected logs and terminals without ANSI colour support.
@@ -550,9 +559,11 @@ penstock_bootstrap_step("1" "TOOLCHAIN DISCOVERY"
 
 # Resolve the backend BEFORE project():
 #   1. explicit -DLLVM_ROOT=... / LLVM_ROOT environment override
-#   2. complete local LLVM prefixes (newest first)
-#   3. official LLVM binary release download (when enabled)
-# A downloaded release contains the compiler and matching LLVM development SDK.
+#   2. third_party/llvm submodule -> build the toolchain from source
+#   3. complete local LLVM prefixes (newest first)
+#   4. official LLVM binary release download (when enabled)
+# A downloaded release contains the compiler and matching LLVM development SDK;
+# a submodule build produces the same layout under the Penstock build tree.
 if(DEFINED LLVM_ROOT)
   set(_llvm_src "cache")
 elseif(DEFINED ENV{LLVM_ROOT})
@@ -560,20 +571,36 @@ elseif(DEFINED ENV{LLVM_ROOT})
   set(_llvm_src "env")
 else()
   set(_llvm_src "probe")
-  foreach(_maj 23 22 21 20 19)
-    set(_pfx_list
-        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/llvm${_maj}/usr/lib/llvm-${_maj}"
-        "/usr/lib/llvm-${_maj}")
-    foreach(_pfx IN LISTS _pfx_list)
-      if(EXISTS "${_pfx}/bin/clang" AND EXISTS "${_pfx}/bin/clang++")
-        set(LLVM_ROOT "${_pfx}")
+  # The user explicitly placed an llvm-project submodule in the tree: build
+  # the backend from it (once) rather than autodetecting or downloading.
+  # PENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF restores the historical order.
+  if(PENSTOCK_BUILD_LLVM_FROM_SUBMODULE)
+    penstock_third_party_submodule(llvm "llvm/CMakeLists.txt" _penstock_llvm_submodule)
+    if(_penstock_llvm_submodule)
+      penstock_build_llvm_backend_from_source("${_penstock_llvm_submodule}"
+        _penstock_submodule_llvm_root)
+      if(_penstock_submodule_llvm_root)
+        set(LLVM_ROOT "${_penstock_submodule_llvm_root}")
+        set(_llvm_src "submodule")
+      endif()
+    endif()
+  endif()
+  if(NOT LLVM_ROOT)
+    foreach(_maj 23 22 21 20 19)
+      set(_pfx_list
+          "${CMAKE_CURRENT_SOURCE_DIR}/../tools/llvm${_maj}/usr/lib/llvm-${_maj}"
+          "/usr/lib/llvm-${_maj}")
+      foreach(_pfx IN LISTS _pfx_list)
+        if(EXISTS "${_pfx}/bin/clang" AND EXISTS "${_pfx}/bin/clang++")
+          set(LLVM_ROOT "${_pfx}")
+          break()
+        endif()
+      endforeach()
+      if(LLVM_ROOT)
         break()
       endif()
     endforeach()
-    if(LLVM_ROOT)
-      break()
-    endif()
-  endforeach()
+  endif()
 endif()
 
 # Accept `~/...` spellings for explicit paths.
@@ -590,6 +617,7 @@ if(NOT LLVM_ROOT OR NOT EXISTS "${LLVM_ROOT}/bin/clang")
   elseif(_llvm_src STREQUAL "probe")
     message(FATAL_ERROR
       "penstock: no supported LLVM toolchain found (19-23). Either:\n"
+      "  * git submodule update --init third_party/llvm (build clang from source),\n"
       "  * cmake -B build -DLLVM_ROOT=/path/to/llvm-N,\n"
       "  * export LLVM_ROOT=/path/to/llvm-N,\n"
       "  * enable automatic download (default) with -DPENSTOCK_FETCH_LLVM=ON,\n"

@@ -21,6 +21,39 @@ Alive2's source build also needs `re2c` at build time. `re2c` is not used by
 the installed compiler. Set `-DPENSTOCK_BUILD_EMBEDDED_SUPEROPT=OFF` only when
 building a compiler without the embedded superoptimiser.
 
+### Vendored dependency submodules
+
+The repository registers `llvm-project`, `alive2` and `z3` as optional git
+submodules under `third_party/`. An *initialised* submodule always wins over
+the corresponding network fetch — an empty (un-updated) submodule directory
+is silently ignored, so cloning without `--recurse-submodules` keeps the
+historical behaviour:
+
+```sh
+git submodule update --init          # all three, shallow by default
+# or individually:
+git submodule update --init third_party/z3
+```
+
+| Submodule | Replaces | Notes |
+|---|---|---|
+| `third_party/z3` | the Z3 FetchContent clone | version for the `Z3Config` package is parsed from `git describe` |
+| `third_party/alive2` | the Alive2 FetchContent clone | must match the LLVM revision below |
+| `third_party/llvm` | (a) the private Alive2 LLVM fetch, (b) the backend tarball download | with (b) the first configure builds a full clang toolchain from source once, then reuses it (rebuilt incrementally when the submodule's HEAD moves) |
+
+When `third_party/llvm` provides the backend, that one SDK serves the
+compiler, the verifier and the opt plugin — no second private LLVM is built
+and no release tarball is downloaded. Configuring patches Z3's and Alive2's
+`CMakeLists.txt` in place (target-collision namespacing); the patches are
+idempotent, so `git status` inside those submodules simply shows the patched
+files until you restore them.
+
+Escape hatches: `-DPENSTOCK_USE_SUBMODULES=OFF` ignores `third_party/`
+entirely, `-DPENSTOCK_SUBMODULE_<LLVM|ALIVE2|Z3>=OFF` ignores one submodule,
+and `-DPENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF` keeps the historical backend
+discovery (autodetect / tarball) while still using the submodule for the
+private Alive2 LLVM.
+
 ```sh
 cmake -S . -B build -DLLVM_ROOT=/usr/lib/llvm-20 \
   -DCMAKE_BUILD_TYPE=Release \

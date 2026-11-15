@@ -42,10 +42,14 @@ penstock [options] input.fsht [mor more.fsht ...]
 
 Linux, **CMake ≥ 3.16**. On the first configure with no local LLVM 19–23
 toolchain, the build downloads the official LLVM 23.1.4 SDK automatically
-(SHA-256-verified, cached under `build/_deps`).
+(SHA-256-verified, cached under `build/_deps`). To build every dependency
+from your own pinned sources instead, check out the vendored submodules
+first — the build then compiles Z3, Alive2 and the whole clang backend from
+`third_party/` and never touches the network:
 
 ```sh
-cmake -B build                        # configure (find or fetch the backend)
+git submodule update --init          # third_party/{llvm,alive2,z3}
+cmake -B build                        # configure (submodules > local > fetch)
 cmake --build build -j                # bin/penstock + LSP server + libfsh
 cmake --build build --target check    # regression suite (or: ctest --test-dir build)
 

@@ -1,6 +1,8 @@
 # Penstock — Freshet's superoptimising compiler.
 #
 # The build is organised as:
+#   cmake/ThirdPartySubmodules.cmake  third_party/{llvm,alive2,z3} discovery
+#                                     + LLVM backend from-source builder
 #   cmake/LlvmBootstrap.cmake      backend toolchain discovery/download/smoke test
 #   cmake/PenstockTargets.cmake    penstock, freshet-language-server, libfsh, rt_ir
 #   cmake/PenstockOptPlugin.cmake  optional LLVM opt pass plugin (-O4 pipeline)
@@ -8,7 +10,9 @@
 #   cmake/PenstockInstall.cmake    install rules + CMake package export
 #
 # Typical use:
-#   cmake -B build                          # configure (local LLVM or verified download)
+#   git submodule update --init      # optional: build deps from third_party/
+#   cmake -B build                          # configure (submodules > local LLVM
+#                                           # > verified download)
 #   cmake --build build                     # bin/penstock + runtime IR cache
 #   cmake --build build --target check      # regression suite
 #   cmake --build build --target bench      # AoS/SoA/C benchmarks (same backend)
@@ -19,6 +23,11 @@
 #   cmake -B build -DLLVM_ROOT=/path/to/llvm-19   # CMake variable (sticky)
 #   LLVM_ROOT=/path/to/llvm-19 cmake -B build     # or the environment
 #   cmake -B build -ULLVM_ROOT                    # unpin -> autodetection/download
+#
+# With an initialised third_party/llvm submodule the backend toolchain is
+# built from those sources instead (PENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF
+# restores autodetection/download; third_party/z3 and third_party/alive2
+# likewise replace their FetchContent clones).
 #
 # The core compiler still drives the Clang backend as a subprocess. Its
 # embedded superoptimiser is the exception: the CMake bootstrap builds the

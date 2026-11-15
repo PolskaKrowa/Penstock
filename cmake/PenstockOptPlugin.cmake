@@ -22,7 +22,8 @@ set(PENSTOCK_OPT_EXECUTABLE "")
 if(PENSTOCK_BUILD_OPT_PLUGIN AND UNIX)
   # When the embedded-superopt stage has not already loaded LLVM, prepare
   # zstd before LLVMConfig imports its exported LLVMSupport link interface.
-  if(NOT LLVM_FOUND)
+  # The from-submodule backend SDK disables zstd entirely, so it is excluded.
+  if(NOT LLVM_FOUND AND NOT PENSTOCK_LLVM_BACKEND_FROM_SUBMODULE)
     penstock_prepare_llvm_zstd_dependency()
     find_package(LLVM CONFIG QUIET
       HINTS
