@@ -92,11 +92,27 @@ else
 fi
 
 # ------------------------------------------------------------------ T5 builder
-note "T5: LLVM backend from-source builder (fake llvm-project tree)"
+note "T5: LLVM backend from-source builder (fake llvm-project tree, realistic build-tree layout)"
 if run_mode builder "$WORK/builder/third_party" >"$WORK/builder.log" 2>&1; then
   pass "builder configure/build/validate/stamp + reuse + move rebuild"
 else
   fail "builder mode"; sed -n '1,40p' "$WORK/builder.log"
+fi
+
+# --------------------------------------------------------------- T5b incomplete
+note "T5b: builder fatal on an incomplete backend (no PassPlugin.h anywhere)"
+if run_mode builder-incomplete "$WORK/builder-incomplete/third_party" \
+     >"$WORK/builder-incomplete.log" 2>&1; then
+  fail "incomplete backend was accepted"
+else
+  if grep -q "does not contain a complete backend prefix" \
+      "$WORK/builder-incomplete.log" && \
+     grep -q "PassPlugin.h" "$WORK/builder-incomplete.log"; then
+    pass "incomplete backend fatals, naming the missing components"
+  else
+    fail "incomplete backend failed with an unexpected message"
+    sed -n '1,40p' "$WORK/builder-incomplete.log"
+  fi
 fi
 
 # ------------------------------------------------------- T6 full project config

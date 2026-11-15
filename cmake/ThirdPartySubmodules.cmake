@@ -348,7 +348,11 @@ endfunction()
 # Builds the complete LLVM/Clang backend toolchain (clang, clang++, opt, the
 # monolithic libLLVM shared library and the development SDK) from the
 # third_party/llvm submodule source.  The result is a prefix usable directly
-# as LLVM_ROOT.  The first build is long (a full Release clang); it happens
+# as LLVM_ROOT: an LLVM BUILD TREE, not an installed prefix — bin/, lib/ and
+# lib/cmake/ are populated by the build, while the bulk of the SDK headers
+# (PassPlugin.h included) stays in the source checkout and is reached through
+# the generated LLVMConfig.cmake's LLVM_INCLUDE_DIRS.  The first build is long
+# (a full Release clang); it happens
 # once at configure time, and later configures reuse the result unless the
 # submodule's HEAD commit moved (detected through a stamp file), in which
 # case only the incremental delta is rebuilt.
@@ -391,32 +395,55 @@ CMAKE_BUILD_PARALLEL_LEVEL or the number of CPUs)")
   set(_stamp "${_bdir}/.penstock-llvm-source-stamp")
 
   # A complete toolchain prefix: compilers, opt, the monolithic shared
-  # library and the development SDK with the plugin header.
-  function(_penstock_backend_complete root out_var)
-    set(_ok TRUE)
+  # library and the development SDK.  The from-submodule result is a build
+  # tree, so the plugin header is accepted either from the prefix include
+  # (installed layout) or from the source checkout's include directory
+  # (build-tree layout: a real LLVM build tree only generates
+  # include/llvm/Config headers and leaves the rest in the source tree).
+  #
+  # <root>         prefix to validate (build tree or installed prefix)
+  # <src_include>  source-tree include root ("" when unknown)
+  # <out_var>      receives TRUE when every component is present
+  # <missing_var>  receives the list of missing components ("" if complete)
+  function(_penstock_backend_complete root src_include out_var missing_var)
+    set(_missing "")
     foreach(_probe
-        "${root}/bin/clang"
-        "${root}/bin/clang++"
-        "${root}/bin/opt"
-        "${root}/lib/cmake/llvm/LLVMConfig.cmake")
-      if(NOT EXISTS "${_probe}")
-        set(_ok FALSE)
+        "bin/clang"
+        "bin/clang++"
+        "bin/opt"
+        "lib/cmake/llvm/LLVMConfig.cmake")
+      if(NOT EXISTS "${root}/${_probe}")
+        list(APPEND _missing "${_probe}")
       endif()
     endforeach()
-    if(NOT EXISTS "${root}/include/llvm/Plugins/PassPlugin.h" AND
-       NOT EXISTS "${root}/include/llvm/Passes/PassPlugin.h")
-      set(_ok FALSE)
+    set(_have_sdk_header FALSE)
+    foreach(_include_root "${root}/include" "${src_include}")
+      if(NOT "${_include_root}" STREQUAL "" AND
+         (EXISTS "${_include_root}/llvm/Plugins/PassPlugin.h" OR
+          EXISTS "${_include_root}/llvm/Passes/PassPlugin.h"))
+        set(_have_sdk_header TRUE)
+      endif()
+    endforeach()
+    if(NOT _have_sdk_header)
+      list(APPEND _missing
+        "PassPlugin.h (searched ${root}/include and ${src_include})")
     endif()
     file(GLOB _dylib
       "${root}/lib/libLLVM*.so*"
       "${root}/lib/libLLVM*.dylib*")
     if(NOT _dylib)
-      set(_ok FALSE)
+      list(APPEND _missing "lib/libLLVM* shared library")
     endif()
-    set(${out_var} "${_ok}" PARENT_SCOPE)
+    if(_missing)
+      set(${out_var} FALSE PARENT_SCOPE)
+    else()
+      set(${out_var} TRUE PARENT_SCOPE)
+    endif()
+    set(${missing_var} "${_missing}" PARENT_SCOPE)
   endfunction()
 
-  _penstock_backend_complete("${_bdir}" _complete)
+  _penstock_backend_complete("${_bdir}" "${_src_dir}/include" _complete
+    _missing_precheck)
   penstock_git_identity("${source_root}" _identity)
   set(_stamp_ok FALSE)
   if(_complete AND EXISTS "${_stamp}")
@@ -446,6 +473,13 @@ CMAKE_BUILD_PARALLEL_LEVEL or the number of CPUs)")
     message(STATUS
       "Penstock: third_party/llvm moved since the backend was last built "
       "(${_moved_detail}; now ${_identity}); rebuilding the delta")
+  endif()
+
+  if(_complete AND NOT _stamp_ok AND NOT EXISTS "${_stamp}")
+    message(STATUS
+      "Penstock: ${_bdir} already holds a complete backend prefix without a "
+      "source stamp; confirming it with an incremental build pass (a build "
+      "interrupted before validation leaves exactly this state).")
   endif()
 
   message(STATUS
@@ -575,12 +609,17 @@ CMAKE_BUILD_PARALLEL_LEVEL or the number of CPUs)")
     endif()
   endif()
 
-  _penstock_backend_complete("${_bdir}" _complete)
+  _penstock_backend_complete("${_bdir}" "${_src_dir}/include" _complete
+    _missing_components)
   if(NOT _complete)
+    string(REPLACE ";" "\n  * " _missing_report "${_missing_components}")
     message(FATAL_ERROR
       "Penstock: the from-submodule LLVM/Clang build finished but "
-      "${_bdir} does not contain a complete backend prefix (clang/clang++/"
-      "opt, libLLVM shared library and the development SDK).")
+      "${_bdir} does not contain a complete backend prefix; missing:\n"
+      "  * ${_missing_report}\n"
+      "The from-submodule backend is an LLVM build tree: SDK headers live in "
+      "${_src_dir}/include rather than in the build tree's include/. Re-"
+      "running the configure resumes the incremental build where it stopped.")
   endif()
 
   file(WRITE "${_stamp}"

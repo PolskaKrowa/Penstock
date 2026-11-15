@@ -10,7 +10,12 @@
 #   real-z3      resolver + patcher + idempotency against third_party/z3
 #   real-alive2  resolver + patcher + idempotency against third_party/alive2
 #   builder      penstock_build_llvm_backend_from_source on a fake
-#                llvm-project tree: build, reuse, rebuild-on-move
+#                llvm-project tree with the REAL build-tree layout (SDK
+#                headers stay in the source checkout, not in the build
+#                directory): build, reuse, rebuild-on-move
+#   builder-incomplete  same fake but with no PassPlugin.h anywhere: the
+#                build succeeds and the completeness check must fail,
+#                naming the missing components
 
 if(NOT DEFINED PENSTOCK_TEST_MODE)
   message(FATAL_ERROR "PENSTOCK_TEST_MODE is required")
@@ -42,6 +47,54 @@ endfunction()
 # The submodule-aware module. PENSTOCK_THIRD_PARTY_ROOT may be pre-set by the
 # runner (fake-tree modes) or captured from the repository root (real modes).
 include("${PENSTOCK_TEST_REPO}/cmake/ThirdPartySubmodules.cmake")
+
+# Creates a fake llvm-project checkout whose "build" produces a backend-shaped
+# prefix (bin/clang, bin/opt, libLLVM, lib/cmake) by copying a prepared
+# template. It models the REAL build-tree layout: the build directory receives
+# bin/ + lib/ but no SDK headers; PassPlugin.h stays in the source checkout
+# under llvm/include/ (a real LLVM build tree only generates include/llvm/Config
+# headers and leaves the rest in the source tree). sdk_header controls whether
+# that source-tree header exists.
+function(_penstock_test_fake_llvm root sdk_header)
+  file(MAKE_DIRECTORY "${root}/llvm" "${root}/prefix-template/bin"
+    "${root}/prefix-template/lib/cmake/llvm")
+  file(WRITE "${root}/llvm/CMakeLists.txt" "
+cmake_minimum_required(VERSION 3.16)
+project(FakeLLVM LANGUAGES NONE)
+# NOTE: \${CMAKE_COMMAND} and \${CMAKE_BINARY_DIR} are deliberately escaped so
+# they expand inside THIS generated project, not inside the harness.
+add_custom_target(clang
+  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
+          \"${root}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
+add_custom_target(opt
+  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
+          \"${root}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
+add_custom_target(LLVM
+  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
+          \"${root}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
+add_custom_target(clang-resource-headers
+  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
+          \"${root}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
+")
+  file(WRITE "${root}/prefix-template/bin/clang" "#!/bin/sh\necho 'clang version 99.0.0 (fake llvm-project)'\n")
+  file(WRITE "${root}/prefix-template/bin/opt" "#!/bin/sh\nexit 0\n")
+  file(WRITE "${root}/prefix-template/lib/libLLVM.so" "fake-dylib\n")
+  file(WRITE "${root}/prefix-template/lib/cmake/llvm/LLVMConfig.cmake"
+    "set(LLVM_PACKAGE_VERSION 99.0.0)\nset(LLVM_ENABLE_RTTI ON)\nset(LLVM_ENABLE_EH ON)\nset(LLVM_INCLUDE_DIRS \"${root}/llvm/include\")\n")
+  execute_process(COMMAND chmod +x "${root}/prefix-template/bin/clang"
+                           "${root}/prefix-template/bin/opt")
+  if(sdk_header)
+    file(MAKE_DIRECTORY "${root}/llvm/include/llvm/Passes")
+    file(WRITE "${root}/llvm/include/llvm/Passes/PassPlugin.h"
+      "// fake source-tree SDK header\n")
+  endif()
+  # A real git repo makes the source identity a commit sha (stamp flow).
+  execute_process(COMMAND git -C "${root}" init -q)
+  execute_process(COMMAND git -C "${root}" -c user.email=t@t -c user.name=t
+                           add -A)
+  execute_process(COMMAND git -C "${root}" -c user.email=t@t -c user.name=t
+                           commit -qm "fake llvm-project")
+endfunction()
 
 if(PENSTOCK_TEST_MODE STREQUAL "detection")
   set(_root "${PENSTOCK_THIRD_PARTY_ROOT}")
@@ -151,46 +204,8 @@ elseif(PENSTOCK_TEST_MODE STREQUAL "real-alive2")
   expect_eq("${_h1b}" "${_h1}" "alive2 patch is idempotent")
 
 elseif(PENSTOCK_TEST_MODE STREQUAL "builder")
-    # Fake llvm-project checkout: a trivial CMake project that "builds" a
-    # backend-shaped prefix (bin/clang, bin/opt, libLLVM, SDK files) by
-    # copying a prepared template. It only needs to exercise the builder's
-    # configure -> build -> validate -> stamp flow.
     set(_fake "${PENSTOCK_TEST_WORK}/fake-llvm-project")
-    file(MAKE_DIRECTORY "${_fake}/llvm" "${_fake}/prefix-template/bin"
-      "${_fake}/prefix-template/lib/cmake/llvm"
-      "${_fake}/prefix-template/include/llvm/Plugins")
-    file(WRITE "${_fake}/llvm/CMakeLists.txt" "
-cmake_minimum_required(VERSION 3.16)
-project(FakeLLVM LANGUAGES NONE)
-# NOTE: \${CMAKE_COMMAND} and \${CMAKE_BINARY_DIR} are deliberately escaped so
-# they expand inside THIS generated project, not inside the harness.
-add_custom_target(clang
-  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
-          \"${_fake}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
-add_custom_target(opt
-  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
-          \"${_fake}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
-add_custom_target(LLVM
-  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
-          \"${_fake}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
-add_custom_target(clang-resource-headers
-  COMMAND \"\${CMAKE_COMMAND}\" -E copy_directory
-          \"${_fake}/prefix-template\" \"\${CMAKE_BINARY_DIR}\")
-")
-    file(WRITE "${_fake}/prefix-template/bin/clang" "#!/bin/sh\necho 'clang version 99.0.0 (fake llvm-project)'\n")
-    file(WRITE "${_fake}/prefix-template/bin/opt" "#!/bin/sh\nexit 0\n")
-    file(WRITE "${_fake}/prefix-template/lib/libLLVM.so" "fake-dylib\n")
-    file(WRITE "${_fake}/prefix-template/lib/cmake/llvm/LLVMConfig.cmake"
-      "set(LLVM_PACKAGE_VERSION 99.0.0)\nset(LLVM_ENABLE_RTTI ON)\nset(LLVM_ENABLE_EH ON)\n")
-    file(WRITE "${_fake}/prefix-template/include/llvm/Plugins/PassPlugin.h" "// fake\n")
-    execute_process(COMMAND chmod +x "${_fake}/prefix-template/bin/clang"
-                             "${_fake}/prefix-template/bin/opt")
-    # A real git repo makes the source identity a commit sha (stamp flow).
-    execute_process(COMMAND git -C "${_fake}" init -q)
-    execute_process(COMMAND git -C "${_fake}" -c user.email=t@t -c user.name=t
-                             add -A)
-    execute_process(COMMAND git -C "${_fake}" -c user.email=t@t -c user.name=t
-                             commit -qm "fake llvm-project")
+    _penstock_test_fake_llvm("${_fake}" TRUE)
 
     # Cache (not a normal variable): the builder declares its own cache
     # entry, and a normal variable would be shadowed by that declaration.
@@ -204,18 +219,26 @@ add_custom_target(clang-resource-headers
         "${_out}/bin/clang++"
         "${_out}/bin/opt"
         "${_out}/lib/cmake/llvm/LLVMConfig.cmake"
-        "${_out}/lib/libLLVM.so"
-        "${_out}/include/llvm/Plugins/PassPlugin.h")
+        "${_out}/lib/libLLVM.so")
       if(NOT EXISTS "${_probe}")
         message(FATAL_ERROR "TEST FAILURE: built prefix is missing ${_probe}")
       endif()
     endforeach()
-    message(STATUS "PASS: built prefix contains clang/clang++/opt, dylib and SDK")
+    if(EXISTS "${_out}/include/llvm/Passes/PassPlugin.h" OR
+       EXISTS "${_out}/include/llvm/Plugins/PassPlugin.h")
+      message(FATAL_ERROR
+        "TEST FAILURE: a build-tree prefix must not need SDK headers in its "
+        "own include/ (real build trees only generate Config headers)")
+    endif()
+    message(STATUS
+      "PASS: built prefix has clang/clang++/opt, dylib and SDK config; the "
+      "SDK header comes from the source checkout")
     file(READ "${_out}/.penstock-llvm-source-stamp" _stamp1)
     expect_contains(_stamp1 "identity: "
       "source stamp written after the build")
 
-    # Second call: complete + matching stamp -> fast reuse path.
+    # Second call: complete (through the source-tree header) + matching
+    # stamp -> fast reuse path.
     penstock_build_llvm_backend_from_source("${_fake}" _out2)
     expect_eq("${_out2}" "${PENSTOCK_TEST_WORK}/fake-llvm-build"
       "builder reuses the complete prefix")
@@ -234,6 +257,19 @@ add_custom_target(clang-resource-headers
       message(FATAL_ERROR "TEST FAILURE: stamp not updated after source move")
     endif()
     message(STATUS "PASS: stamp tracks the submodule commit")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "builder-incomplete")
+    # The build itself succeeds (bin/, lib/, lib/cmake all land in the build
+    # tree) but no PassPlugin.h exists anywhere: the completeness check must
+    # fail and name the missing component.
+    set(_fake "${PENSTOCK_TEST_WORK}/fake-llvm-project")
+    _penstock_test_fake_llvm("${_fake}" FALSE)
+    set(PENSTOCK_LLVM_BACKEND_BUILD_DIR
+      "${PENSTOCK_TEST_WORK}/fake-llvm-build" CACHE PATH "harness override" FORCE)
+    penstock_build_llvm_backend_from_source("${_fake}" _out)
+    message(FATAL_ERROR
+      "TEST FAILURE: builder accepted a backend without the SDK header "
+      "(${_out})")
 
 else()
   message(FATAL_ERROR "unknown PENSTOCK_TEST_MODE: ${PENSTOCK_TEST_MODE}")
