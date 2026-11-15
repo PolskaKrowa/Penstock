@@ -1,3 +1,7 @@
+<div align=center>
+  <img width="1460" height="822" alt="fsht image" src="https://github.com/user-attachments/assets/930e9c07-4517-476c-a494-bd82b2694e46" />
+</div>
+
 # Freshet / Penstock
 
 **Freshet** is a strictly-typed, strictly-checked HPC language with C++/Rust-like
