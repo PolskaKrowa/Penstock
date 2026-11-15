@@ -486,7 +486,7 @@ bool loadProjectManifest(const std::string& path) {
 //   }
 // frt_test_run sigsetjmp's in ITS OWN frame and calls the test body from
 // there — the frame stays live, so an assert() abort inside the test
-// long-jumps back well-definedly and is reported as a failure.
+// long-jumps back with well-defined behaviour and is reported as a failure.
 static FnDecl* makeExternFn(const std::string& name, Type* ret,
                             std::vector<Param> params, int id) {
   FnDecl* f = new FnDecl();

@@ -43,9 +43,9 @@ extern "C" {
 /* ---------------- parallel for ----------------------------------------- */
 typedef enum {
   FSH_SCHED_STATIC = 0,   /* T contiguous chunks, one per worker */
-  FSH_SCHED_DYNAMIC = 1,  /* many small chunks, work-stealing */
-  FSH_SCHED_GUIDED = 2,   /* decreasing chunk size as work drains */
-  FSH_SCHED_SPREAD = 3,   /* close affinity: 8T tiny interleaved chunks */
+  FSH_SCHED_DYNAMIC = 1,  /* many small chunks (work-stealing: planned, Phase 2) */
+  FSH_SCHED_GUIDED = 2,   /* decreasing chunk size as work drains (planned, Phase 2) */
+  FSH_SCHED_SPREAD = 3,   /* spread affinity: 8T tiny interleaved chunks */
 } fsh_sched;
 
 typedef struct {
@@ -91,7 +91,8 @@ double fsh_reduce(int64_t lo, int64_t hi, fsh_red_op op, fsh_red_mode mode,
 int32_t fsh_thread_count(void);
 
 /* Returns the index of the calling worker in [0, fsh_thread_count()).
- * Returns 0 if called from outside the pool (e.g. before fsh_init). */
+ * Returns 0 if called from outside the pool (e.g. before the pool has
+ * been initialised). */
 int32_t fsh_thread_id(void);
 
 /* ---------------- barriers --------------------------------------------- */

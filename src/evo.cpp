@@ -321,7 +321,7 @@ bool evoOptimize(const std::string& clangBin, const std::string& finalLl,
   Genome incumbent;
   incumbent.optIdx = 0;                       // -O3
   incumbent.marchIdx = 0;                     // native (or user march)
-  incumbent.threads = E.nproc;                // == default behavior
+  incumbent.threads = E.nproc;                // == default behaviour
   incumbent.pin = 0;
   incumbent.chunkIdx = 0;
   incumbent.cutoffIdx = 0;                    // default serial cutoff

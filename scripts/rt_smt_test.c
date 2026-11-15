@@ -197,15 +197,16 @@ static void test_pair_semantics(void) {
   /* case 1: both regions dispatch (cost above the cutoffs) */
   CHECK(run_pair_case(n, 5, 5, 100, 100, 1, 2) == 0,
         "pair: both dispatched, results match sequential");
-  /* case 2: A inline (cost 1 => total work 4096 > cutoff 100? no:
-   * 4096*1=4096 > 100 => dispatch; use a big cutoff for inline) */
+  /* case 2: both inline — a huge work cutoff makes trip*cost fit */
   CHECK(run_pair_case(n, 5, 5, 1 << 30, 100, 1, 2) == 0,
         "pair: both inline (work cutoff huge), results match");
-  /* case 3: A dispatches, B inline (compute region under cutoff) */
-  CHECK(run_pair_case(n, 5, 0, 100, 100, 1, 2) == 0,
+  /* case 3: A dispatched via the work cutoff, B (legacy cost 0)
+   * inline via the serial cutoff (serialCutoff >= trip) */
+  CHECK(run_pair_case(n, 5, 0, 100, n, 1, 2) == 0,
         "pair: A dispatched + B inline, results match");
-  /* case 4: A inline, B dispatches */
-  CHECK(run_pair_case(n, 0, 5, 100, 100, 1, 2) == 0,
+  /* case 4: A (legacy cost 0) inline via the serial cutoff, B dispatched
+   * via the work cutoff */
+  CHECK(run_pair_case(n, 0, 5, 100, n, 1, 2) == 0,
         "pair: A inline + B dispatched, results match");
   /* case 5: legacy costs (0) with a serial cutoff that inlines both */
   CHECK(run_pair_case(n, 0, 0, 0, n, 1, 2) == 0,

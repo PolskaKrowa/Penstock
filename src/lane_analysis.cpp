@@ -55,7 +55,7 @@ static void walkExprNodes(Expr* e, const std::function<void(Expr*)>& f) {
   walkExprNodes(e->base, f);
 }
 
-// may the bounds be re-emitted (evaluated twice, one per specialised
+// may the bounds be re-emitted (evaluated twice, once per specialised
 // loop) without changing behaviour?  soa_len / @pure / pure math only.
 static bool boundsPure(Expr* e) {
   bool ok = true;
@@ -156,9 +156,10 @@ static int mergeScan(std::vector<Stmt*>& list, FnDecl* fn) {
       if (ia.writes.count(n) || ib.writes.count(n)) bad = true;
     for (auto& r : condRoots)
       if (ia.writes.count(r) || ib.writes.count(r)) bad = true;
-    // and the second IF's arms must not have escaped effects between
-    // evaluations that the first arms' writes could disturb: order A;B
-    // is preserved, only the predicate reuse needs the check above.
+    // and the first IF's arms must not write anything the shared
+    // condition reads — otherwise the second evaluation could differ
+    // (order A;B itself is preserved; only predicate reuse needs this
+    // check).
     if (bad) { ++i; continue; }
 
     // merge b into a
@@ -299,7 +300,7 @@ static bool tryDeepUnswitch(std::vector<Stmt*>& list, size_t idx,
   // program would never evaluate the condition at any nesting depth —
   // so hoisting is legal only if the condition is provably total
   // (non-trapping) as well as invariant, or the outer trip is provably
-  // non-zero.  Same rule as the direct unswitcher above.
+  // non-zero.  Same rule as the direct unswitcher below.
   {
     TripInfo ti = tripCountOf(loop);
     if (!(ti.known && !ti.empty) && !exprTotalAndPure(cand->cond))
@@ -564,8 +565,9 @@ static void walkListsLane(std::vector<Stmt*>& list, FnDecl* fn, int loopDepth,
 }
 
 // helper: a loop/if body that is a single statement still contains
-// nested lists (e.g. `if (c) { ... }` without braces is a BLOCK anyway;
-// single-statement bodies only matter for loops wrapping loops)
+// nested lists (an `if (c) stmt` body without braces is still wrapped
+// in a BLOCK by the parser; single-statement bodies only matter for
+// loops wrapping loops)
 static void walkListsLaneOne(Stmt* s, FnDecl* fn, int loopDepth, int* budget,
                              UnswitchStats* st) {
   if (!s) return;

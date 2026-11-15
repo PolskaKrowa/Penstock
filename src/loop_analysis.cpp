@@ -157,11 +157,11 @@ static bool bindingIsUnique(FnDecl* fn, const std::string& name) {
   if (lookupGlobal(name)) return false;
   for (auto& p : fn->params)
     if (p.name == name) return false;
-  bool seen = false;
+  bool seen = false, dup = false;
   std::function<void(Stmt*)> walk = [&](Stmt* s) {
     if (!s) return;
     if (s->k == Stmt::LET && s->var == name) {
-      if (seen) { seen = false; return; }   // redeclared: not unique
+      if (seen) { dup = true; return; }   // redeclared: not unique
       seen = true;
     }
     switch (s->k) {
@@ -173,7 +173,7 @@ static bool bindingIsUnique(FnDecl* fn, const std::string& name) {
     }
   };
   walk(fn->body);
-  return seen;   // declared exactly once
+  return seen && !dup;   // declared exactly once
 }
 
 static int propagateImmutableConsts(FnDecl* fn) {
@@ -340,7 +340,7 @@ Interval intervalOf(Expr* e) {
   if (e->k == Expr::BIN && (e->op == "+" || e->op == "-")) {
     Interval a = intervalOf(e->lhs), b = intervalOf(e->rhs);
     if (!a.known || !b.known) return r;
-    int64_t lo1, hi1, lo2, hi2;
+    int64_t lo1, hi1;
     if (e->op == "+") {
       if (__builtin_add_overflow(a.lo, b.lo, &lo1)) return r;
       if (__builtin_add_overflow(a.hi, b.hi, &hi1)) return r;
@@ -348,7 +348,6 @@ Interval intervalOf(Expr* e) {
       if (__builtin_sub_overflow(a.lo, b.hi, &lo1)) return r;
       if (__builtin_sub_overflow(a.hi, b.lo, &hi1)) return r;
     }
-    (void)lo2; (void)hi2;
     r.known = true; r.lo = lo1; r.hi = hi1;
     return r;
   }

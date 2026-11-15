@@ -37,7 +37,7 @@ not a build-time requirement.
 int main(void) {
   /* Aligned allocation with overflow checking. */
   double* v = fsh_alloc(1024 * sizeof(double), 64);
-  if (!v) { /* fsh_errno set; or abort() if FSH_FAIL_ABORT */ }
+  if (!v) { /* per-thread error state set; or abort() if FSH_FAIL_ABORT */ }
 
   /* Typed span view. */
   fsh_span s = fsh_span_make(v, 1024);
@@ -58,8 +58,9 @@ int main(void) {
 ## Error model
 
 Every function that can fail returns a sentinel (`NULL`, `0`, or
-negative `fsh_err`) and sets the per-thread error code retrieved via
-`fsh_last_errno()` (planned).  Callers can opt into abort-on-failure
+negative `fsh_err`) and sets the per-thread error state retrieved via
+`fsh_last_errno()` (an errno snapshot — anything the thread calls in
+between may overwrite it).  Callers can opt into abort-on-failure
 via `fsh_set_alloc_fail_mode(FSH_FAIL_ABORT)` — useful for HPC kernels
 where recovery is impossible.
 
@@ -206,7 +207,7 @@ surface:
 | implemented with documented fallback | fast math variants | call the same scalar libm routines as the accurate variants |
 | implemented, scalar default | SIMD helpers | the portable scalar fallback is the default; native backends (`libfsh_simd_x86.c` / `libfsh_simd_arm.c`) are future work |
 | partially implemented | binary file writes | the requested endianness conversion is ignored on write; host byte order is emitted |
-| planned | `fsh_last_errno` | referenced by the header/guide but not yet implemented — do not rely on it |
+| implemented | `fsh_last_errno` | returns (and resets) the calling thread's `errno` snapshot; not a durable error slot — read it first after a failure |
 | forward-looking | `fsh_parallel_for` scheduling | range/chunk/thread/affinity arguments are passed through, but not every advertised scheduling choice maps to a distinct runtime schedule yet |
 
 The rule going forward: an API is only documented as a guarantee on

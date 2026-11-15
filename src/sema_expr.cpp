@@ -222,7 +222,7 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
   }
   if (n == "give") {
     if (!need(1)) return Type::simple(Type::VOID);
-    return argT(0);   // give(p) is a marker used in calls; also standalone?
+    return argT(0);   // give(p) is an ownership marker; meaningful in call arguments
   }
   if (n == "print") {
     if (!need(1)) return Type::simple(Type::VOID);
@@ -1034,7 +1034,8 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       if (rt && !rt->isNum()) return bad("unary minus needs number");
       e->ty = rt ? rt : Type::simple(Type::U64);
       if (rt && rt->isInt() && !rt->isSigned() && !e->rhs->constant) {
-        // unsigned negation is a logic error in strict mode
+        // unsigned negation is always a hard error (F0215); only
+        // constant operands are exempt (they fold in sema)
         diag(Diag::Error, Code::ArithNegUnsigned,
              "negation of unsigned value — declare as i64 or use 0 - x",
              e->loc);
@@ -1073,8 +1074,6 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       // Phase 1c (report §4.1): Span<T> indexing is bounds-checked in
       // checked builds
       if (bt->k == Type::SPAN) {
-        if (e->rhs->constant && e->rhs->k == Expr::INT &&
-            e->rhs->ival >= (uint64_t)-1) { /* runtime len: no static bound */ }
         e->ty = bt->pointee;
         e->isLvalue = true;
         return e->ty;

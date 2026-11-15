@@ -58,7 +58,7 @@ export fn name(...)           // extern linkage
 @noinline fn f(...)           // forbid inlining (Stage A1)
 @hpc_strict fn f(...)         // perf diagnostics are errors for this fn (§9)
 @unsafe fn f(...)             // whole body is an unsafe scope (§6)
-@alias(a, b) fn f(a: *f64, b: *f64)  // declare no-overlap for vectorization
+@alias(a, b) fn f(a: *f64, b: *f64)  // declare no-overlap for vectorisation
 fn take(owned data: *u8) { ... }      // ownership transfers IN (§6)
 fn view(borrowed s: Span<f64>) -> f64 { ... }  // read-only view (§6)
 struct Name { field: T, ... }
@@ -229,8 +229,8 @@ soa_len(b);
 ```
 
 A `soa(S)` value is a descriptor handle: `{ i32 nf, i64 n, ptr planes[nf] }`.
-`s[i].f` lowers to `planes[f_idx][i]` — unit-stride loads that vectorize
-into `<2 x double>` wide loads (verified in the optimized IR). Nested
+`s[i].f` lowers to `planes[f_idx][i]` — unit-stride loads that vectorise
+into `<2 x double>` wide loads (verified in the optimised IR). Nested
 field paths (`s[i].f.g`) resolve the inner struct's plane.
 
 
@@ -423,7 +423,7 @@ Semantics:
   requests a DETERMINISTIC parallel reduction: the range is partitioned
   into fixed blocks (the `chunk:` clause, else 8192) independent of the
   worker count, every partial is computed in strict IEEE-754 order (the
-  accumulator chain is never reassociated or vectorized), and partials
+  accumulator chain is never reassociated or vectorised), and partials
   combine in ascending block order with strict-FP adds. The result is
   bitwise-identical for any `FRT_THREADS` / affinity / scheduler on the
   same binary. `min`/`max` are included. Without the flag, reductions
@@ -971,7 +971,7 @@ unfailable); anything unproven keeps its check.  The solver is
 site the caller records what it proved about the callee's integer
 arguments and span/str/soa argument lengths, as pairwise `param_x <=
 param_y + c` constraints (the weakest any site states); once every site
-of a callee has been analyzed — and nothing reaches it opaquely (its
+of a callee has been analysed — and nothing reaches it opaquely (its
 value taken, an export, a `@test` entry, an unresolvable call) — the
 callee is *seeded at entry* with that table, so checks inside it can be
 elided under preconditions every caller already establishes.  Seeded

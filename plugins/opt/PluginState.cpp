@@ -1,5 +1,6 @@
 // The command-line compiler owns these globals in its executable. The opt
-// plugin is a separate DSO, so provide its own isolated optimisation options.
+// plugin is a separate DSO, so it carries its own isolated copies of the
+// optimisation-option globals.
 #include "common.h"
 
 namespace freshet {

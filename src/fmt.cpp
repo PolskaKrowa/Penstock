@@ -3,7 +3,7 @@
 // `penstock fmt <file.fsht>` / `penstock fmt --check <file.fsht>`
 //
 // Design (compiler-aware, token-level):
-//   * A dedicated tokenizer re-reads the source keeping COMMENTS as
+//   * A dedicated tokeniser re-reads the source keeping COMMENTS as
 //     trivia tokens, so nothing the user wrote is ever dropped.
 //   * Layout follows the project's house style:
 //       - 4-space indentation
@@ -485,7 +485,8 @@ struct Fmt {
     if (t == "<") {
       FTok* pv = prevTok(pos);
       if (pv && pv->kind == Token::IDENT && !isKeywordText(pv->text)) {
-        // is the token before the name `fn`? (walk two back)
+        // true when the non-comment token two positions back is `fn` —
+        // a generic fn name's `<` hugs the name
         size_t q = pos;
         int back = 0;
         while (q > 0 && back < 2) {

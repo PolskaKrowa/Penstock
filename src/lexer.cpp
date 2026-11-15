@@ -41,9 +41,8 @@ int lexFile(const std::string& path, const std::string& src,
   auto adv = [&](int n = 1) { for (int i = 0; i < n && p < end; ++i) { if (*p == '\n') { ++line; col = 1; } else ++col; ++p; } };
   // Stage E (report §3.2): mk now records byte offsets and end position.
   // `startP` is the byte position the token began at; we fill `endOffset`/
-  // `endLine`/`endCol` after the consume loop finishes.  Callers that
-  // want a single-point span (e.g. for synthetic tokens) get the
-  // historical behaviour via mkPoint().
+  // `endLine`/`endCol` after the consume loop finishes.  Synthetic/EOF
+  // tokens get a zero-length span (end == start — see finish() below).
   auto mk = [&](Token::K k) {
     Token t;
     t.kind = k;
@@ -165,7 +164,7 @@ int lexFile(const std::string& path, const std::string& src,
         if (flt) t.fval = strtod(lex.c_str(), nullptr);
         else t.ival = strtoull(lex.c_str(), nullptr, 10);
       }
-      // suffixes: u8/u16/u32/u64/usize/i*/f32/f64
+      // suffixes: u8/u16/u32/u64/usize/i8/i16/i32/i64/f32/f64
       static const char* sfx[] = {"u8","u16","u32","u64","usize","i8","i16","i32","i64","f32","f64"};
       for (auto s : sfx) {
         size_t n = strlen(s);
@@ -197,7 +196,7 @@ int lexFile(const std::string& path, const std::string& src,
       continue;
     }
 
-    // strings (only for print-style intrinsics)
+    // string literals — `str` is a first-class UTF-8 view type (Phase 2b)
     if (c == '"') {
       Token t = mk(Token::STR);
       const char* start = p;

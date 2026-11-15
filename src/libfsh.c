@@ -1,7 +1,7 @@
 /* libfsh.c — implementation of the fsh_* public API.
  *
  * This is a thin wrapper over the existing frt_* runtime ABI in
- * runtime/frt_rt.c.  The public API boundary (include/fsh/.h) is
+ * runtime/frt_rt.c.  The public API boundary (include/fsh/*.h) is
  * typed and ownership-aware; this file lowers each call to the
  * corresponding frt_* symbol so existing Freshet-compiled programs
  * keep working unchanged.
@@ -305,11 +305,10 @@ double fsh_reduce(int64_t lo, int64_t hi, fsh_red_op op, fsh_red_mode mode,
 }
 
 /* ---------------- errno surface (report §9) --------------------------- */
-/* The guide previously listed fsh_last_errno() as PLANNED.  Contract:
- * call it IMMEDIATELY after an fsh call that failed — it returns the
- * thread's errno snapshot and resets it, mirroring the Win32
- * GetLastError discipline (anything else the thread calls in between
- * may overwrite errno). */
+/* Contract: call fsh_last_errno() IMMEDIATELY after an fsh call that
+ * failed — it returns the thread's errno snapshot and resets it,
+ * mirroring the Win32 GetLastError discipline (anything else the
+ * thread calls in between may overwrite errno). */
 int32_t fsh_last_errno(void) {
   int32_t e = (int32_t)errno;
   errno = 0;
@@ -477,10 +476,10 @@ double fsh_hsum_f64x4(fsh_f64x4 v) {
   double s = 0; for (int i = 0; i < 4; ++i) s += v.v[i]; return s;
 }
 #else
-/* Native SIMD implementations: filled in per-target in separate .c files
- * (libfsh_simd_x86.c, libfsh_simd_arm.c).  For the MVP the scalar
- * fallback above is the default; a future build can compile the
- * native backends and link them in. */
+/* Native SIMD implementations are future work in separate per-target .c
+ * files (libfsh_simd_x86.c, libfsh_simd_arm.c); the scalar fallback above
+ * is the MVP default.  A future build can compile the native backends and
+ * link them in. */
 fsh_f64x4 fsh_load_f64x4(const double* p);
 fsh_f64x4 fsh_loadu_f64x4(const double* p);
 void fsh_store_f64x4(double* p, fsh_f64x4 v);

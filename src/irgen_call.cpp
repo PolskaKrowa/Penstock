@@ -346,8 +346,8 @@ std::string genCall(Expr* e) {
       return r;
     }
   }
-  // libm-only fns (double): tan in all modes; sin/cos/log2/log10 under
-  // @strictfp only
+  // libm-only fns (double): tan in all modes; sin/cos/log2/log10 whenever
+  // fast-math is off (the default mode and @strictfp both land here)
   static const std::set<std::string> libm1 = {"sin", "cos", "tan", "log2", "log10"};
   if (libm1.count(n) && e->args.size() == 1) {
     std::string a = genExpr(e->args[0]);

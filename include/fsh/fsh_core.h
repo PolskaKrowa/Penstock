@@ -53,7 +53,8 @@ const char* fsh_err_name(fsh_err e);
 
 /* ---------------- memory ------------------------------------------------ */
 /* fsh_alloc: aligned allocation.  `align` must be a power of two and >= 16.
- * Returns NULL + sets fsh_errno on failure (when fail_mode == RETURN). */
+ * Returns NULL + sets the per-thread error state on failure (when
+ * fail_mode == RETURN; retrieve it with fsh_last_errno()). */
 void* fsh_alloc(int64_t bytes, int64_t align);
 
 /* fsh_calloc: zero-initialised allocation. */
@@ -66,8 +67,9 @@ void fsh_free(void* p);
  * contents up to min(old, new) are preserved. */
 void* fsh_realloc(void* p, int64_t new_bytes);
 
-/* Overflow-checked multiplication: returns a* b if it does not overflow,
- * or 0 with fsh_errno=FSH_ERR_OVERFLOW otherwise.  Used internally by
+/* Overflow-checked multiplication: returns a*b if it does not overflow,
+ * or 0 with the per-thread error state set to FSH_ERR_OVERFLOW otherwise
+ * (retrieve it with fsh_last_errno()).  Used internally by
  * fsh_calloc / fsh_soa_alloc and exposed for callers that need to compute
  * safe allocation sizes themselves. */
 int64_t fsh_safe_mul(int64_t a, int64_t b);

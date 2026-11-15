@@ -1,5 +1,4 @@
 # ------------------------------------------------------------- installation
-# ------------------------------------------------------------- installation
 # Installed layout is relocatable for the default relative GNUInstallDirs:
 #   <prefix>/bin/penstock
 #   <prefix>/share/penstock/runtime/frt_rt.c

@@ -1,6 +1,6 @@
 // Freshet IRgen — functions, statements, control flow, loops, parfor
 // lowering (per-chunk context functions + runtime dispatch), R2: collapsed
-// nested parfor (serialized inner, vectorizable) vs dynamic nested (work
+// nested parfor (serialised inner, vectorisable) vs dynamic nested (work
 // stealing), defer emission, PGO block counters.
 #include "irgen.h"
 #include "dstk.h"

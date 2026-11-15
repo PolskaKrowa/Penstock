@@ -17,7 +17,7 @@
 
 namespace freshet {
 
-#define FRESHET_VERSION "0.1.0-INDEV"  // report integration: Phases 0-2 + §5/§7/§8 policies
+#define FRESHET_VERSION "0.1.0-INDEV"  // report integration: Phases 0-5 + §5/§7/§8 policies
 
 // ---------------------------------------------------------------- diagnostics
 struct Diag {
@@ -436,7 +436,7 @@ struct Stmt {
   int depth = 0;            // nesting depth of parfor (0 = outermost)
   bool collapsed = false;   // R2: merged with inner parfor
   // §5 loop-hint policy: `@vectorize` written directly on this loop asks
-  // the backend to vectorize (emits llvm.loop.vectorize.enable).  The
+  // the backend to vectorise (emits llvm.loop.vectorize.enable).  The
   // default emits NO forced metadata; --force-vectorize restores the
   // historical blanket hint globally for differential testing.
   bool vectorizeHint = false;
@@ -553,7 +553,7 @@ struct FnDecl {
   bool checkfree = false;   // @checkfree
   // Phase 2a: generic function template (monomorphised per call site)
   bool isGeneric = false;
-  std::vector<std::string> tparams;;
+  std::vector<std::string> tparams;
   std::vector<std::string> tconstraints;   // parallel to tparams ("" = none)
   // instantiated bodies rebind their type strings through this map
   // (empty for ordinary functions and templates)
@@ -813,8 +813,9 @@ struct Options {
 
   // ---- Phase 3+ driver surface ------------------------------------------
   // Phase 3a: module search path additions (`-I` covers both #include
-  // and import resolution; the builtin modules dir is always searched
-  // last — that is where the shipped `fsh` module lives)
+  // and import resolution; the builtin modules dir — home of the shipped
+  // `fsh` module — is searched after the -I dirs, with only the current
+  // directory after it)
   // Phase 3c/4: -g / --debug emits DWARF source-level debug info
   bool debugInfo = false;
   // Phase 4 (report §10.3): `penstock test` — run @test fns via the

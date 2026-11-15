@@ -40,7 +40,8 @@ typedef enum {
 typedef struct fsh_file fsh_file;
 
 /* Open / close.  `path` is filesystem path; `mode` is "rb" / "wb" / "ab".
- * Returns NULL on failure (sets fsh_errno). */
+ * Returns NULL on failure (sets the per-thread error state — retrieve it
+ * with fsh_last_errno()). */
 fsh_file* fsh_file_open(const char* path, const char* mode);
 void      fsh_file_close(fsh_file* f);
 

@@ -287,8 +287,9 @@ static void analyzeStmt(Stmt* s, const AliasMap& am, StmtInfo* out) {
 }
 
 // ------------------------------------------------------ dependence testing
-// richer key comparison carrying the index EXPRESSIONS so the affine
-// distinctness proof can run on the real AST nodes
+// richer key comparison (field-path aware); the idx hook exists for a
+// future affine-distinctness proof over the real AST nodes (v1 callers
+// always pass idx = nullptr — see below)
 struct MAccessE {
   std::string root;
   std::string key;
@@ -357,8 +358,9 @@ static void planWindow(const std::vector<size_t>& idx,
       if (a.reads.count(w)) return true;                        // WAR
     return false;
   };
-  // recompute accesses WITH index expressions for the affine proof
-  struct AccE { MAccessE e; size_t who; };
+  // rebuild accesses for the dependence test (index expressions are not
+  // carried in v1 — MAccessE::idx stays null, so mayAliasAccessE falls
+  // back to whole-binding overlap for same-key accesses)
   std::vector<std::vector<MAccessE>> acc(n);
   for (size_t i = 0; i < n; ++i)
     for (auto& m : info[i].mem)

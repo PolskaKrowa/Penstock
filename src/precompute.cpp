@@ -652,7 +652,7 @@ static std::string makeProbeCanonicalizationInputPC(
   // Keep each integer function addressable and prevent LLVM's interprocedural
   // passes from deleting or inlining it during the canonicalisation fallback.
   // The probe is never executed: volatile values only make its call arguments
-  // non-constant to the optimizer, allowing mem2reg/instcombine to expose pure
+  // non-constant to the optimiser, allowing mem2reg/instcombine to expose pure
   // SSA bodies even when the LLVM `opt` binary is not installed.
   std::map<int, std::string> attrGroups;
   {

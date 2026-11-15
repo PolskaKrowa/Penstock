@@ -1,6 +1,7 @@
 // Freshet parser — recursive descent over preprocessed tokens.
-// Handles: functions, structs (R2), globals, statements, parfor clauses
-// (reduction/threads/chunk/affinity/collapse), nested parfor (R2).
+// Handles: functions, structs, enums + match, globals, statements, parfor
+// clauses (reduction/threads/chunk/affinity/collapse), nested parfor,
+// generics (Phase 2a), modules/imports/pub (Phase 3a), fn-pointer types.
 #include "common.h"
 
 namespace freshet {
@@ -11,7 +12,6 @@ struct Parser {
   std::vector<Token> toks;
   size_t pos = 0;
   std::string file;
-  std::set<std::string> knownStructs;   // declared before use (documented rule)
 
   Token& cur() { return toks[pos]; }
   Token& peek(int n = 1) { return toks[std::min(pos + n, toks.size() - 1)]; }
@@ -479,10 +479,9 @@ struct Parser {
           return e;
         }
         // struct literal: Name { field: expr, ... }
-        // Phase 3a: resolved by SEMA, not by the parser-local
-        // knownStructs set — a type imported from another module
-        // (`import geometry;` … `Point { x: 1.0 }`) is not in this
-        // file's set, and `IDENT {` has no other valid parse in
+        // Phase 3a: resolved by SEMA, not by the parser — a type imported
+        // from another module (`import geometry;` … `Point { x: 1.0 }`) is
+        // unknown here, and `IDENT {` has no other valid parse in
         // expression position anyway.
         if (peek().text == "{") {
           Expr* e = new Expr(Expr::SLIT, l);
@@ -591,7 +590,6 @@ struct Parser {
 
   Stmt* parseStmt(FnDecl* fn, Stmt* parent) {
     SrcLoc l = cur().loc;
-    // labels for loop names? (skip)
     if (accept(";")) return new Stmt(Stmt::EMPTY, l);
     if (at("{")) return parseBlock(fn, parent);
     // §5 loop-hint policy: `@vectorize for ...` / `@vectorize parfor ...`
@@ -763,7 +761,9 @@ struct Parser {
           if (accept("..")) {
             s->rangeHi = parseExpr();
           } else if (accept("by")) {
-            // for (i in a..b by s) — step after range
+            // lenient fallback: `by` without a preceding `..` — the
+            // expression after `by` becomes the upper bound; a second
+            // `by` then gives the step
             s->rangeHi = parseExpr();
             if (accept("by")) s->forStep = parseExpr();
           } else {
@@ -816,7 +816,8 @@ struct Parser {
         s->phi = parseExpr();
         if (accept("by")) {
           Expr* step = parseExpr();
-          // descending: by -1 → note in sema
+          // descending: by -1 → set pDescending; IRgen flips the bound
+          // test and step sign
           if (!(step->k == Expr::UN && step->op == "-" &&
                 step->rhs->k == Expr::INT && step->rhs->ival == 1)) {
             diag(Diag::Error, Code::Parfor,
@@ -1006,7 +1007,6 @@ struct Parser {
         sd->loc = l;
         sd->isPub = pub;
         sd->name = expectIdent("struct name");
-        knownStructs.insert(sd->name);
         // Phase 2a: generic struct template parameters
         if (at("<")) {
           advance();
@@ -1180,8 +1180,8 @@ struct Parser {
                  l);
           }
         }
-        // @inline + @noinline is contradictory (LLVM resolves it as
-        // noinline wins).  Warn so the user notices.
+        // @inline + @noinline is contradictory (LLVM resolves the
+        // conflict in favour of noinline).  Warn so the user notices.
         if (f->userInline && f->userNoinline) {
           diag(Diag::Warning, Code::Attr,
                "function " + f->name + " has both @inline and @noinline — "

@@ -1,7 +1,7 @@
 // Freshet performance report — merges four layers:
 //   1. frontend diagnostics statistics (E-*/W-* tallies, struct layout table)
-//   2. IR metrics (parse .ll text: vectorizable loops, reductions, branch
-//      weights, hot fns, parfor chunk fns)
+//   2. IR metrics (parse .ll text: loops with vectorise annotations, reductions, branch
+//      weights, parfor chunk fns)
 //   3. runtime timing (FRT_TIMING=1 makes the binary write <exe>.frtiming;
 //      tags correlate to fn:line via IrGen::parforTags)
 //   4. PGO layer (top functions by profile count, coverage of branch sites)
@@ -22,7 +22,6 @@ static std::string trim(const std::string& s) {
 }
 
 struct IrMetrics {
-  int nFnDefs = 0;          // user fns (u_*/main/exported)
   int nChunkFns = 0;        // __pf_body_*
   int nVectorLoops = 0;     // llvm.loop vectorize.enable
   int nInterleave4 = 0;     // interleave.count 4
@@ -30,9 +29,6 @@ struct IrMetrics {
   int nFastMath = 0;        // fadd/fsub/fmul/fast
   int nFpReductions = 0;    // fadd fast inside chunk fns (approx)
   int nNoAlias = 0;         // noalias params
-  int nHotFns = 0;          // hot attribute
-  int nLoadStore = 0;       // memory ops
-  int nGep = 0;             // address computations
   int nSoaCalls = 0;        // frt_soa_*
   int nAtomicRmw = 0;       // atomicrmw (thread-safe PGO counters)
   bool inChunkFn = false;
@@ -48,7 +44,6 @@ static IrMetrics scanIr(const std::string& irPath) {
     if (t.rfind("define ", 0) == 0) {
       m.inChunkFn = t.find("@__pf_body_") != std::string::npos;
       if (m.inChunkFn) {
-        ++m.nFnDefs;
         ++m.nChunkFns;
       }
       continue;
@@ -60,12 +55,6 @@ static IrMetrics scanIr(const std::string& irPath) {
       ++m.nInterleave4;
     if (t.find("branch_weights") != std::string::npos) ++m.nBranchWeights;
     if (t.find("noalias") != std::string::npos) ++m.nNoAlias;
-    if (t.find(" hot ") == 0 || t.find(" hot#") != std::string::npos) {
-      // function def line already counted; skip
-    }
-    if (t.find("\"function_entry_count\"") != std::string::npos) {
-      // prof metadata on define line
-    }
     if (t.rfind("attributes", 0) == 0) continue;
     if (t.find("= atomicrmw ") != std::string::npos) ++m.nAtomicRmw;
     // instruction lines start with %
@@ -78,10 +67,7 @@ static IrMetrics scanIr(const std::string& irPath) {
           if (m.inChunkFn) ++m.nFpReductions;
         }
       }
-      if (t.find(" = load ") != std::string::npos) ++m.nLoadStore;
-      if (t.find(" = getelementptr ") != std::string::npos) ++m.nGep;
     }
-    if (t.find(" = load ") == 0 || t.find(" = store ") == 0) ++m.nLoadStore;
     if (t.find("call") != std::string::npos && t.find("@frt_soa_") != std::string::npos)
       ++m.nSoaCalls;
   }

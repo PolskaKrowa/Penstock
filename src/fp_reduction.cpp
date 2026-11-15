@@ -49,7 +49,7 @@
 //       abort), so every observable result is bit for bit identical;
 //   P4  the loop is a plain ascending unit-step range loop (forRange, no
 //       `by` step) whose bounds are 64-bit integers (i64/u64/usize — IRgen
-//       lowers every range loop in i64, and the synthesized control plane
+//       lowers every range loop in i64, and the synthesised control plane
 //       and index arithmetic are built in i64 to match); all same-named
 //       references to the ivar inside e agree on one Sym*;
 //   P5  the trip cannot wrap into a false positive: IRgen's loop compare
@@ -62,7 +62,7 @@
 // The fresh bindings (__sr_trip/full/fpos, __sr_j, __sr_t0..7) are
 // appended to the function's sema symbol table exactly like the tiling
 // pass's tile induction variables, so IRgen materialises their allocas;
-// synthesized nodes carry full sema fields (types, syms, constants) and
+// synthesised nodes carry full sema fields (types, syms, constants) and
 // introduce no other bindings.  K = 8 is fixed (goose's vector register
 // lane count; one 512/256-bit vector of f64/f32 terms per block).
 #include "common.h"
@@ -85,7 +85,7 @@ using namespace optutil;
 static constexpr int SR_K = 8;
 
 // ------------------------------------------------------- node builders
-// synthesized nodes carry full sema fields (ty, sym, constant) so IRgen
+// synthesised nodes carry full sema fields (ty, sym, constant) so IRgen
 // lowers them like parser-produced ones; they introduce NO bindings
 // except srFreshVar below (loop_transforms.cpp conventions).
 static Expr* srInt(uint64_t v, Type* t, SrcLoc loc) {
@@ -194,7 +194,7 @@ static void srRepairParents(Stmt* s, Stmt* parent, FnDecl* fn) {
 
 // fresh binding appended to the function's sema symbol table so IRgen
 // emits its alloca (allocas are name-keyed from fs->allSyms); the
-// returned heap Sym only annotates synthesized IDENTs (IRgen resolves
+// returned heap Sym only annotates synthesised IDENTs (IRgen resolves
 // by name through varAllocas).  Same convention as loop_transforms.cpp's
 // freshLoopVar.
 static Sym* srFreshVar(FnDecl* fn, const std::string& base, Type* ty,
@@ -305,7 +305,7 @@ static int srInList(std::vector<Stmt*>& list, FnDecl* fn) {
     if (ivSym == s) continue;              // P1: s is not the ivar
 
     // ---- P4: 64-bit integer bounds (IRgen lowers ranges in i64; the
-    // synthesized control plane + index arithmetic are built in i64)
+    // synthesised control plane + index arithmetic are built in i64)
     if (!S->rangeLo->ty || !S->rangeHi->ty) continue;
     auto bits64 = [](Type* t) {
       return t && t->isInt() && t->bits() == 64;

@@ -70,7 +70,8 @@ double fsh_math_fma_f64(double a, double b, double c);
 float  fsh_math_fma_f32(float a, float b, float c);
 
 /* ---------------- parallel RNG (counter-based, report §5.2) ----------- */
-/* Threefish / Philox-style counter-based RNG.  Each call returns a
+/* Counter-based RNG (splitmix64-derived in the MVP; a vetted Philox /
+ * Threefish generator is planned — report §5.2).  Each call returns a
  * deterministic u64 derived from (seed, stream, counter); the caller
  * advances `counter` independently per iteration so parallel loops get
  * reproducible streams without shared mutable RNG state. */

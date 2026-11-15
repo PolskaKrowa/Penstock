@@ -30,7 +30,7 @@ static int intCastOp(Type* from, Type* to) {
 //
 // IMPORTANT: the result temp is allocated FIRST and, for multi-instruction
 // sequences (signed div/rem strength reduction), consumed as the FIRST
-// intermediate so penstock's explicit %N register numbering stays strictly
+// intermediate so Penstock's explicit %N register numbering stays strictly
 // increasing in the instruction stream.
 std::string emitArithOp(const std::string& op, Type* dt, const std::string& a,
                         const std::string& b, Expr* rhsExpr, SrcLoc loc) {
@@ -258,7 +258,7 @@ std::string genAddr(Expr* e) {
         idx = w;
       }
       Type* elem = e->base->ty ? e->base->ty->pointee : nullptr;
-      if (e->soaIndex) return genSoaFieldAddr(e);  // not used: soa handled at FIELD
+      if (e->soaIndex) return genSoaFieldAddr(e);  // defensive: soa rvalue INDEX exprs are consumed via the FIELD path
       std::string a = G->t();
       G->out << "  " << a << " = getelementptr inbounds "
              << G->llvmType(elem) << ", ptr " << base << ", i64 " << idx << "\n";
@@ -585,8 +585,9 @@ std::string genExpr(Expr* e) {
         return genAddr(e);
       }
       if (e->soaIndex) {
-        // s[i] as rvalue struct — build temp copy? Only .field chains valid.
-        // synthesize: materialize via alloca copy of planes
+        // s[i] as an rvalue struct is only meaningful under a .field
+        // chain (s[i].f) — delegate to genAddr, which routes through
+        // the SoA FIELD resolution
         return genAddr(e);
       }
       std::string a = genAddr(e);
@@ -1036,7 +1037,7 @@ std::string genExpr(Expr* e) {
 std::string genCastInline(Expr* fromExpr, Type* to, std::string v) {
   Type* from = fromExpr->ty;
   if (!from || !to || typesEquivalent(from, to)) return v;
-  // identity-by-representation checks FIRST: penstock names registers
+  // identity-by-representation checks FIRST: Penstock names registers
   // %1..%N explicitly, so a temp allocated here and then abandoned would
   // leave a gap in the numbering and LLVM rejects the whole function.
   // (same-width ints share representation; opaque pointers are all `ptr`)

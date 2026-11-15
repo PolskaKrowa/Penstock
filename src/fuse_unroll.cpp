@@ -1,5 +1,5 @@
-// Freshet — R4 source-level loop optimisation pass 1: loop fusion
-// ("fusing functions together") + full unrolling.
+// Freshet — R4 source-level loop optimisation pass 1: fusion of
+// adjacent loops over identical ranges + full unrolling.
 //
 // Runs post-sema / post-checks, pre-irgen.  All transforms are
 // semantics-preserving AST rewrites that reuse or deep-clone existing
@@ -16,7 +16,7 @@
 // becomes one sweep — the per-batch-element working set stays hot in
 // cache across the forward / pointwise / inverse phases while the
 // batching loop itself is retained.  (LLVM's loop passes cannot do
-// this: they never fuse across function boundaries, and its
+// this: they never fuse across function boundaries, and their
 // dependence tests cannot see through our call slices.)
 //
 // Safety, three tiers (checked per pair of fused bodies, all pairs
@@ -229,7 +229,7 @@ struct FuseCand {
 
 static bool tryFuseRun(std::vector<Stmt*>& list, size_t from, size_t end,
                        FnDecl* fn, int* applied) {
-  // greedy prefix extension: [from, k) is the currently-legal run
+  // greedy prefix extension: [from, j) is the currently-legal run
   std::vector<FuseCand> run;
   Stmt* first = list[from];
   run.push_back({first, BodyInfo{}});
@@ -462,8 +462,9 @@ static int unrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
     if (info.hasBreak) continue;
     // optimisation-audit §4.3 (P0): veto bodies containing `return`
     if (info.hasReturn) continue;
-    // no point unrolling an empty or single-statement trip-1 loop with
-    // zero body weight? still fine — do it (removes loop-carried alloca)
+    // an empty or single-statement trip-1 loop has little body weight,
+    // but unrolling still pays — it removes the loop and its
+    // loop-carried alloca
 
     Sym* ivSym = ivarSymOf(s->body, s->ivar);
     std::map<Sym*, Expr*> subst;

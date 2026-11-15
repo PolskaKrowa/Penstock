@@ -1,6 +1,6 @@
 # Penstock PGO guide
 
-Profile-guided optimization in three steps:
+Profile-guided optimisation in three steps:
 
 ```
 # 1. instrument

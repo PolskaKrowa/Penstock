@@ -26,7 +26,7 @@ using namespace freshet;
 
 static const char* USAGE =
     "Penstock " FRESHET_VERSION " — Freshet compiler\n"
-    "usage: penstock [options] input.fsht [mor more.fsht ...]\n"
+    "usage: penstock [options] input.fsht [more.fsht ...]\n"
     "       penstock <subcommand> [args...]\n"
     "\n"
     "subcommands (Phase 3/4, report §6/§10):\n"
@@ -47,7 +47,7 @@ static const char* USAGE =
     "  -o <file>          output file (default a.out; with -S: .ll, with -c: .o)\n"
     "  -S                 emit LLVM IR only (.ll)\n"
     "  -c                 emit object file (.o) only\n"
-    "  -O<0..4>           optimization level (default 3; 4 = wider SAT/SMT\n"
+    "  -O<0..4>           optimisation level (default 3; 4 = wider SAT/SMT\n"
     "                    superoptimisation scope)\n"
     "  --superopt-budget=<s> solver budget (default 2s -O3, 10s -O4)\n"
     "  --no-superopt      disable embedded Freshet/Z3/Alive2 verified IR rewriting\n"
@@ -62,7 +62,7 @@ static const char* USAGE =
     "  --evo-seed=<n>     -O4: evolution RNG seed (default time-derived)\n"
     "  --report           performance report mode (also runs binary w/ timing)\n"
     "  --profile          PGO: build instrumented binary (writes <exe>.fprof)\n"
-    "  --use-profile=<f>  PGO: guide optimization with profile <f>\n"
+    "  --use-profile=<f>  PGO: guide optimisation with profile <f>\n"
     "  --soa=<mode>       AoS->SoA: warn (default) | auto (transform hot arrays)\n"
     "                    | aosoa (advisory: frequency-weighted layout report)\n"
     "  --no-loop-opts     disable loop fusion/unrolling/cross-lane passes\n"
@@ -126,7 +126,7 @@ static const char* USAGE =
     "  -h | --help        print this help\n"
     "  --explain <code>   describe a diagnostic by ID or slug (e.g. F0402)\n"
     "\n"
-    "  Audit integration (freshet_penstock_optimization_report.md):\n"
+    "  Audit integration (docs/optimization-integration.md):\n"
     "  --runtime-opt=<n>   cached runtime IR optimisation level (default 2;\n"
     "                    0 = historical -O0 debug runtime).  §3\n"
     "  --force-vectorize   restore the historical blanket vectorize.enable +\n"
@@ -1346,7 +1346,7 @@ int main(int argc, char** argv) {
   if (g_opts.optLevel >= 2 && !g_opts.noLoopOpts && !g_opts.profile) {
     // goose basecase port runs FIRST: it pattern-matches the body as
     // written, exactly like goose records the base case BEFORE its own
-    // optimizer touches the body (Optimizer::SetupBaseCase).
+    // optimiser touches the body (Optimizer::SetupBaseCase).
     int nBasecase = g_opts.basecaseOn ? runBasecasePass(prog) : 0;
     nConstFold = runTypedConstFoldPass(prog);
     // goose sumred port runs after const folding (so `s += 2.0 * a[i]`
@@ -1398,8 +1398,8 @@ int main(int argc, char** argv) {
   }
 
   // ---- bounds-check elimination (goose bce port): the LAST pass before
-  // IRgen, exactly where goose runs BCE (once, after its whole optimizer,
-  // before codegen).  Off at -O0 (no optimization there, checks stay) and
+  // IRgen, exactly where goose runs BCE (once, after its whole optimiser,
+  // before codegen).  Off at -O0 (no optimisation there, checks stay) and
   // under --no-bce (the differential hatch: checks all stay).
   if (g_opts.optLevel >= 1 && g_opts.bceOn && !g_opts.profile) {
     BceCounts nBce = runBcePass(prog);

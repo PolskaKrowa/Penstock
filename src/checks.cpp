@@ -1,6 +1,7 @@
 // Freshet strict checks — F0401/F0402 (slow arithmetic), F0403 (strided/wasteful
 // access), F0404 (R2: field straddling cache line), F0407 (R2:
-// struct padding), F0408 (R2: AoS->SoA advice), F0305, F0405/F0406 (loops).
+// struct padding), F0408 (R2: AoS->SoA advice), F0305/F0306 (aliasing),
+// F0405/F0406 (loops).
 #include "common.h"
 #include <algorithm>
 
@@ -15,7 +16,7 @@ struct AccessInfo {
   SrcLoc loc;
 };
 
-// find root var of an lvalue chain: v[i].f.g -> v ; also collect soa field use
+// find root var of an lvalue chain: v[i].f.g -> v
 static Expr* rootOf(Expr* e) {
   while (e && (e->k == Expr::INDEX || e->k == Expr::FIELD)) e = e->base;
   return e;
@@ -66,7 +67,7 @@ static void stmtExprs(Stmt* s, const std::function<void(Expr*)>& f) {
       forEachExpr(s->init ? s->init : (s->expr ? s->expr :
                     (s->deferExpr ? s->deferExpr : s->retVal)), f);
       break;
-    case Stmt::MATCH:   // Phase 1d: scrutinee + bindings' payload exprs
+    case Stmt::MATCH:   // Phase 1d: scrutinee (arm bodies are walked by callers)
       forEachExpr(s->matchOn, f);
       break;
     case Stmt::ASSIGN: forEachExpr(s->lhs, f); forEachExpr(s->rhs, f); break;
@@ -290,7 +291,7 @@ static void checkSoaLoop(FnDecl* fn, Stmt* loop) {
         needed += adv.sdef->sizes[f.idx];
       }
     }
-    // per-element bytes fetched: one struct per iteration (elements amortize
+    // per-element bytes fetched: one struct per iteration (elements amortise
     // cache lines; a struct larger than 64B spans multiple lines)
     adv.bytesTouched = adv.sdef->size;
     adv.bytesNeeded = needed;
@@ -334,7 +335,7 @@ static void checkSoaLoop(FnDecl* fn, Stmt* loop) {
   }
 }
 
-// ---------------------------------------------------------------- F0305
+// ------------------------------------------------------- F0305 / F0306
 // Stage B4 (report §1.3 + §2.2 B): resolve the spec/implementation contradiction.
 //
 // Language contract (now documented in docs/language-spec.md §3):
@@ -430,7 +431,6 @@ static void checkAlias(FnDecl* fn, Expr* e) {
           node = node->base;
         }
         if (node && node->k == Expr::IDENT) {
-          // check the root's type is soa
           return fld;  // caller verifies soa-ness
         }
         return "";
@@ -509,7 +509,7 @@ static void checkLoop(FnDecl* fn, FnSema* fs, Stmt* s) {
     bool strict = perfStrict(fn);
     diag(strict ? Diag::Error : Diag::Warning,
          Code::LoopStride,
-         "for-loop stride is not constant 1 — vectorization guarantees "
+         "for-loop stride is not constant 1 — vectorisation guarantees "
          "are lost; use a nested loop or manual blocking for other strides"
          + std::string(strict ? "" :
                        " (--strict-performance makes this an error)"),
@@ -528,7 +528,7 @@ static void checkLoop(FnDecl* fn, FnSema* fs, Stmt* s) {
     diag(strict ? Diag::Error : Diag::Warning,
          Code::LoopIvWritten,
          "loop induction variable '" + s->ivar + "' modified in body — "
-         "the loop still executes correctly, but cannot be vectorized",
+         "the loop still executes correctly, but cannot be vectorised",
          s->loc);
   }
 }

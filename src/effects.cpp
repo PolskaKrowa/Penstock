@@ -141,18 +141,18 @@ void writeOfRoot(FnSema* fs, Expr* root, Effects& e) {
   }
 }
 
-// one read through a FIELD/INDEX chain whose root is `root`
+// one read through a FIELD/INDEX chain whose root is `root`. Both
+// memory reads and non-memory reads (e.g. a whole global in `g = g + 1`)
+// funnel through the same root classification.
 void readThrough(FnSema* fs, Expr* leaf, Effects& e) {
   bool mem = false;
   Expr* root = chainRoot(leaf, &mem);
-  if (mem) readOfRoot(fs, root, e);
-  else     readOfRoot(fs, root, e);   // e.g. whole-global read (g = g + 1)
+  (void)mem;
+  readOfRoot(fs, root, e);
 }
 
-// effect of a call to a builtin; returns false if `n` is not a builtin
-// name handled here (caller then treats it as unknown).
-// `strictfp` selects the strict-FP lowering, where sin/cos/... stay
-// scalar libm calls that may read/write errno (memory).
+// effect of the implicit bounds check a checked build emits at this
+// site (see checkSiteEffect below).
 // A bounds-check site (checked builds / -O0/-O1) may TRAP: the abort path
 // writes stderr and does not return, exactly like `assert`.  A function
 // whose effect summary omits this is attributed `willreturn` (and possibly
@@ -182,6 +182,10 @@ static void checkSiteEffect(Expr* e, Effects& eff) {
   }
 }
 
+// effect of a call to a builtin, by name; unmodelled names get
+// e.unknownCall (conservative).  `strictfp` selects the strict-FP
+// lowering, where sin/cos/... stay scalar libm calls that may
+// read/write errno (memory).
 void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
   // lowered to llvm.* intrinsics: memory-free
   static const std::set<std::string> kIntrinsicMath = {
@@ -231,8 +235,9 @@ void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
   if (n == "freshet.pause") return;     // spin hint, no memory
   if (n == "freshet.clflush") { e.writesOther = true; return; }
   if (n == "sizeof" || n == "alignof" || n == "give") return;  // folded/marker
-  // memcpy / memset / soa_len / soa_field_ptr / prefetch_r / prefetch_w
-  // depend on their argument roots — handled by the call site walker.
+  // memcpy / memset / soa_len / soa_field_ptr / soa_new_sizes /
+  // prefetch_r / prefetch_w depend on their argument roots — handled by
+  // the call site walker.
   if (n == "memcpy" || n == "memset" || n == "soa_len" ||
       n == "soa_field_ptr" || n == "soa_new_sizes" ||
       n == "freshet.prefetch_r" || n == "freshet.prefetch_w")
@@ -702,7 +707,7 @@ void computeEffects(Program* p) {
     EffectWalker w{f, fs, &cur, &viol};
     Effects e;   // recomputed only to drive the walker
     w.walkStmt(f->body, e);
-    // merge callee-based violations came through `viol` during the walk;
+    // callee-based violations came through `viol` during the walk;
     // effects themselves must be all-clear for the contract to hold:
     const Effects& eff = cur[f];
     bool clean = !eff.anyRead() && !eff.anyWrite() && !eff.io &&

@@ -40,9 +40,9 @@
 //   * once every site has been judged, the callee's own walk is SEEDED
 //     at entry with that table — every check inside it can then be
 //     elided under a precondition every caller already establishes
-//     ("grants a specialization, at entry, what all of its call sites
+//     ("grants a specialisation, at entry, what all of its call sites
 //     proved about its parameters");
-//   * seeding is skipped UNLESS all sites were analyzed (seen == counted)
+//   * seeding is skipped UNLESS all sites were analysed (seen == counted)
 //     and nothing reaches the function any other way — its value taken,
 //     an export, a @test entry, an unresolvable call (goose's
 //     opaquesites) — or the arity mismatches; callers are judged FIRST
@@ -101,7 +101,7 @@
 //
 // Surfaces:
 //   * `--bce` (default on from -O1, like goose; `--no-bce` is the
-//     differential hatch) runs the solver and marks sites;
+//     differential-testing escape hatch) runs the solver and marks sites;
 //   * `--bce-lines` prints goose's per-line report
 //     (`bce-line: <file>:<line>: N elided, M kept`);
 //   * `@checkfree fn` errors (F0924) when any check the pass would keep
@@ -444,7 +444,7 @@ struct BCE {
         if (!evalConstTyped(e, &tc)) return t;
         t.ok = true;
         t.b = zeroBase();
-        t.off = tc.signedVal();  // the i64 bit pattern of the literal
+        t.off = tc.signedVal();  // the literal's signed value
         return t;
       }
       case Expr::IDENT: {
@@ -864,8 +864,9 @@ struct BCE {
     if (!s) return;
     switch (s->k) {
       case Stmt::LET: {
-        // unreachable: walkList handles LETs (positional Sym resolution);
-        // bodies reached through Stmt* pointers land here without a list
+        // LETs inside a statement list are handled by walkList
+        // (positional Sym resolution); a body reached through a bare
+        // Stmt* pointer (no list) lands here
         walkExpr(s->init);
         return;
       }
@@ -1108,7 +1109,7 @@ BceCounts runBcePass(Program* p) {
   for (auto* fn : p->fns) {
     if (!fn->body || fn->imported || fn->isGeneric) continue;
     judged.push_back(fn);
-    // entry points no analyzed site covers: exports (external C callers)
+    // entry points no analysed site covers: exports (external C callers)
     // and @test fns (the test runner passes their value to frt_test_run)
     if (fn->exported || fn->isTest) opaqueSites.insert(fn);
     // the interface: (isLen, param idx) with a LEADING ZERO marker at
@@ -1135,7 +1136,7 @@ BceCounts runBcePass(Program* p) {
         if (g->body && !g->imported && !g->isGeneric) {
           ++nsites[g];
         } else {
-          opaqueSites.insert(g);   // unanalyzable target: never seed it
+          opaqueSites.insert(g);   // unanalysable target: never seed it
         }
       }
       // a fn VALUE drops out of the direct-site census: its target is

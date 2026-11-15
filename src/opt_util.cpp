@@ -1105,7 +1105,7 @@ void computeFootprints(Program* p) {
   }
 
   // a declared-pure function must not write; if the walk found writes,
-  // demote (should not happen — sema validates @pure).
+  // demote (should not happen — the effect pass validates @pure).
   for (auto* f : p->fns) {
     if (!f->body || !f->isPure) continue;
     FnFootprint& F = g_footprints[f];

@@ -1,7 +1,3 @@
-<div align=center>
-  <img width="730" height="411" alt="fsht image" src="https://github.com/user-attachments/assets/930e9c07-4517-476c-a494-bd82b2694e46" />
-</div>
-
 # Freshet / Penstock
 
 **Freshet** is a strictly-typed, strictly-checked HPC language with C++/Rust-like
@@ -12,7 +8,7 @@ LLVM IR, drives Clang as its backend, and treats *predictable* performance bugs
 as compile-time diagnostics.
 
 ```
-penstock [options] input.fsht [mor more.fsht ...]
+penstock [options] input.fsht [more.fsht ...]
 ```
 
 ## Highlights

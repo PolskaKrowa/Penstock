@@ -303,18 +303,19 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
         start = i + 1;
       }
     }
-    // '~' is the encoding for a fully-resolved argument (parser emits it
-    // when the argument type carried no name); the placeholder Type was
-    // already built by the parser, but the encoding alone cannot recover
-    // it — the parser therefore never emits '~' for gen: (it embeds the
-    // concrete encoding instead, e.g. 'gen:Vec(u64)').
+    // '~' marks a fully-resolved argument that carried no name encoding
+    // (the parser emits it when an argument's parse produced no name);
+    // the placeholder Type was built by the parser, but the encoding
+    // alone cannot recover it, so it surfaces as an unresolved argument
+    // (nullptr) below.
     std::vector<Type*> args;
     for (auto& ae : argEncs) {
       if (ae == "~") { args.push_back(nullptr); continue; }
       size_t sub = 0;
       args.push_back(bindEncOne(prog, ae, sub, loc, tmap));
       if (sub != ae.size()) {
-        // trailing garbage — treat whole thing as unresolved
+        // trailing garbage after the argument encoding — ignored
+        // (bindEncOne reports what it consumed)
       }
     }
     pos = enc.size();

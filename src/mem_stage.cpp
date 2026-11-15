@@ -519,15 +519,12 @@ static bool tryLoopChurn(std::vector<Stmt*>& list, size_t li, FnDecl* fn,
   // the matching free: a top-level EXPR/DEFER free(buf) after the LET
   size_t freePos = (size_t)-1;
   Stmt* freeStmt = nullptr;
-  Expr* freeArg = nullptr;
-  (void)freeArg;   // debug aid: the arg node is reused in the rewrite
   for (size_t k = letPos + 1; k < bodyList->size(); ++k) {
     Stmt* s = (*bodyList)[k];
     Expr* arg = nullptr;
     if (isFreeStmt(s, buf, &arg)) {
       freePos = k;
       freeStmt = s;
-      freeArg = arg;
       break;
     }
   }
@@ -1101,8 +1098,9 @@ MemStageCounts runMemStagePasses(Program* p) {
           for (size_t i = 0; i < list.size(); ++i)
             if (memstage::tryLoopChurn(list, i, fn, cens, p))
               ++counts.memReuse;
-            // no ++i: the list grew by two, the hoisted LET is a no-op
-            // for the scan, and the processed loop no longer matches
+            // the ++i is safe here: the list grew by two, the next slot
+            // scanned is the processed loop (which no longer matches) or
+            // the hoisted LET (a no-op for the scan)
         });
         walkLists(fn->body->stmts, fn, [&](std::vector<Stmt*>& list) {
           if (memstage::tryFreeAllocFuse(list, fn, cens, p))

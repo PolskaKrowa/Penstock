@@ -591,11 +591,8 @@ void handleDocumentSymbol(Workspace& ws, int id, const Json& params) {
   std::lock_guard<std::mutex> g(ws.mu);
   auto it = ws.docs.find(uri->s);
   if (it == ws.docs.end()) { sendResponse(id, Json::array({})); return; }
-  // Force analysis if dirty.
-  if (it->second.dirty) {
-    // Need to drop the lock and re-acquire — for the MVP we just
-    // return the cached result; the next didChange will refresh.
-  }
+  // (MVP) a stale analysis is returned as-is here; the next didChange
+  // refreshes it.
   Json arr = Json::array({});
   if (it->second.analysis.program) {
     // `analyseDocument()` merges imported modules into one Program, and
@@ -758,8 +755,8 @@ struct NavWalker {
           break;
       }
 
-      // Push children in reverse visitation order so the walk retains the
-      // previous depth-first order: args, lhs, rhs, then base.
+      // Push children in reverse so popping yields the original depth-first
+      // visitation order: args, lhs, rhs, then base.
       if (e->base) pending.push_back(e->base);
       if (e->rhs) pending.push_back(e->rhs);
       if (e->lhs) pending.push_back(e->lhs);

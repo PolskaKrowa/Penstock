@@ -47,9 +47,7 @@ struct AnalysisOptions {
   bool emitLLVMIR = false;         // false = AST+diagnostics only (LSP mode)
 };
 
-// Structured result of analysing one document.  Owned by the caller.
-// `program` is null when lexing or parsing fails catastrophically; the
-// diagnostics vector still contains everything the LSP needs to render.
+// Flat name → location index for the LSP (see the stub note inside).
 struct SymbolIndex {
   // (Stub for Stage E MVP) — populated with function names + locations.
   // Will grow to cover globals, structs, fields, locals per-function as
@@ -74,6 +72,9 @@ struct TypeInfo {
   std::vector<StructInfo> structs;
 };
 
+// Structured result of analysing one document.  Owned by the caller.
+// `program` is null when lexing or parsing fails catastrophically; the
+// diagnostics vector still contains everything the LSP needs to render.
 struct DocumentAnalysis {
   std::shared_ptr<Program> program;
   std::vector<Diag> diagnostics;

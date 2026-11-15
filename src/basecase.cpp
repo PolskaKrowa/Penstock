@@ -25,8 +25,9 @@
 //       — elseB == nullptr, thenB a RETURN (its retVal e may be null for
 //       a bare `return;`) or a BLOCK with exactly that one statement;
 //   P3  BaseOK(c) and BaseOK(e): the subtrees contain ONLY int/float/
-//       bool/str literals, IDENTs resolving to a PARAM of f (sym->k ==
-//       Sym::PARAM && sym->fn == f) or a global (globalRef), BIN, UN,
+//       bool/str literals, IDENTs resolving to a PARAM of f (Sym::PARAM
+//       and a name of f's params — Sym::fn is unset on parameter symbols,
+//       so the match is by name) or a global (globalRef), BIN, UN,
 //       CAST, INDEX (reads) and FIELD (reads) — no calls (a call could
 //       observe the parameters or diverge), no match/try/slice/array-/
 //       struct-literal expressions, no fn values, no locals (nothing
@@ -51,7 +52,7 @@
 //
 // The fresh __bc_p* bindings are appended to the function's sema symbol
 // table exactly like the tiling pass's induction variables, so IRgen
-// materialises their allocas; synthesized nodes carry full sema fields
+// materialises their allocas; synthesised nodes carry full sema fields
 // and introduce no other bindings.
 #include "common.h"
 #include "opt_util.h"
@@ -281,8 +282,8 @@ static int bcRewriteFn(FnDecl* f) {
 
   // ---- the parameters' stable Syms (sema declares them into ownedSyms;
   // allSyms is the by-value index; Sym::fn is NOT set on params — match
-  // by name).  The substitution replaces IDENTs by Sym*, so every param c
-  // or e names must resolve to one of these.
+  // by name).  The substitution replaces IDENTs by Sym*, so every param
+  // that c or e names must resolve to one of these.
   std::vector<Sym*> paramSym(f->params.size(), nullptr);
   for (auto& os : fs->ownedSyms) {
     if (os->k != Sym::PARAM) continue;

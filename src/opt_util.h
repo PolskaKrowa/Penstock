@@ -1,7 +1,10 @@
 // Freshet source-level loop optimisation — shared analysis utilities (R4).
-// Used by fuse_unroll.cpp (loop fusion + full unrolling) and
-// lane_analysis.cpp (cross-lane vectoriser analysis: uniform-branch
-// unswitching + same-condition predicate reuse).
+// Used by every source-level optimisation pass (fuse_unroll.cpp,
+// lane_analysis.cpp, loop_analysis.cpp, loop_transforms.cpp, mem_stage.cpp,
+// vector_plan.cpp, soa_auto.cpp, basecase.cpp, fp_reduction.cpp, bce.cpp, …).
+// fuse_unroll.cpp: loop fusion + full unrolling; lane_analysis.cpp:
+// cross-lane vectoriser analysis (uniform-branch unswitching +
+// same-condition predicate reuse).
 //
 // Everything here runs POST-sema: expressions carry resolved types
 // (e->ty), symbols (e->sym), globals (e->globalRef) and callees
@@ -140,7 +143,8 @@ bool exprReferentiallyTransparent(Expr* e);
 // not return.
 bool exprTotalAndPure(Expr* e);
 
-// is this call name an obviously pure, memory-free builtin?
+// is this call name an obviously pure builtin (no writes, no I/O, no
+// allocation — the effect pass models the same names more precisely)?
 bool isPureBuiltinCall(const std::string& n);       // sqrt, fabs, ..., freshet.threads
 
 // all identifier names referenced by an expression (scalars)

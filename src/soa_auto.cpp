@@ -6,7 +6,7 @@
 // is a pure AST edit; sema then binds everything as if the user wrote
 // soa() by hand.
 //
-// Policy (conservative — auto must never pessimize or change semantics):
+// Policy (conservative — auto must never pessimise or change semantics):
 //   candidate:  let v [: *S] = malloc(S, n)   not inside a parfor body
 //   transform if:
 //     - every use of v is one of:
@@ -14,9 +14,10 @@
 //         * free(v)             (incl. inside defer)
 //       anything else (whole-element use v[e], &v[..], v passed to a
 //       call, pointer arithmetic, rebinding, return) → veto
-//     - some loop over v fetches < 50% of the bytes it consumes
-//       (the F0408 threshold), and
-//     - no loop over v fetches ≥ 60% of the struct (SoA would hurt it)
+//     - some loop over v consumes < 50% of the bytes it fetches
+//       (the F0408 efficiency threshold), and
+//     - no loop over v consumes ≥ 60% of the struct's bytes (SoA would
+//       hurt it)
 //     - sizeof(S) ≥ 32B and S has ≥ 2 fields
 //     - v is not shadowed by another let of the same name in the fn
 #include "common.h"
@@ -374,7 +375,7 @@ int applySoaAutoTransform(Program* p) {
            ",weighted-eff=" + std::to_string((int)(c.weightedEff * 100)));
     };
     if (g_opts.soaAosoa) { aosoaAdvice(); continue; }
-    if (!(c.minEff < 0.5)) continue;   // not W-SOA-hot: leave alone
+    if (!(c.minEff < 0.5)) continue;   // weighted efficiency never below 50%: not a SoA win, leave alone
     if (!c.layout.ok || c.layout.size < 32 || c.sdef->fields.size() < 2) {
       note("auto AoS->SoA skipped for '" + c.let->var + "' in fn " + c.fn->name +
            ": struct " + c.sdef->name + " layout unsuitable for planes");

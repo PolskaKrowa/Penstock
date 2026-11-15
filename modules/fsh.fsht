@@ -57,8 +57,8 @@ pub fn file_size(path: str) -> i64 {
     return frt_file_size(path);
 }
 
-// whole file as a str view over a FRESH heap buffer (free it with
-// file_read_free when done); empty result means the file was missing
+// whole file as a str view over a FRESH heap buffer (the caller must
+// free it); empty result means the file was missing
 pub fn file_read(path: str) -> str {
     return frt_file_read(path);
 }

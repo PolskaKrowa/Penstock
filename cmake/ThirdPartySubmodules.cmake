@@ -19,9 +19,9 @@
 #
 # Escape hatches:
 #   -DPENSTOCK_USE_SUBMODULES=OFF             ignore third_party/ entirely
-#   -DPENSTOCK_SUBMODULE_Z3=OFF               ignore one submodule
-#   -DPENSTOCK_SUBMODULE_ALIVE2=OFF           (same, per dependency; =ON makes
-#   -DPENSTOCK_SUBMODULE_LLVM=OFF              a missing checkout fatal)
+#   -DPENSTOCK_SUBMODULE_Z3=OFF               ignore one submodule (=ON makes a
+#   -DPENSTOCK_SUBMODULE_ALIVE2=OFF            missing checkout fatal; same
+#   -DPENSTOCK_SUBMODULE_LLVM=OFF              semantics for each dependency)
 #   -DPENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF  keep the historical backend
 #                                             discovery (probe / tarball)
 #

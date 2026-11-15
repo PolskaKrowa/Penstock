@@ -1,16 +1,17 @@
 // Freshet IRgen — parfor lowering.
 // Per region:
-//   * chunk function __pf_body_N(lo, hi, ctx): loop over [lo,hi) with
+//   * chunk function __pf_body_N(lo, hi, ctx, sp): loop over [lo,hi) with
 //     body; reduction accumulators are plain allocas whose live range is
 //     the chunk fn — SROA + loop-rotate turn them into loop-carried phis,
-//     and the fast-math flags let the vectorizer rewrite the reduction.
+//     and the fast-math flags let the vectoriser rewrite the reduction.
+//     (sp = the hidden per-thread data-stack base — goose port v2.)
 //   * ctx block: [ptr-to-captured-var x nshared][64B acc slot per reduction]
 //   * caller: %frt.range + call frt_parfor(range, ctxout, MAXCTX), then a
 //     combine+free loop over the returned chunk contexts.
 // R2 nested parfor:
 //   * rectangular (inner bounds independent of outer var) => inner is
-//     serialized inside the outer chunk fn (collapse: one parallel region,
-//     inner loop vectorizes);
+//     serialised inside the outer chunk fn (collapse: one parallel region,
+//     inner loop vectorises);
 //   * dynamic bounds => real nested dispatch: chunk fn calls frt_parfor
 //     itself; the pool's workers execute/steal tasks; the calling worker
 //     helps until the nested region drains (no blocking waits -> no
@@ -200,8 +201,8 @@ static void genCollapsedInner(Stmt* pf) {
   std::string cv = G->t(), cnd = G->t();
   G->out << "  " << cv << " = load i64, ptr " << iA << "\n";
   G->out << "  " << cnd << " = icmp slt i64 " << cv << ", " << hi << "\n";
-  // §5 policy: no forced vectorise metadata by default (@vectorize on
-  // the parfor or --force-vectorize opt back in)
+  // §5 policy: no forced vectorise metadata by default (only @vectorize
+  // on the parfor, or --force-vectorize, turns it back on)
   int lm = G->vectorizeLoopMeta(pf->vectorizeHint);
   G->out << "  br i1 " << cnd << ", label %" << G->l(body) << ", label %"
          << G->l(exit)
@@ -229,9 +230,6 @@ static void genCollapsedInner(Stmt* pf) {
   G->curLabelTerminated = false;
 }
 
-// New genParfor for irgen_parfor.cpp — replaces lines 230..587
-// (from `void genParfor(Stmt* pf) {` through the closing `}` before
-// `} // namespace freshet`).
 // ---- mem & vectorisation stage: one parfor region's caller-side pieces
 struct PfRegion {
   Stmt* pf = nullptr;
@@ -650,7 +648,7 @@ static void parforEmitCombine(const PfRegion& r,
 }
 
 void genParfor(Stmt* pf) {
-  // collapsed inner (rectangular): serialized inside the outer chunk fn
+  // collapsed inner (rectangular): serialised inside the outer chunk fn
   if (pf->collapsed && G->curFnIsChunkFn) {
     genCollapsedInner(pf);
     return;

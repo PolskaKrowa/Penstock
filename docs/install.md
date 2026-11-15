@@ -13,6 +13,14 @@ LLVM 23.1.4 SDK automatically (including `clang`, `clang++`, `opt` and the
 plugin development files). To use a system toolchain instead, for example
 LLVM 20 at `/usr/lib/llvm-20`:
 
+```sh
+cmake -S . -B build -DLLVM_ROOT=/usr/lib/llvm-20 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build --parallel
+cmake --install build
+```
+
 The default CMake build also fetches Z3 and Alive2, builds them as static
 libraries, and embeds them in Penstock. The selected backend needs a matching
 LLVM development SDK (headers, `LLVMConfig.cmake` and libraries); CMake fetches
@@ -49,18 +57,11 @@ idempotent, so `git status` inside those submodules simply shows the patched
 files until you restore them.
 
 Escape hatches: `-DPENSTOCK_USE_SUBMODULES=OFF` ignores `third_party/`
-entirely, `-DPENSTOCK_SUBMODULE_<LLVM|ALIVE2|Z3>=OFF` ignores one submodule,
-and `-DPENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF` keeps the historical backend
+entirely, `-DPENSTOCK_SUBMODULE_<LLVM|ALIVE2|Z3>=OFF` ignores one submodule
+(`=ON` makes a missing checkout fatal), and
+`-DPENSTOCK_BUILD_LLVM_FROM_SUBMODULE=OFF` keeps the historical backend
 discovery (autodetect / tarball) while still using the submodule for the
 private Alive2 LLVM.
-
-```sh
-cmake -S . -B build -DLLVM_ROOT=/usr/lib/llvm-20 \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build build --parallel
-cmake --install build
-```
 
 The downloaded SDK is kept in `build/_deps` and reused on subsequent
 configures. Because Penstock records the selected `LLVM_ROOT` as its runtime

@@ -4,7 +4,7 @@
  *   - %frt.range layout == frt_range_t below (checked by tests)
  *   - soa descriptor block: { i32 nf @0, i64 n @8, ptr planes[] @16 }
  *   - parfor contexts are heap blocks >= 64B-aligned, ctx_size bytes,
- *     initialized by memcpy from the caller's template
+ *     initialised by memcpy from the caller's template
  *
  * Parallelism:
  *   - persistent worker pool (FRT_THREADS or nproc)
@@ -78,7 +78,7 @@ static _Atomic int64_t g_statDispatchedRegions = 0;
 /* The historical runtime called __builtin_ia32_pause() and
  * __builtin_ia32_rdtsc() unconditionally, which made it x86-only.  Behind
  * these macros a non-x86 build falls back to sched_yield() and a
- * monotonic clock, so the runtime compiles on ARM/PPPC/RISC-V targets
+ * monotonic clock, so the runtime compiles on ARM/PPC/RISC-V targets
  * that have a working pthreads + clock_gettime. */
 #if defined(__x86_64__) || defined(__i386__)
   #define FRT_ARCH_PAUSE()  __builtin_ia32_pause()

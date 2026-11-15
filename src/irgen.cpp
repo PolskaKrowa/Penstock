@@ -1,8 +1,9 @@
 // Freshet IRgen — LLVM IR text emission (module scaffolding, types, globals,
 // runtime decls, DWARF lines, PGO counters, attribute groups).
 // User fns use attribute groups #50+; the runtime .ll keeps its own #0..#9
-// (clang O0 output on LLVM 19-22) — textual concatenation stays
-// collision-free with headroom for future runtime attribute groups.
+// (clang -O2 output by default — see --runtime-opt — on LLVM 19-23) —
+// textual concatenation stays collision-free with headroom for future
+// runtime attribute groups.
 #include "irgen.h"
 #include "dstk.h"
 
@@ -428,7 +429,7 @@ bool irgenProgram(Program* p, const std::string& outLl) {
   out << "%frt.range = type { ptr, i64, i64, i64, i32, i32, i32, i32, i64, ptr, i64, i32, i64 }\n"
          "  ; ^8th field i32 @44: Phase 5 @reproducible flag (matches\n"
          "  ;   frt_range_t.repro — 1 = fixed-block deterministic schedule)\n"
-         "  ; ^10th field i64: §6.12 per-iteration body-cost class (matches\n"
+         "  ; ^11th field i64 @64: §6.12 per-iteration body-cost class (matches\n"
          "  ;   frt_range_t.body_cost in runtime/frt_rt.c — 0 = legacy IR)\n"
          "  ; ^12th field i32 @72: mem & vectorisation stage memory/compute\n"
          "  ;   census class (matches frt_range_t.mem_class — 0 = unknown,\n"
@@ -556,7 +557,7 @@ void IrGen::emitProfileData() {
     out << "]\n";
   }
   // branch profile arrays: emit even when empty — the registration call
-  // references these unconditionally (programs with no if/while)
+  // references these unconditionally (even in programs with no if/while)
   {
     if (brProf.empty()) {
       out << "@__frt_prof_brhash = internal constant [0 x i64] zeroinitializer\n";
@@ -636,7 +637,7 @@ void IrGen::emitFooter() {
   // compile unit + subprograms (DWARF line tables)
   // Phase 3c: subprograms + per-module DIFiles are numbered dynamically
   // (902+ / 1902+) — every function in every module gets one, including
-  // generic instances and the synthesized test harness
+  // generic instances and the synthesised test harness
   out << "!900 = distinct !DICompileUnit(language: DW_LANG_C99, file: !901, "
          "producer: \"Penstock " << FRESHET_VERSION << "\", isOptimized: true, "
          "emissionKind: FullDebug)\n";

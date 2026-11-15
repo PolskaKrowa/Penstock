@@ -60,7 +60,7 @@ static std::vector<std::string> tokenizeSimple(const std::string& s) {
     size_t j = i;
     if (s[i] == '"') {
       // FLUME PATCH (upstream bug): string literals must survive macro
-      // re-tokenization as ONE token — the historical tokenizer split them
+      // re-tokenisation as ONE token — the historical tokeniser split them
       // into quote/word/word/quote tokens, so re-joining with single
       // spaces corrupted interiors (multi-space collapsing) and any
       // macro-using line that also contained `::` was re-emitted as
@@ -82,9 +82,9 @@ static std::vector<std::string> tokenizeSimple(const std::string& s) {
              s[j] == '_')) ++j;
     } else {
       ++j;
-      // multi-char puncts (FLUME PATCH: :: => &= |= ^= were missing and
-      // got split into single chars, breaking qualified names on
-      // macro-expanded lines)
+      // multi-char puncts (FLUME PATCH: `::`, `=>`, `&=`, `|=`, `^=` were
+      // missing and got split into single chars, breaking qualified names
+      // on macro-expanded lines)
       static const char* two[] = {"..","::","=>","==","!=","<=",">=","&&","||",
                                   "+=","-=","*=","/=","%=","->","<<",">>",
                                   "&=","|=","^="};
@@ -157,7 +157,7 @@ static std::string expandMacro(PpState& st, const Macro& m,
       out += (out.empty() ? "" : " ");
       std::vector<std::string> sub = tokenizeSimple(applyMacros(st, t, loc, depth + 1));
       for (auto& s2 : sub) { out += (out == "" ? "" : " ") ; }
-      // simple: expand recursively as text
+      // nested macro: expand recursively as text
       out += applyMacros(st, t, loc, depth + 1);
     } else {
       out += (out.empty() ? "" : " ") + t;
@@ -169,7 +169,7 @@ static std::string expandMacro(PpState& st, const Macro& m,
 static std::string applyMacros(PpState& st, const std::string& text,
                                const SrcLoc& loc, int depth) {
   // fast path: no macro name anywhere in the line — keep text verbatim
-  // (protects comments, strings, and formatting from re-tokenization)
+  // (protects comments, strings, and formatting from re-tokenisation)
   if (st.macros.empty()) return text;
   bool any = false;
   for (auto& kv : st.macros)
@@ -381,12 +381,6 @@ bool preprocess(const std::string& path, std::string& out,
   st.linkLibs = &linkLibs;
   processFile(st, path, out);
   return !st.failed;
-}
-
-// overload declared in common.h with Program* — adapt
-bool preprocessAdapt(const std::string& path, std::string& out,
-                     std::vector<std::string>& linkLibs) {
-  return preprocess(path, out, linkLibs);
 }
 
 uint64_t hashName(const std::string& s) {

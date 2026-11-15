@@ -2,11 +2,8 @@
 # make-parity entry points: `check` runs the regression suite (tests/run.sh),
 # `bench` the AoS/SoA/C benchmarks (tests/bench.sh).  Both export the
 # resolved LLVM_ROOT so penstock and the C baseline in bench.sh run against
-# the same backend the build used.  CTest also reserves a `test` target,
-# hence the name `check`.
-# -------------------------------------------------------- test/bench targets
-# Same entry points as the old `make test` / `make bench`.  CTest also
-# reserves a `test` target (ctest), hence the make-parity name `check`.
+# the same backend the build used.  CTest also reserves a `test` target
+# (ctest), hence the make-parity name `check`.
 # The suite drives bin/freshet-language-server (LSP navigation smoke test,
 # tests/run.sh), so `check` must depend on it too: a fresh-tree
 # `cmake --build build --target check` builds ONLY what `check` depends on,

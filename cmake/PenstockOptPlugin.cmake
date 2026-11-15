@@ -5,7 +5,6 @@
 # prefix is compiler-only, the official SDK for the same major is fetched
 # instead of silently dropping the target.  Disable with
 # -DPENSTOCK_BUILD_OPT_PLUGIN=OFF.
-# -------------------------------------------- LLVM opt loadable O4 plugin
 penstock_bootstrap_step("6" "OPT PLUGIN CONFIGURATION"
   "Checking for matching LLVM headers, CMake modules, libraries and opt")
 # When the selected clang prefix is compiler-only, download the official SDK

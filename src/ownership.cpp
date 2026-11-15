@@ -103,8 +103,8 @@ static std::string rootVarName(Expr* e) {
   return (e && e->k == Expr::IDENT) ? e->name : "";
 }
 
-// process a statement list; returns state map after the block.
-// defers collected: freed at scope exit in reverse order.
+// deferred frees collected during a block, applied at scope exit in
+// reverse order.
 struct Deferred {
   Expr* expr;
   SrcLoc loc;

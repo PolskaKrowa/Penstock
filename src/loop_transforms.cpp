@@ -186,7 +186,7 @@ static bool nameUniqueInFn(FnDecl* fn, const std::string& name) {
 }
 
 // ---------------------------------------------------- expression builders
-// synthesized nodes carry full sema fields (ty, sym, constant) so IRgen
+// synthesised nodes carry full sema fields (ty, sym, constant) so IRgen
 // lowers them like parser-produced ones; they introduce NO bindings
 // except freshLoopVar below.
 static Expr* mkInt(uint64_t v, Type* t, SrcLoc loc) {
@@ -226,7 +226,7 @@ static Expr* mkImin(Expr* a, Expr* b, Type* t, SrcLoc loc) {
 
 // fresh induction variable for tiling: appended to the function's sema
 // symbol table so IRgen emits its alloca (allocas are name-keyed from
-// fs->allSyms); the returned heap Sym only annotates synthesized IDENTs
+// fs->allSyms); the returned heap Sym only annotates synthesised IDENTs
 // (IRgen resolves by name through varAllocas).
 static Sym* freshLoopVar(FnDecl* fn, const std::string& base, Type* ty,
                          std::string* nameOut) {
@@ -378,7 +378,7 @@ static int licmInList(std::vector<Stmt*>& list, FnDecl* fn, int* budget) {
 // partition theorem models this premise).  Constant bounds only: the
 // trip distance is computed with __int128-checked arithmetic and the
 // rewritten bounds are exact literals, so no runtime bound arithmetic is
-// synthesized (dynamic-trip partial unrolling needs the interval
+// synthesised (dynamic-trip partial unrolling needs the interval
 // analysis to prove hi>=lo and is deliberately deferred).
 static int partialUnrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
@@ -888,7 +888,7 @@ static int interchangeInList(std::vector<Stmt*>& list, FnDecl* fn) {
 
 // ================================================================= Tile
 // §6.7 LoopTile.  Perfect rectangular nest only; bounds must be provably
-// inside [0, 2^62] so the synthesized ceil-shift arithmetic cannot wrap
+// inside [0, 2^62] so the synthesised ceil-shift arithmetic cannot wrap
 // (interval proof — audit §4.4 discipline: no unprovable arithmetic).
 // Tile edges are powers of two from the target profile (or --tile=I,J).
 // Boundary tiles are EXACT: the inner high bound is imin(tileEnd, R).
@@ -902,7 +902,7 @@ static int tileInList(std::vector<Stmt*>& list, FnDecl* fn) {
     if (!inner) continue;
 
     // interval proof that both ranges are within [0, 2^62]: keeps the
-    // synthesized (R + T-1) >> k and __tile*T arithmetic exact
+    // synthesised (R + T-1) >> k and __tile*T arithmetic exact
     auto safeRange = [](Stmt* loop) -> bool {
       Interval lo = intervalOf(loop->rangeLo);
       Interval hi = intervalOf(loop->rangeHi);
@@ -1059,8 +1059,8 @@ static int distributeInList(std::vector<Stmt*>& list, FnDecl* fn) {
     if (!exprTotalAndPure(s->rangeLo) || !exprTotalAndPure(s->rangeHi))
       continue;                                           // D4
 
-    // profitability (§6.8): fission pays when the fused body is big
-    // enough that register pressure / vectorisation granularity matters
+    // profitability (§6.8): fission pays when the unsplit loop body is
+    // big enough that register pressure / vectorisation granularity matters
     if (wb.nodes < 24) continue;
 
     std::vector<BodyInfo> per(bodyList->size());
@@ -1268,7 +1268,8 @@ static int unrollJamInList(std::vector<Stmt*>& list, FnDecl* fn) {
       remL->fn = fn;
       remL->depth = outer->depth;
       remL->body = cloneStmt(inner, {});
-      // inner->body is MOVED into jamBody clones; remainder gets a clone
+      // the jammed copies are clones of inner->body (the original nest is
+      // replaced); the remainder gets a clone of the whole inner nest
       repairParentsT(remL, outer->parent, fn);
       replacement.push_back(remL);
     }

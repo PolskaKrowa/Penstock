@@ -1,5 +1,6 @@
-// Freshet Sema — symbol tables, declaration binding (struct names resolved
-// here from parser's tyName strings), literal type adoption, purity analysis.
+// Freshet Sema — symbol tables, declaration binding (tyName encodings are
+// resolved through generics.cpp's binder), literal type adoption. Effect /
+// purity analysis lives in effects.cpp.
 #include "common.h"
 #include <functional>
 
@@ -209,7 +210,7 @@ static void semaParfor(FnSema* fs, Stmt* s) {
            s->loc);
     }
   }
-  // iterate var is a fresh immutable usize in body scope
+  // induction var is a fresh immutable usize in body scope
   fs->push();
   Sym iv;
   iv.k = Sym::VAR; iv.name = s->pvar; iv.ty = Type::simple(Type::USIZE);
@@ -252,7 +253,8 @@ static void semaParfor(FnSema* fs, Stmt* s) {
                c.loc);
         }
         fs->reductionVars.insert(c.var);
-        // init value check: + requires 0, * requires 1, min/max any
+        // reduction init-value check (+ needs 0, * needs 1) is done in
+        // checks_parfor.cpp (F0308/F0309)
         break;
       }
       case ParForClause::THREADS: {
@@ -289,12 +291,8 @@ static void semaParfor(FnSema* fs, Stmt* s) {
   fs->loops.pop_back();
   fs->parforDepth = prevDepth;
 
-  // post-body race analysis: any var written at depth < current that is not
-  // a reduction var → F0307 (done in checks_parfor for full precision,
-  // but quick check here captures obvious cases)
-  for (auto& [v, locs] : fs->parforWrites) {
-    (void)v; (void)locs;
-  }
+  // post-body race analysis (F0307) is done in checks_parfor.cpp, which
+  // sees the fully typed body
 
   fs->pop();
 }
@@ -540,8 +538,6 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       fs->loops.pop_back();
       break;
     }
-    // Phase 1d: variant context flows into assignments `x = Red;` where
-    // x: Color
     case Stmt::FOR: {
       // declare induction var as mut local of bound type
       fs->push();
@@ -640,7 +636,7 @@ bool semaProgram(Program* p, bool requireMain) {
   S = new SemaState();
   S->prog = p;
 
-  // 1. register structs (two passes: register names first so ordering free)
+  // 1. register structs (two passes: names first, so declaration order is free)
   for (auto* sd : p->structs) registerStruct(sd);
   // 1b. register enums (Phase 1d); generic enum templates are registered
   // but NOT laid out (only instantiations have concrete layouts)

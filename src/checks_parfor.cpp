@@ -84,9 +84,6 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
   return impure;
 }
 
-// forEachExpr helper local to this file (checks.cpp has a static one)
-static void forEachExprAdapter(Expr* e, const std::function<void(Expr*)>& f);
-
 // ---------------------------------------------------------------- nested R2
 // Returns true if inner parfor bounds are independent of outer var
 // (rectangular — eligible for collapse).
@@ -169,7 +166,7 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
     if (c.k == ParForClause::REDUCTION) safe.insert(c.var);
   safe.insert(pf->pvar);
 
-  // collapsed inner parfor: serialized inside the outer chunk fn, so the
+  // collapsed inner parfor: serialised inside the outer chunk fn, so the
   // ENCLOSING parfors' reduction vars are written by one thread at a time
   if (pf->collapsed) {
     Stmt* q = pf->parent;
@@ -292,7 +289,8 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
   }
 }
 
-// ---- shared traversal adapters (non-static so both this file sees them)
+// ---- traversal adapters local to this file (checks.cpp has its own
+// ---- static copies of the same walks)
 static void forEachExprAdapter(Expr* e, const std::function<void(Expr*)>& f) {
   if (!e) return;
   f(e);

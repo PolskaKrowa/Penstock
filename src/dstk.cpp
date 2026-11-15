@@ -41,7 +41,7 @@
 // copied into a chunk function that other threads execute — a
 // cross-thread reference into the dispatching thread's private region
 // (goose: workers are separate programs with private stacks).  A
-// COLLAPSED (rectangular, serialized) inner parfor runs inside the same
+// COLLAPSED (rectangular, serialised) inner parfor runs inside the same
 // chunk function and thread: its body is part of the enclosing walk and
 // uses the enclosing stacks freely.
 //
@@ -189,7 +189,7 @@ struct Layout {
   }
 
   // `inChunk` mirrors IRgen's curFnIsChunkFn: inside a chunk function a
-  // `collapsed`-flagged parfor is serialized into the current walk; in a
+  // `collapsed`-flagged parfor is serialised into the current walk; in a
   // plain function body every parfor dispatches its own region.
   void walkStmt(Stmt* s, int nodeId, int& next, bool inChunk) {
     if (!s) return;
@@ -243,7 +243,7 @@ struct Layout {
         walkExpr(s->phi, nodeId, next);
         for (auto& c : s->clauses) walkExpr(c.e, nodeId, next);
         if (inChunk && s->collapsed) {
-          // serialized into this chunk fn — its scopes release indices
+          // serialised into this chunk fn — its scopes release indices
           // here, exactly like a block
           int save = next;
           walkStmt(s->body, nodeId, next, inChunk);
@@ -284,7 +284,7 @@ struct RootWalk {
   Program* prog;
   FnDecl* fn = nullptr;         // the owning FUNCTION (escape attribution)
   const Stmt* region = nullptr; // non-null: this context is a region body
-  bool inChunk = false;         // inside a chunk fn (serialized parfors ok)
+  bool inChunk = false;         // inside a chunk fn (serialised parfors ok)
   bool diagnose = false;        // emit F0926/F0927 (final walk only)
   std::vector<Stmt*> scope;     // enclosing BLOCK chain (frames are roots)
   std::map<std::string, Roots> roots;
@@ -694,7 +694,7 @@ struct RootWalk {
         walkExpr(s->phi);
         for (auto& c : s->clauses) walkExpr(c.e);
         if (inChunk && s->collapsed) {
-          // serialized into this chunk fn: same thread, same stacks —
+          // serialised into this chunk fn: same thread, same stacks —
           // the body's own BLOCK opens/closes its scopes
           walkStmt(s->body);
           return;
@@ -986,7 +986,7 @@ int runDstkAnalysis(Program* p) {
     w.fn = fn;
     w.inChunk = false;
     w.diagnose = true;
-    w.esc = &esc[fn];   // events here feed nothing further; kept for shape
+    w.esc = &esc[fn];   // events here feed nothing further; kept so this walk mirrors the fixpoint walk
     w.escTab = &esc;
     w.scope = {fn->body};
     rootWalkInitParams(w, fn);
