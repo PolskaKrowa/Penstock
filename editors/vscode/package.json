@@ -31,7 +31,7 @@
           "freshet"
         ],
         "extensions": [
-          ".fsh"
+          ".fsht"
         ],
         "configuration": "./language-configuration.json"
       }

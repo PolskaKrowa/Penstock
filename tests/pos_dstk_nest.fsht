@@ -1,0 +1,36 @@
+// %sp threading, nested regions (goose port v2): a DYNAMIC-bounds inner
+// parfor inside a stack-using outer body dispatches from the outer chunk
+// fn — the inner region's sp0 is the outer chunk fn's first-free index,
+// and each executing thread bumps its own per-thread array.  The inner
+// body may reference only PLAIN values of the enclosing chunk fn (a
+// stack binding of the enclosing context would be a cross-thread
+// reference — F0926); its own stack_allocs are fine.  A RECTANGULAR
+// inner parfor (collapsed) serializes into the same chunk fn and uses
+// the enclosing stacks freely.
+fn helper(k: usize) -> f64 {
+    let p: *f64 = stack_alloc(f64, k + 1);
+    let mut t: f64 = 0.0;
+    for (i in 0..(k + 1)) { p[i] = (i as f64) + 1.0; }
+    for (i in 0..(k + 1)) { t += p[i]; }
+    return t;
+}
+
+fn main() {
+    let mut t: f64 = 0.0;
+    parfor (i in 0..4) [reduction(+:t)] {
+        let w: *f64 = stack_alloc(f64, 2);
+        w[0] = (i as f64);
+        w[1] = helper(i);               // stack-using callee
+        let w0: f64 = w[0];             // plain copy: safe to capture
+        parfor (j in 0..(i + 1)) [reduction(+:t)] {
+            let v: *f64 = stack_alloc(f64, 2);   // INNER region-local
+            v[0] = (j as f64) * 10.0;
+            v[1] = w0 + v[0];
+            t += v[1];
+        }
+        t += w[1];
+        // rectangular inner: serialized into THIS chunk fn — may use w
+        parfor (j in 0..3) { let q: *f64 = stack_alloc(f64, 1); q[0] = w[1]; t += q[0]; }
+    }
+    print_f64(t, 2); println();
+}

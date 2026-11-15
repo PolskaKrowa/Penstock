@@ -4,7 +4,7 @@ name = "projtest"
 
 [target]
 type = "bin"
-src = ["main.fsh"]
+src = ["main.fsht"]
 
 [build]
 opt = 2

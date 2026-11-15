@@ -1,0 +1,19 @@
+// checked-build trap regression (found while porting goose's BCE): `j` is
+// unprovable, so the check stays and must FIRE at runtime even at -O2.
+// The effect summary used to omit that check-emitting functions may not
+// return, so the backend deleted the failing check's trap as
+// side-effect-free dead code and the program printed 0.00 instead of
+// aborting.
+fn pick(s: Span<f64>, j: usize) -> f64 {
+    return s[j];
+}
+
+fn main() {
+    let a: *f64 = malloc(f64, 4);
+    let s = span(a, 4);
+    a[0] = 1.0; a[1] = 2.0; a[2] = 3.0; a[3] = 4.0;
+    let mut k: usize = 0;
+    k = (k * 3 + 201) % 1000;   // 201: out of range at runtime
+    print_f64(pick(s, k), 2); println();
+    free(a);
+}

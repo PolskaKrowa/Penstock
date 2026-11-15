@@ -1,6 +1,6 @@
 // Freshet source formatter — Phase 4 (report §10.2).
 //
-// `penstock fmt <file.fsh>` / `penstock fmt --check <file.fsh>`
+// `penstock fmt <file.fsht>` / `penstock fmt --check <file.fsht>`
 //
 // Design (compiler-aware, token-level):
 //   * A dedicated tokenizer re-reads the source keeping COMMENTS as

@@ -99,7 +99,7 @@ def main():
         tries += 1
         rng = random.Random(seed0 * 1000000 + tries)
         src = gen(rng)
-        path = "%s/f%05d.fsh" % (OUT, made)
+        path = "%s/f%05d.fsht" % (OUT, made)
         with open(path, "w") as f:
             f.write(src)
         if not reaches_irgen(path):

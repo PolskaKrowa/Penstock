@@ -1,0 +1,7 @@
+// goose-ported data stacks (F0927) legality: data-stack memory is freed by
+// its scope, never by free() — the escape/misuse analysis must reject this.
+fn main() {
+    let p: *f64 = stack_alloc(f64, 4);
+    p[0] = 1.0;
+    free(p);
+}

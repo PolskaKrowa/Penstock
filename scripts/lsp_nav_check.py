@@ -42,7 +42,7 @@ fn nested_scope() {
 """
 # line 4: `    let total: i64 = add(2, 3);`   -> add at [21,24)
 # line 6: `    print_i64(other); println();`  -> other at [15,20)
-uri = "file:///tmp/lsp_nav_check.fsh"
+uri = "file:///tmp/lsp_nav_check.fsht"
 
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
       "params": {"capabilities": {}}})

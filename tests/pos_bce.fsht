@@ -1,0 +1,30 @@
+// goose-ported BCE (F0923): every bounds check below is PROVEN and elided
+// (checked build): loop ranges against span construction (`span(a, n)`
+// gives len == n), assert-seeded length facts, a parfor range, and a
+// slice whose bounds follow from the asserted length.  The program must
+// print exactly what the --no-bce differential prints.
+fn work(s: Span<f64>, out: Span<f64>) -> f64 {
+    let m: usize = 64;
+    assert(s.len == m);
+    assert(out.len == m);
+    let mut t: f64 = 0.0;
+    for (i in 0..m) { t += s[i]; }
+    for (i in 0..m) { out[i] = s[i] * 2.0; }
+    return t;
+}
+
+fn main() {
+    let n: usize = 64;
+    let a: *f64 = malloc(f64, n);
+    let b: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = (i as f64) + 1.0; b[i] = 0.5; }
+    let s = span(a, n);
+    let o = span(b, n);
+    let mut t2: f64 = 0.0;
+    parfor (i in 0..n) [reduction(+:t2)] { t2 = t2 + o[i] + s[i]; }
+    let h = s[16..n];
+    print_f64(work(s, o), 2); println();
+    print_f64(t2, 2); println();
+    print_f64(h[4], 2); println();
+    free(a); free(b);
+}

@@ -10,7 +10,7 @@
 //       same-named decls in different modules coexist.
 //
 //   * Multi-file compilation (§6.2):
-//       `penstock main.fsh util.fsh` — every input is a module of one
+//       `penstock main.fsht util.fsht` — every input is a module of one
 //       program.  `import` is resolved transitively with cycle
 //       detection; search order: directory of the entry file, `-I` dirs,
 //       the builtin modules directory (where the shipped `fsh` module
@@ -114,7 +114,7 @@ static std::string dirNameOf(const std::string& p) {
   return (s == std::string::npos) ? "." : p.substr(0, s);
 }
 
-// "src/geometry-utils.fsh" -> "geometry_utils" (a valid module ident)
+// "src/geometry-utils.fsht" -> "geometry_utils" (a valid module ident)
 static std::string fileStemModule(const std::string& p) {
   std::string base = p;
   size_t s = base.find_last_of('/');
@@ -148,7 +148,7 @@ std::string builtinModulesDir() {
     exe + "/../share/penstock/modules",
   };
   for (auto& c : cands) {
-    if (fileReadable(c + "/fsh.fsh")) { cached = c; return cached; }
+    if (fileReadable(c + "/fsh.fsht")) { cached = c; return cached; }
   }
   cached = cands[0];
   return cached;
@@ -221,15 +221,15 @@ struct ModuleLoader {
       return known->second;   // already loaded
     }
     for (auto& d : searchDirs) {
-      const std::string cands[] = { d + "/" + name + ".fsh",
-                                    d + "/" + name + "/mod.fsh" };
+      const std::string cands[] = { d + "/" + name + ".fsht",
+                                    d + "/" + name + "/mod.fsht" };
       for (auto& c : cands) {
         if (!fileReadable(c)) continue;
         return loadFile(c, linkLibs);
       }
     }
     std::string searched;
-    for (auto& d : searchDirs) searched += "\n  " + d + "/" + name + ".fsh";
+    for (auto& d : searchDirs) searched += "\n  " + d + "/" + name + ".fsht";
     diag(Diag::Error, Code::Import,
          "module '" + name + "' not found — searched:" + searched +
          "\n  (add the directory with -I<dir>, or create the module file)",
@@ -342,7 +342,7 @@ std::string irGlobalSymbol(GlobalVar* g) {
 //   name = "hello"
 //   [target]
 //   type = "bin"              # bin | static-lib | shared-lib
-//   src  = ["main.fsh"]       # entry modules (imports pull the rest)
+//   src  = ["main.fsht"]       # entry modules (imports pull the rest)
 //   [build]
 //   opt = 3                   # 0..4
 //   threads = 0
@@ -406,9 +406,9 @@ bool loadProjectManifest(const std::string& path) {
       continue;
     }
     if (section == "target" && key == "src") {
-      // ["main.fsh", "other.fsh"]
+      // ["main.fsht", "other.fsht"]
       if (val.front() != '[' || val.back() != ']') {
-        fail("src must be a list: src = [\"main.fsh\"]");
+        fail("src must be a list: src = [\"main.fsht\"]");
         return false;
       }
       std::string item;
@@ -460,8 +460,8 @@ bool loadProjectManifest(const std::string& path) {
     fail("unknown manifest key '" + key + "' in [" + section + "]");
   }
   if (srcs.empty()) {
-    // default entry: main.fsh beside the manifest
-    srcs.push_back(dir + "main.fsh");
+    // default entry: main.fsht beside the manifest
+    srcs.push_back(dir + "main.fsht");
   }
   for (auto& s : srcs) {
     if (!fileReadable(s)) {

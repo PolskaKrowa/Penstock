@@ -520,6 +520,9 @@ Expr* cloneExpr(const Expr* e, const std::map<Sym*, Expr*>& substBySym) {
   n->globalRef = e->globalRef;
   n->callee = e->callee;
   n->fieldIdx = e->fieldIdx;
+  // BCE (goose port): a proven-safe index/slice site must stay proven-safe
+  // in every copy (passes that clone trees must not resurrect checks).
+  n->bceSafe = e->bceSafe;
   return n;
 }
 

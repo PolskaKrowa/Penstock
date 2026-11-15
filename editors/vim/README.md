@@ -1,6 +1,6 @@
 # Freshet support for Vim
 
-The plugin provides native `.fsh` filetype detection, syntax highlighting and basic editing defaults. It works in Vim without an LSP plugin. Its filetype detector explicitly overrides Vim's built-in `.fsh` mapping, which is for a different language.
+The plugin provides native `.fsht` filetype detection, syntax highlighting and basic editing defaults. It works in Vim without an LSP plugin. Freshet sources use the `.fsht` extension (renamed from `.fsh`, which clashed with GLSL fragment shader files that Vim maps to its built-in `glslf` filetype); the detector uses an unconditional `set filetype=` so detection never depends on filetype precedence.
 
 ## Install
 
@@ -11,7 +11,7 @@ mkdir -p ~/.vim/pack/penstock/start/freshet
 cp -R editors/vim/* ~/.vim/pack/penstock/start/freshet/
 ```
 
-Restart Vim and open a `.fsh` file. Check `:set filetype?` — it should report `filetype=freshet`.
+Restart Vim and open a `.fsht` file. Check `:set filetype?` — it should report `filetype=freshet`.
 
 ## Optional language-server features
 

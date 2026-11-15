@@ -96,7 +96,14 @@ namespace freshet {
   X(MemReuse,         "F0919", "mem-reuse",          "allocation reused instead of freed and reallocated", true) \
   X(Batch,            "F0920", "batch",              "operations batched for vectorisation", true) \
   X(VecPlan,          "F0921", "vec-plan",           "separable-routine batchability report", true) \
-  X(SmtPair,          "F0922", "smt-pair",           "memory/compute parfor regions paired on SMT siblings", true)
+  X(SmtPair,          "F0922", "smt-pair",           "memory/compute parfor regions paired on SMT siblings", true) \
+  X(Bce,              "F0923", "bce",                 "bounds checks proven safe and elided", true) \
+  X(Checkfree,        "F0924", "checkfree",           "checkfree function keeps a bounds check", false) \
+  X(DstkLayout,       "F0925", "dstk-layout",         "stack_alloc data-stack layout", true) \
+  X(DstkEscape,       "F0926", "dstk-escape",         "stack allocation escapes its scope", false) \
+  X(DstkMisuse,       "F0927", "dstk-misuse",         "invalid use of data-stack memory", false) \
+  X(SumRed,           "F0928", "sum-reduction",       "float sum reduction regrouped for vectorisation", true) \
+  X(Basecase,         "F0929", "basecase",            "recursive base case inlined at call site", true)
 
 enum class Code {
 #define X(name, id, slug, title, remark) name,

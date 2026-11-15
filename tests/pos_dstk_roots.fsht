@@ -1,0 +1,38 @@
+// Static-root lifetime proofs (goose reference.md §12, "a slice carries
+// a static root"): a value that references data-stack memory carries the
+// ROOT SET of the stack_alloc bindings it points into, and a store is
+// judged by the destination's roots:
+//   * holder[0].v = span(data, 4)  — storing a rooted span into stack
+//     memory whose root dies with the source root (same scope): legal;
+//   * view = span(data, 4)         — re-binding a same-scope local: legal;
+//   * sum(view) / sum(span(data,4)) — passing rooted spans to a callee
+//     whose param-escape summary says NO (it only reads through them):
+//     PROVEN safe, not merely allowed.
+struct Cell { v: Span<f64> }
+
+fn sum(s: Span<f64>) -> f64 {
+    let mut t: f64 = 0.0;
+    for (i in 0..s.len) { t += s[i]; }
+    return t;
+}
+
+fn main() {
+    let data: *f64 = stack_alloc(f64, 4);
+    for (i in 0..4) { data[i] = (i as f64) + 1.0; }
+
+    // (a) through-stack-memory store, same-scope destination memory
+    let holder: *Cell = stack_alloc(Cell, 2);
+    holder[0].v = span(data, 4);     // holder's root dies with data's
+    holder[1].v = span(data, 2);
+
+    // (b) same-scope local re-binding
+    let mut view: Span<f64> = span(data, 2);
+    view = span(data, 4);
+
+    // (c) non-escaping callee: the interprocedural summary proves the
+    // parameter never reaches memory that outlives the call
+    print_f64(sum(view), 1); println();              // 10.0
+    print_f64(sum(holder[0].v), 1); println();       // 10.0
+    print_f64(sum(span(data, 2)), 1); println();     // 3.0
+    print_f64(holder[1].v[1], 1); println();         // 2.0
+}

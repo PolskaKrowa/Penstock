@@ -136,7 +136,11 @@ set(FRONTEND_SOURCES
   src/loop_analysis.cpp # audit §6.1/§6.3/§6.10: typed const fold, ranges, parfor advisor
   src/loop_transforms.cpp # audit §6.4–§6.9: LICM/partial-unroll/peel/interchange/tile/distribute/unroll-and-jam
   src/mem_stage.cpp # mem & vectorisation stage: alloc-churn reuse, mov-min, SMT parfor pairing
-  src/vector_plan.cpp) # mem & vectorisation stage: separable-routine analysis + SLP batching
+  src/vector_plan.cpp # mem & vectorisation stage: separable-routine analysis + SLP batching
+  src/bce.cpp # goose port: bounds-check elimination (goose src/bce.h)
+  src/dstk.cpp # goose port: data-stack memory model (goose codegen_stacks.h)
+  src/fp_reduction.cpp # goose port: bit-identical blocked FP reductions (optimize_loops.h)
+  src/basecase.cpp) # goose port: recursive base-case inlining (optimize_basecase.h)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockTargets.cmake")
 
@@ -161,7 +165,7 @@ message(STATUS "    Host C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "    Penstock binary  : ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock")
 if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   message(STATUS "    Bootstrap binary: ${CMAKE_CURRENT_SOURCE_DIR}/bin/penstock-bootstrap")
-  message(STATUS "    Superopt source : src/superopt.fsh (compiled during final link)")
+  message(STATUS "    Superopt source : src/superopt.fsht (compiled during final link)")
 endif()
 if(PENSTOCK_OPT_PLUGIN_BUILT)
   message(STATUS "    O4 opt plugin    : ${CMAKE_CURRENT_BINARY_DIR}/plugins/opt/PenstockOptPlugin.so")

@@ -80,7 +80,7 @@ def gen_program(rng, idx):
 
 
 def run_config(tmp, src_text, name, flags):
-    src = os.path.join(tmp, name + ".fsh")
+    src = os.path.join(tmp, name + ".fsht")
     exe = os.path.join(tmp, name + ".bin")
     with open(src, "w") as f:
         f.write(src_text)
@@ -120,7 +120,7 @@ def main():
                 print("  -O0     :", repr(base[1][:200]))
                 print("  -O2+xD  :", repr((opt[1] if opt[0] == "OK" else opt)
                                           [:200]))
-                with open("mismatch_%d.fsh" % idx, "w") as f:
+                with open("mismatch_%d.fsht" % idx, "w") as f:
                     f.write(text)
                 if bad >= 3:
                     break

@@ -4,6 +4,7 @@
 // (clang O0 output on LLVM 19-22) — textual concatenation stays
 // collision-free with headroom for future runtime attribute groups.
 #include "irgen.h"
+#include "dstk.h"
 
 namespace freshet {
 
@@ -47,7 +48,7 @@ declare void @frt_test_setup()
 declare i32 @frt_test_run({ ptr, i64 }, ptr)
 declare i32 @frt_test_summary()
 ; Phase 4 (report §4.7/§9): args / env / file I/O over str views — the
-; Freshet-facing wrappers live in the shipped `fsh` module (modules/fsh.fsh)
+; Freshet-facing wrappers live in the shipped `fsh` module (modules/fsh.fsht)
 declare i64 @frt_args_count()
 declare { ptr, i64 } @frt_args_get(i64)
 declare { ptr, i64 } @frt_env_get({ ptr, i64 })
@@ -69,6 +70,7 @@ declare void @frt_fmt_i64(ptr, i64)
 declare ptr @frt_str_to_cstr(ptr, i64)
 ; Phase 1c (report §4.1): bounds-check trap for checked builds
 declare void @frt_bound_trap(i64, i64)
+declare void @frt_dstk_init(ptr, i32)
 declare void @llvm.prefetch.p0(ptr, i32, i32, i32)
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
@@ -259,8 +261,13 @@ std::string IrGen::fnAttrBody(FnDecl* f) {
   const Effects& e = f->eff;
   std::string mem;
   if (!e.allocates && !e.freesMem && !e.io && !e.unknownCall) {
-    bool r = e.anyRead(), w = e.anyWrite();
-    bool other = e.readsOther || e.writesOther;
+    // data-stack bumps (goose port) read/write the thread-local tops
+    // array — real memory, so a stacks-only fn still claims
+    // memory(readwrite), never memory(none)
+    bool r = e.anyRead() || e.readsStack;
+    bool w = e.anyWrite() || e.writesStack;
+    bool other = e.readsOther || e.writesOther || e.readsStack ||
+                 e.writesStack;
     if (!r && !w)            mem = "memory(none)";
     else if (!w)              mem = other ? "memory(read)" : "memory(argmem: read)";
     else if (!r)              mem = other ? "memory(write)" : "memory(argmem: write)";
@@ -331,6 +338,10 @@ int IrGen::vectorizeLoopMeta(bool userHint) {
 bool irgenProgram(Program* p, const std::string& outLl) {
   G = new IrGen();
   G->prog = p;
+  // data stacks (goose port): the pre-irgen analysis (runDstkAnalysis)
+  // already assigned every stack_alloc site its index and computed the
+  // per-function needs/needsSp and the program total N
+  (void)dstk::g_total;
 
   // Phase 3c (report §10.3): register a DISubprogram for EVERY function
   // up front — functions without branches (straight-line bodies) would
@@ -414,7 +425,7 @@ bool irgenProgram(Program* p, const std::string& outLl) {
     out << "%enum." << ed->name << " = type { i64, [" << ed->paySize
         << " x i8] }\n";
   }
-  out << "%frt.range = type { ptr, i64, i64, i64, i32, i32, i32, i32, i64, ptr, i64, i32 }\n"
+  out << "%frt.range = type { ptr, i64, i64, i64, i32, i32, i32, i32, i64, ptr, i64, i32, i64 }\n"
          "  ; ^8th field i32 @44: Phase 5 @reproducible flag (matches\n"
          "  ;   frt_range_t.repro — 1 = fixed-block deterministic schedule)\n"
          "  ; ^10th field i64: §6.12 per-iteration body-cost class (matches\n"
@@ -423,8 +434,22 @@ bool irgenProgram(Program* p, const std::string& outLl) {
          "  ;   census class (matches frt_range_t.mem_class — 0 = unknown,\n"
          "  ;   1 = memory-bound, 2 = compute-bound, 3 = balanced); drives\n"
          "  ;   the runtime's SMT sibling lane routing when\n"
-         "  ;   FRT_SMT_INTERLEAVE=1\n";
+         "  ;   FRT_SMT_INTERLEAVE=1\n"
+         "  ; ^13th field i64 @80: the dispatching context's first-free data\n"
+         "  ;   stack index (goose port: %sp threaded through frt_parfor).\n"
+         "  ;   The runtime copies it into every task and passes it as the\n"
+         "  ;   chunk function's hidden 4th argument — each executing thread\n"
+         "  ;   addresses the region's stacks at [sp0, sp0+need) of its own\n"
+         "  ;   per-thread tops array; 0 for regions that use no stacks\n";
   out << "@__frt_env_threads = external global i32\n";
+  // data stacks (goose port): the per-thread array of stack tops.  The
+  // size is the program total N — known only after every function is
+  // emitted (a callee's stacks sit above its caller's), so the array is
+  // emitted with a placeholder that is patched before the module is
+  // written (the @@ARGS@@ PGO registration uses the same trick).
+  if (dstk::g_total > 0)
+    out << "@frt.dstk.tops = thread_local global [@@DSTKN@@ x ptr] "
+           "zeroinitializer, align 8\n";
   out << "\n";
 
   // ---------------- globals
@@ -466,6 +491,16 @@ bool irgenProgram(Program* p, const std::string& outLl) {
 
   // ---------------- profile data globals + registration patch
   std::string body = out.str();
+  // data stacks (goose port): patch the placeholder stack count now that
+  // every function has been emitted (globals, GEPs and the lazy-init
+  // call all reference it)
+  if (dstk::g_total > 0) {
+    const std::string ph = "@@DSTKN@@";
+    const std::string n = std::to_string(dstk::g_total);
+    size_t pos;
+    while ((pos = body.find(ph)) != std::string::npos)
+      body.replace(pos, ph.size(), n);
+  }
   if (g_opts.profile) {
     out.str("");
     out.clear();

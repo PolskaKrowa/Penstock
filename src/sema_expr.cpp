@@ -83,7 +83,7 @@ static std::string narrowingCastMessage(Type* from, Type* to) {
 
 static bool isBuiltinCall(const std::string& n) {
   static const std::set<std::string> b = {
-    "malloc", "free", "give",
+    "malloc", "free", "give", "stack_alloc",
     "print", "print_f64", "print_i64", "print_u64", "println",
     "memcpy", "memset",
     "soa_new", "soa_free", "soa_len", "soa_field_ptr",
@@ -178,6 +178,36 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!argT(1) || !argT(1)->isInt()) {
       diag(Diag::Error, Code::Args, "malloc count must be integer",
            e->loc);
+    }
+    e->mallocElem = elem;
+    return Type::ptr(elem);
+  }
+  if (n == "stack_alloc") {
+    // data stacks (goose port): stack_alloc(T, n) — like malloc's first
+    // arg, a type name; the allocation dies with the binding's block
+    // scope (watermark restore), never free()d
+    if (!need(2)) return Type::ptr(Type::simple(Type::U8));
+    Expr* tArg = e->args[0];
+    Type* elem = nullptr;
+    if (tArg->k == Expr::IDENT) {
+      elem = typeFromIdent(tArg->name);
+      if (!elem) {
+        StructDef* sd = findStructDef(tArg->name);
+        if (sd) elem = Type::structOf(sd);
+      }
+    }
+    if (!elem) {
+      diag(Diag::Error, Code::Args,
+           "stack_alloc's first argument must be a type", e->loc);
+      return Type::ptr(Type::simple(Type::U8));
+    }
+    if (elem->k == Type::VOID || elem->k == Type::SOA) {
+      diag(Diag::Error, Code::Args,
+           "cannot stack_alloc " + typeToString(elem), e->loc);
+    }
+    if (!argT(1) || !argT(1)->isInt()) {
+      diag(Diag::Error, Code::Args,
+           "stack_alloc count must be integer", e->loc);
     }
     e->mallocElem = elem;
     return Type::ptr(elem);
@@ -745,9 +775,10 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         return bad("unknown intrinsic: " + e->name);
       }
       if (isBuiltinCall(e->name)) {
-        // malloc(T, n) / soa_new(Struct, n): first arg is a type name, not
-        // an expression — skip expression typing for it
-        size_t skipTypeArg = (e->name == "malloc" || e->name == "soa_new") ? 1 : 0;
+        // malloc(T, n) / soa_new(Struct, n) / stack_alloc(T, n): first arg
+        // is a type name, not an expression — skip expression typing for it
+        size_t skipTypeArg = (e->name == "malloc" || e->name == "soa_new" ||
+                              e->name == "stack_alloc") ? 1 : 0;
         for (size_t ai = 0; ai < e->args.size(); ++ai) {
           if (ai < skipTypeArg) {
             e->args[ai]->ty = Type::simple(Type::U64);

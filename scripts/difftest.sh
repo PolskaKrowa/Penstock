@@ -14,7 +14,7 @@
 #   memstage      -O2 --mem-stage --batch-ops --vector-plan \
 #                     --smt-interleave                   (mem & vec stage)
 #
-# usage: scripts/difftest.sh [test files...]   (default: tests/pos_*.fsh)
+# usage: scripts/difftest.sh [test files...]   (default: tests/pos_*.fsht)
 set -u
 cd "$(dirname "$0")/.."
 PEN=bin/penstock
@@ -25,7 +25,7 @@ pass=0; fail=0; skip=0
 if [ ! -x "$PEN" ]; then echo "difftest: $PEN not built" >&2; exit 1; fi
 
 files=("$@")
-if [ ${#files[@]} -eq 0 ]; then files=(tests/pos_*.fsh); fi
+if [ ${#files[@]} -eq 0 ]; then files=(tests/pos_*.fsht); fi
 
 run_cfg() {  # name, flags...
   local name=$1; shift
@@ -36,7 +36,7 @@ run_cfg() {  # name, flags...
 }
 
 for src in "${files[@]}"; do
-  base=$(basename "$src" .fsh)
+  base=$(basename "$src" .fsht)
   a=$(run_cfg base -O0)
   [ "$a" = "COMPILE-FAIL(-O0)" ] && { skip=$((skip+1)); continue; }
   b=$(run_cfg def -O2)

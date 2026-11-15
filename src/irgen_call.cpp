@@ -1,6 +1,7 @@
 // Freshet IRgen — call lowering: user fns, builtins, math, intrinsics,
 // soa_new/soa_free, profiling register.
 #include "irgen.h"
+#include "dstk.h"
 
 namespace freshet {
 
@@ -100,6 +101,49 @@ std::string genCall(Expr* e) {
     std::string p = genExpr(e->args[0]);
     G->out << "  call void @frt_free(ptr " << p << ")\n";
     return "";
+  }
+  if (n == "stack_alloc") {
+    // data stacks (goose port): the bump.  The stack index was assigned
+    // by the pre-irgen analysis (dstk.cpp), mirroring this emission's
+    // BLOCK scoping; the returned pointer IS the base the scope-exit
+    // restore stores back.  bytes = count * sizeof(T) rounded up to 16 —
+    // every bump keeps the per-stack top 16-aligned, and growth never
+    // checks a capacity: the reservation's guard page catches pathological
+    // overflow (the runtime reports it and exits).
+    int k = dstk::siteIndex(e);
+    if (k < 0) return "";   // diagnosed by the analysis (non-let/parfor)
+    Type* elem = e->mallocElem;
+    uint64_t sz = typeSizeOf(elem);
+    std::string cnt = genExpr(e->args[1]);
+    if (e->args[1]->ty && e->args[1]->ty->bits() < 64)
+      cnt = genCastInline(e->args[1], Type::simple(Type::I64), cnt);
+    std::string bytes = G->t();
+    G->out << "  " << bytes << " = mul i64 " << cnt << ", " << sz << "\n";
+    std::string b15 = G->t();
+    G->out << "  " << b15 << " = add i64 " << bytes << ", 15\n";
+    std::string aligned = G->t();
+    G->out << "  " << aligned << " = and i64 " << b15 << ", -16\n";
+    // slot = &@frt.dstk.tops[sp + k]  (operand numbered before its user —
+    // LLVM textual IR requires ascending definition order)
+    std::string ix;
+    if (G->curSpExpr != "0") {
+      ix = G->t();
+      G->out << "  " << ix << " = add i64 " << G->curSpExpr << ", " << k
+             << "\n";
+    }
+    std::string slot = G->t();
+    G->out << "  " << slot << " = getelementptr [@@DSTKN@@ x ptr], ptr "
+           << "@frt.dstk.tops, i64 0, i64 " << (ix.empty() ? std::to_string(k) : ix)
+           << "\n";
+    std::string top = G->t();
+    G->out << "  " << top << " = load ptr, ptr " << slot << "\n";
+    std::string newTop = G->t();
+    G->out << "  " << newTop << " = getelementptr i8, ptr " << top
+           << ", i64 " << aligned << "\n";
+    G->out << "  store ptr " << newTop << ", ptr " << slot << "\n";
+    // the enclosing BLOCK's closing brace restores this watermark
+    G->dstkRestores.push_back({slot, top});
+    return top;
   }
   if (n == "memcpy" || n == "memset") {
     std::string d = genExpr(e->args[0]);
@@ -589,6 +633,25 @@ std::string genCall(Expr* e) {
   bool retPair = f->ret->isPair();
   bool retAddrAgg = f->ret->k == Type::STRUCT || f->ret->k == Type::ENUM ||
                      f->ret->k == Type::ARRAY;
+  // data stacks (goose port): a stack-using callee takes its stacks above
+  // everything the caller has in use at the call (goose's SpTop) — pass
+  // sp + the caller's live bump count as the hidden last argument.
+  // Computed BEFORE the call-result register is numbered: the add is
+  // emitted before the call, and LLVM textual IR requires ascending
+  // definition order.
+  std::string dstkArg;
+  if (!f->imported) {
+    const dstk::Info* di = dstk::infoOf(f);
+    if (di && di->needsSp) {
+      if (G->dstkRestores.empty()) {
+        dstkArg = G->curSpExpr;
+      } else {
+        dstkArg = G->t();
+        G->out << "  " << dstkArg << " = add i64 " << G->curSpExpr << ", "
+               << G->dstkRestores.size() << "\n";
+      }
+    }
+  }
   if (f->ret->k != Type::VOID) r = G->t();
   // audit §2.3 rule 2: the call-site attribute is derived from the same
   // canonical summary (IrGen::fnAttrBody) as the callee's definition,
@@ -621,6 +684,8 @@ std::string genCall(Expr* e) {
     else
       G->out << G->llvmType(pt) << " " << argRegs[i];
   }
+  if (!dstkArg.empty())
+    G->out << (argRegs.empty() ? "" : ", ") << "i64 " << dstkArg;
   G->out << ")" << attrs << dbgAttr << "\n";
   // bool RETURN ABI (mirror of genArg's parameter widening): the callee
   // returns the i8 C ABI; bool VALUES in this function are i1 registers,

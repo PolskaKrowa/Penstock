@@ -1,0 +1,15 @@
+// goose-ported sumred (F0928): `for (i in 0..n) { s += a[i] * 1.5; }` over
+// 37 elements (NOT a multiple of the block size 8) is regrouped into
+// 4 blocks of 8 term computations plus a 5-iteration tail loop.  The terms
+// are computed first (independent, vectorisable) and folded into s one by
+// one in the ORIGINAL order, so the printed sum is bit for bit what the
+// untransformed program prints (the differential run in tests/run.sh).
+fn main() {
+    let n: u64 = 37;
+    let a: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = (i as f64) * 1.0; }
+    let mut s: f64 = 0.0;
+    for (i in 0..n) { s += a[i] * 1.5; }
+    print_f64(s, 6); println();     // 1.5 * (0+1+...+36) = 1.5 * 666 = 999
+    free(a);
+}

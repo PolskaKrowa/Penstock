@@ -2,7 +2,7 @@
 
 This extension provides:
 
-- `.fsh` file recognition and TextMate syntax highlighting;
+- `.fsht` file recognition and TextMate syntax highlighting;
 - bracket matching, comment toggling and indentation defaults;
 - diagnostics from Penstock's `freshet-language-server`;
 - hover, document symbols, go to definition, find references and rename, as implemented by the current server.

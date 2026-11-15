@@ -1,6 +1,6 @@
 // Low-level native services for the Freshet-hosted superoptimiser.
 //
-// Freshet owns the search/control loop (superopt.fsh). This translation unit
+// Freshet owns the search/control loop (superopt.fsht). This translation unit
 // deliberately contains only the parts that need native library APIs:
 // LLVM IR parsing/materialisation, Z3 bit-vector proof obligations, and
 // Alive2 translation validation. No external Souper/opt/alive-tv/z3 process

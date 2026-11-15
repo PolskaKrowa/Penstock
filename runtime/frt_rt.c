@@ -105,7 +105,12 @@ int32_t __frt_env_threads = 0;   /* external global referenced by IR */
 static int64_t g_chunkDefault = FRT_TUNED_CHUNK;   /* 0 = heuristic */
 static int64_t g_serialCutoff = FRT_TUNED_SERIAL_CUTOFF; /* <0 = default */
 
-typedef void (*frt_body_fn)(int64_t lo, int64_t hi, void* ctx);
+/* goose port v2: the chunk fn takes a hidden 4th argument — the data
+ * stack index the dispatching context handed down (frt_range_t.sp0,
+ * offset 80).  Every chunk fn of a program shares this one signature,
+ * whether its region uses stacks or not, so the runtime holds exactly
+ * one fn-ptr type. */
+typedef void (*frt_body_fn)(int64_t lo, int64_t hi, void* ctx, int64_t sp);
 
 typedef struct {
   frt_body_fn body;
@@ -113,10 +118,11 @@ typedef struct {
   void* ctx;
   _Atomic int64_t* remaining;
   int32_t cls;               /* SMT lane class (FRT_CLS_*) */
+  int64_t sp;                /* data-stack index base (%sp) */
 } frt_task_t;
 
 typedef struct {
-  void (*body)(int64_t, int64_t, void*);
+  void (*body)(int64_t, int64_t, void*, int64_t);
   int64_t lo, hi, chunk;
   int32_t nthreads, affinity, ctx_size;
   /* Phase 5 (report §12): @reproducible flag — the runtime partitions
@@ -143,6 +149,14 @@ typedef struct {
    * one hardware thread streams memory while the other computes.
    * Offset 72 matches %frt.range field 12. */
   int32_t mem_class;
+  /* goose port v2 (%sp threading): the dispatching context's first-free
+   * data stack index, copied into every task and passed to the chunk fn
+   * as its hidden 4th argument.  Each executing thread — a pool worker
+   * or the helping dispatcher — addresses the region's stacks at
+   * [sp0, sp0+need) of its OWN thread_local tops array, so concurrent
+   * chunks never collide and the caller's live stacks stay disjoint.
+   * Offset 80 matches %frt.range field 13 (checked by tests). */
+  int64_t sp0;
 } frt_range_t;
 
 /* task class for the SMT lanes (0 = any, 1 = memory, 2 = compute) */
@@ -375,7 +389,7 @@ static void push_task(frt_task_t t) {
   if (ringCount() >= FRT_MAXQ - 1) {
     /* overflow: run inline (same as historical behaviour) */
     pthread_mutex_unlock(&g_qmu);
-    t.body(t.lo, t.hi, t.ctx);
+    t.body(t.lo, t.hi, t.ctx, t.sp);
     atomic_fetch_sub_explicit(t.remaining, 1, memory_order_release);
     return;
   }
@@ -427,7 +441,7 @@ static int pop_task(frt_task_t* out) {
 }
 
 static void run_task(frt_task_t* t) {
-  t->body(t->lo, t->hi, t->ctx);
+  t->body(t->lo, t->hi, t->ctx, t->sp);
   atomic_fetch_sub_explicit(t->remaining, 1, memory_order_release);
 }
 
@@ -547,7 +561,7 @@ static void region_run_inline(frt_range_t* r, void** ctxout) {
   ctxout[0] = ctx;
   uint64_t t0 = 0;
   if (g_timingOn) t0 = frt_rdtsc();
-  r->body(r->lo, r->hi, ctx);
+  r->body(r->lo, r->hi, ctx, r->sp0);
   if (g_timingOn) {
     uint64_t dt = frt_rdtsc() - t0;
     pthread_mutex_lock(&g_timing_mu);
@@ -629,7 +643,7 @@ static void region_dispatch(frt_range_t* r, void** ctxout, int nchunks,
     void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
     memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
     ctxout[c] = ctx;
-    frt_task_t t = {r->body, clo, chi, ctx, remaining, cls};
+    frt_task_t t = {r->body, clo, chi, ctx, remaining, cls, r->sp0};
     push_task(t);
   }
   if (g_smtOn) {
@@ -1036,6 +1050,139 @@ void frt_bound_trap(int64_t idx, int64_t len) {
           "freshet: bounds check failed: index %lld is outside 0..%lld\n",
           (long long)idx, (long long)(len - 1));
   abort();
+}
+
+/* ------------------------------------------------------------------ *
+ * Data stacks (goose port: aardappel/goose data-stack memory model).
+ *
+ * A stack_alloc(T, n) site bumps a per-thread region's top pointer; the
+ * generated code never checks a capacity — each region is reserved up
+ * front (usable bytes RW, MAP_NORESERVE) with a PROT_NONE guard page
+ * behind it, so pathological growth walks into the guard and the SIGSEGV
+ * handler below reports a clean overflow and exits (goose:
+ * gs_reserve_region's halving retry + gs_fault_filter).  Deallocation
+ * is the scope-exit watermark restore the compiler emits — this file
+ * never frees a region until the thread dies (the OS reclaims it).
+ *
+ * frt_dstk_init(tops, n) is called from the generated entry check of
+ * every stack-using function; it is idempotent per thread.  The one
+ * registry allocation per thread is this runtime's own bookkeeping
+ * (like the queue nodes), never user-visible memory.
+ * ------------------------------------------------------------------ */
+#if !defined(_WIN32)
+#include <sys/mman.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
+
+#define FRT_DSTK_RESERVE_DEFAULT (1024ull << 20) /* 1 GiB usable per stack */
+#define FRT_DSTK_GUARD           (1ull << 20)    /* 1 MiB PROT_NONE tail   */
+#define FRT_DSTK_MIN_USABLE      (1ull << 20)    /* halving retry floor    */
+
+typedef struct {
+  char* base;
+  uint64_t usable;   /* RW bytes; [usable, usable+guard) is the guard */
+} frt_dstk_reg;
+
+static __thread frt_dstk_reg* frt_dstk_regs = NULL;
+static __thread int32_t frt_dstk_nregs = 0;
+static volatile int frt_dstk_handler_on = 0;
+
+static char* frt_dstk_reserve(frt_dstk_reg* r) {
+  uint64_t usable = FRT_DSTK_RESERVE_DEFAULT;
+  const char* env = getenv("FRT_DSTK_RESERVE");
+  if (env && *env) {
+    long long v = atoll(env);
+    if (v > 0) usable = (uint64_t)v;
+  }
+  for (;;) {
+    uint64_t total = usable + FRT_DSTK_GUARD;
+#if !defined(_WIN32)
+    char* p = (char*)mmap(NULL, (size_t)total, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p != MAP_FAILED) {
+      if (mprotect(p + usable, (size_t)FRT_DSTK_GUARD, PROT_NONE) != 0) {
+        munmap(p, (size_t)total);
+      } else {
+        r->base = p;
+        r->usable = usable;
+        return p;
+      }
+    }
+#else
+    char* p = (char*)VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE,
+                                  PAGE_NOACCESS);
+    if (p) {
+      if (VirtualProtect(p, (SIZE_T)usable, PAGE_READWRITE, NULL)) {
+        r->base = p;
+        r->usable = usable;
+        return p;
+      }
+      VirtualFree(p, 0, MEM_RELEASE);
+    }
+#endif
+    /* the reservation was refused — halve and retry (goose), never
+     * give up above the floor */
+    if (usable <= FRT_DSTK_MIN_USABLE) return NULL;
+    usable /= 2;
+  }
+}
+
+#if !defined(_WIN32)
+static void frt_dstk_overflow_msg(const char* p, size_t n) {
+  (void)write(2, p, n);   /* async-signal-safe */
+}
+
+static void frt_dstk_handler(int sig, siginfo_t* info, void* uctx) {
+  (void)uctx;
+  char* at = info ? (char*)info->si_addr : NULL;
+  for (int32_t i = 0; i < frt_dstk_nregs; ++i) {
+    frt_dstk_reg* r = &frt_dstk_regs[i];
+    if (at && r->base && at >= r->base + r->usable &&
+        at < r->base + r->usable + FRT_DSTK_GUARD) {
+      frt_dstk_overflow_msg(
+          "freshet: data stack overflow: a value on a data stack grew past "
+          "the space reserved for it (FRT_DSTK_RESERVE raises the "
+          "reservation; default 1 GiB per stack)\n",
+          178);
+      _exit(134);
+    }
+  }
+  /* not ours: restore the default action and re-execute the fault */
+  signal(sig, SIG_DFL);
+}
+#endif /* !_WIN32 */
+
+void frt_dstk_init(void** tops, int32_t n) {
+  if (frt_dstk_regs || n <= 0) return;   /* idempotent per thread */
+  frt_dstk_reg* regs =
+      (frt_dstk_reg*)calloc((size_t)n, sizeof(frt_dstk_reg));
+  if (!regs) {
+    fprintf(stderr, "freshet: data stack registry allocation failed\n");
+    abort();
+  }
+  for (int32_t i = 0; i < n; ++i) {
+    char* p = frt_dstk_reserve(&regs[i]);
+    if (!p) {
+      fprintf(stderr,
+              "freshet: data stack region %d could not be reserved\n", i);
+      abort();
+    }
+    tops[i] = p;
+  }
+  frt_dstk_regs = regs;
+  frt_dstk_nregs = n;
+#if !defined(_WIN32)
+  if (!frt_dstk_handler_on) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = frt_dstk_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    frt_dstk_handler_on = 1;
+  }
+#endif
 }
 
 int32_t frt_str_eq(const char* a, int64_t la, const char* b, int64_t lb) {

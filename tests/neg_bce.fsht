@@ -1,0 +1,17 @@
+// goose-ported BCE (F0923) legality: `j` is a runtime parameter with no
+// facts, so `s[j]` cannot be proven — the check must stay.  Nothing else
+// in the program elides (the a[..] stores go through raw pointers, which
+// are never bounds-checked), so no F0923 note may appear.
+fn pick(s: Span<f64>, j: usize) -> f64 {
+    return s[j];
+}
+
+fn main() {
+    let a: *f64 = malloc(f64, 4);
+    let s = span(a, 4);
+    a[0] = 1.0; a[1] = 2.0; a[2] = 3.0; a[3] = 4.0;
+    let mut k: usize = 0;
+    k = k + 2;
+    print_f64(pick(s, k), 2); println();
+    free(a);
+}

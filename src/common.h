@@ -374,6 +374,11 @@ struct Expr {
   Sym* fnPtrSym = nullptr;
   // Phase 3b: fn-value reference (IDENT naming a function, not a call)
   FnDecl* fnValue = nullptr;
+  // BCE (goose port): set by the bounds-check elimination pass when
+  // 0 <= idx <= len-1 (INDEX) or 0 <= lo <= hi <= len (SLICE) is proven at
+  // this site; IRgen then emits no check.  Checked builds consume it;
+  // unchecked builds ignore it (no check would be emitted anyway).
+  bool bceSafe = false;
   Expr(K kk, SrcLoc l) : k(kk), loc(l) {}
 };
 
@@ -481,6 +486,9 @@ struct Effects {
   bool readsOther = false;   // reads globals / heap / unknown memory
   bool writesArg = false;    // writes through parameter-reachable memory
   bool writesOther = false;  // writes globals / heap / unknown memory
+  bool readsStack = false;   // reads the thread-local data-stack tops
+  bool writesStack = false;  // data-stack bumps (goose port): per-thread
+                             // scratch, invisible outside the call
   bool allocates = false;   // malloc / soa_new
   bool freesMem = false;    // free / soa_free
   bool io = false;           // print* / println — externally visible output
@@ -491,13 +499,18 @@ struct Effects {
   bool anyWrite() const { return writesArg || writesOther; }
   // "pure" in the Freshet observable sense used by the parfor checks
   // and the R4 loop passes: no writes, no I/O, no allocation, no
-  // unknown calls.  Reads are permitted.
+  // unknown calls.  Reads are permitted.  Data-stack bumps are NOT
+  // observable impurity (goose port v2): each thread owns its stacks,
+  // so no iteration, thread or caller can see them — a stacks-only
+  // function is pure, which is what makes stack-using helpers legal
+  // inside parfor bodies under the %sp-threaded dispatch ABI.
   bool semanticallyPure() const {
     return !anyWrite() && !io && !allocates && !freesMem && !unknownCall;
   }
   void merge(const Effects& o) {
     readsArg |= o.readsArg;     readsOther |= o.readsOther;
     writesArg |= o.writesArg;  writesOther |= o.writesOther;
+    readsStack |= o.readsStack; writesStack |= o.writesStack;
     allocates |= o.allocates;  freesMem |= o.freesMem;
     io |= o.io;                 unknownCall |= o.unknownCall;
     mayNotReturn |= o.mayNotReturn;
@@ -533,6 +546,11 @@ struct FnDecl {
   // Phase MEM §5.1: `@unsafe fn` — the whole body is an unsafe scope
   // (bounds checks off, ownership diagnostics downgraded to warnings).
   bool unsafeFn = false;    // @unsafe
+  // BCE (goose port): `@checkfree fn` — no bounds check may remain in
+  // this function or anything it calls; the BCE pass raises F0924 on any
+  // check site it cannot prove safe (goose: "no bounds check runs while a
+  // checkfree function does").
+  bool checkfree = false;   // @checkfree
   // Phase 2a: generic function template (monomorphised per call site)
   bool isGeneric = false;
   std::vector<std::string> tparams;;
@@ -629,7 +647,7 @@ inline const char* inlinePolicyName(InlinePolicy p) {
 
 struct Options {
   std::string input, output = "a.out";
-  // Phase 3a (report §6.2): multi-file compilation — every .fsh input
+  // Phase 3a (report §6.2): multi-file compilation — every .fsht input
   // is a module of the same program (imports resolve the rest).
   std::vector<std::string> inputs;
   bool report = false;            // performance report mode
@@ -764,6 +782,17 @@ struct Options {
   // two hardware threads of one physical core (one stream keeps the shared
   // ALU busy while the other waits on memory).
   bool smtInterleaveOn = false;   // --smt-interleave
+
+  // ---- goose-ported passes (see the block above runMemStagePasses) ------
+  // BCE follows goose's own policy (on by default, --no-bce as the
+  // differential hatch): it never rewrites the tree, it only stops
+  // emitting checks the solver has PROVEN cannot fire, so checked builds
+  // become "memory safety without the checks' cost".
+  bool bceOn = true;            // --bce (default on; --no-bce disables)
+  bool bceLinesOn = false;      // --bce-lines: per-line elided/kept report
+  bool dstkReportOn = false;    // --stacks: data-stack layout report
+  bool sumRedOn = false;        // --sum-reduction (goose sumred)
+  bool basecaseOn = false;      // --basecase (goose basecase)
 
   // §10.4 pass remarks / §5.2 proof artefacts:
   // --proof-log[=<file>] records, per APPLIED source-level transform, the
@@ -945,6 +974,63 @@ struct MemStageCounts {
 MemStageCounts runMemStagePasses(Program* p);   // mem-reuse + mov-minimize
 int runVectorPlanPass(Program* p, bool applyBatching);  // B analysis (+A3)
 int runSmtInterleavePass(Program* p);              // parfor pairing marks
+
+// ------------------------------------------------------------- goose ports
+// Passes adapted from the Goose programming language (aardappel/goose) —
+// the memory-safe systems language with no heap allocator, garbage
+// collector or lifetime annotations whose optimiser and data-stack memory
+// model this compiler studied and ported where Penstock's LLVM-IR backend
+// does not already provide the equivalent:
+//   --bce           bounds-check elimination (goose src/bce.h, ~4.6k lines
+//                   reduced to Freshet's simpler by-value world): a
+//                   flow-sensitive difference-constraint solver (facts
+//                   `l <= r + c` over zero / int vars / span-str-array
+//                   lengths / one-shot temporaries, with generation
+//                   pinning so kills cannot leak stale facts) proves
+//                   0 <= idx <= len-1 at INDEX sites and
+//                   0 <= lo <= hi <= len at SLICE sites, and marks them
+//                   so IRgen emits no check.  Facts come from loop and
+//                   parfor iteration ranges, `assert`, dominating
+//                   conditions, span/slice construction and completed
+//                   checks; assignments, address-taking and call effects
+//                   (via the FnFootprint summaries) invalidate them.
+//                   `@checkfree fn` rejects any check the pass keeps.
+//                   (goose runs BCE once, last before codegen; so do we.)
+//   --stacks        data-stack layout report (goose codegen_stacks.h
+//                   StackReport): per-function own / with-callees stack
+//                   counts for the stack_alloc memory model.
+//   --sum-reduction bit-identical blocked float reductions (goose
+//                   optimize_loops.h LoopShaper::ShapeSum): regroup
+//                   `s += e` loops so a block of terms is computed first
+//                   (independent, vectorisable) and folded into s one by
+//                   one in the ORIGINAL order — every result bit for bit,
+//                   because the addition chain is unchanged.
+//   --basecase      recursive base-case inlining (goose
+//                   optimize_basecase.h): a self-recursive fn whose body
+//                   starts with `if c { return e; }` (c and e reading only
+//                   params, globals and their own bindings) gets every
+//                   tail `return f(a...)` rewritten to
+//                     { let p... ; if c[p:=t] { return e[p:=t]; }
+//                       return f(p...) }
+//                   removing half the calls of a full tree walk.  (Only
+//                   return-position self-calls: Freshet's `if` is a
+//                   statement, not an expression like goose's.)
+// Deliberately NOT ported (the clang -O3 backend already provides them on
+// our .ll, where goose emits C and must do them itself): the goose
+// inliner + constant folder (optimize.h — LLVM's inliner/instcombine),
+// accumulator tail-recursion elimination (optimize_tre.h — LLVM
+// tailcallelim), integer min/max chain regrouping (optimize_reassoc.h) and
+// loop strip-mining marks (optimize_loops.h ShapeStrip — partial-unroll
+// already emits the same register-friendly shape).
+struct BceCounts {
+  int idxElided = 0, idxTotal = 0;
+  int slElided = 0, slTotal = 0;
+  int entrySeeded = 0;   // fns granted interprocedural entry facts
+};
+BceCounts runBcePass(Program* p);   // bounds-check elimination + @checkfree
+int runFpReductionPass(Program* p); // blocked FP sum reductions
+int runBasecasePass(Program* p);    // recursive base-case inlining
+int runDstkAnalysis(Program* p);    // data-stack layout + escape checking
 // irgen
 bool irgenProgram(Program* p, const std::string& outLl);
 // report

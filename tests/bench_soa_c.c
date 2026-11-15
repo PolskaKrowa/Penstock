@@ -1,4 +1,4 @@
-// C baseline: AoS vs SoA field sweep (same shape as bench_soa.fsh)
+// C baseline: AoS vs SoA field sweep (same shape as bench_soa.fsht)
 // build: clang -O3 -march=native bench_soa_c.c -o bench_soa_c -lm -lpthread
 #include <stdio.h>
 #include <stdlib.h>

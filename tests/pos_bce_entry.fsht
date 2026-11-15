@@ -1,0 +1,20 @@
+// Interprocedural BCE entry-fact seeding (goose SeedEntryFacts): get()'s
+// bounds check is provable ONLY from what its call sites prove about the
+// arguments — every site passes an index the caller has already proven
+// in-range against the same span's length, so the callee is granted
+// `0 <= i <= len(s) - 1` at entry (the F0923 note reports entry=1) and
+// its check is elided.  The --no-bce differential must print the same.
+fn get(s: Span<f64>, i: usize) -> f64 {
+    return s[i];   // elided only via the seeded entry facts
+}
+
+fn main() {
+    let n: usize = 32;
+    let a: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = (i as f64) * 3.0; }
+    let s = span(a, n);
+    let mut t: f64 = 0.0;
+    for (i in 0..n) { t = t + get(s, i); }
+    print_f64(t, 2); println();   // 3 * (0+..+31) = 1488.00
+    free(a);
+}

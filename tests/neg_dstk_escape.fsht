@@ -1,0 +1,12 @@
+// goose-ported data stacks (F0926) legality: the allocation dies when its
+// scope ends — returning it (or give()-ing it to an owned parameter) would
+// leave the caller with a dangling pointer.
+fn leak() -> *f64 {
+    let p: *f64 = stack_alloc(f64, 4);
+    return p;
+}
+
+fn main() {
+    let q = leak();
+    print_f64(q[0], 1); println();
+}

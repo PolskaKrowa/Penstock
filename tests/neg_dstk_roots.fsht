@@ -1,0 +1,15 @@
+// Static-root lifetime proofs (F0926): storing a rooted span into stack
+// memory whose root OUTLIVES the source root — `sp` is declared in the
+// function scope, `inner` in a nested block — the slot sp[0].v would
+// still be readable after inner's scope restored its watermark, holding
+// a pointer into freed stack memory.
+struct Cell { v: Span<f64> }
+
+fn main() {
+    let sp: *Cell = stack_alloc(Cell, 2);
+    {
+        let inner: *f64 = stack_alloc(f64, 4);
+        sp[0].v = span(inner, 4);   // F0926: sp outlives inner's scope
+    }
+    print_f64(sp[0].v[0], 1); println();
+}

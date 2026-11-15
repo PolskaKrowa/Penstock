@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 # -Isrc: scripts/fecheck.cpp quotes "common.h" / "loop_analysis.h" etc.
 # that live in src/ (the .cpp sources in src/ resolve their own includes
 # relative to their file, but the scripts/ driver does not).
-SHARED_SRCS="src/checks.cpp src/checks_parfor.cpp src/effects.cpp src/fuse_unroll.cpp src/irgen.cpp src/irgen_call.cpp src/irgen_expr.cpp src/irgen_parfor.cpp src/irgen_pgo.cpp src/irgen_stmt.cpp src/lane_analysis.cpp src/lexer.cpp src/opt_util.cpp src/ownership.cpp src/parser.cpp src/preproc.cpp src/report.cpp src/sema.cpp src/sema_expr.cpp src/soa_auto.cpp src/types.cpp src/session.cpp src/superopt.cpp src/precompute.cpp src/generics.cpp src/modules.cpp src/fmt.cpp src/profit_model.cpp src/loop_analysis.cpp src/loop_transforms.cpp src/mem_stage.cpp src/vector_plan.cpp"
+SHARED_SRCS="src/checks.cpp src/checks_parfor.cpp src/effects.cpp src/fuse_unroll.cpp src/irgen.cpp src/irgen_call.cpp src/irgen_expr.cpp src/irgen_parfor.cpp src/irgen_pgo.cpp src/irgen_stmt.cpp src/lane_analysis.cpp src/lexer.cpp src/opt_util.cpp src/ownership.cpp src/parser.cpp src/preproc.cpp src/report.cpp src/sema.cpp src/sema_expr.cpp src/soa_auto.cpp src/types.cpp src/session.cpp src/superopt.cpp src/precompute.cpp src/generics.cpp src/modules.cpp src/fmt.cpp src/profit_model.cpp src/loop_analysis.cpp src/loop_transforms.cpp src/mem_stage.cpp src/vector_plan.cpp src/bce.cpp src/dstk.cpp src/fp_reduction.cpp src/basecase.cpp"
 mkdir -p bin
 g++ -std=c++17 -O1 -Wall -Wno-unused-variable -Isrc -o bin/penstock $SHARED_SRCS src/evo.cpp src/main.cpp
 g++ -std=c++17 -O1 -Isrc -o bin/freshet-language-server $SHARED_SRCS src/lsp/server.cpp

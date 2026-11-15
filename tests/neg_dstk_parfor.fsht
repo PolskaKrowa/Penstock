@@ -1,0 +1,14 @@
+// goose-ported data stacks (F0926) legality v2: a binding that points
+// into THIS thread's data-stack memory must not be referenced inside a
+// dispatched parfor body — the chunk fn may execute on another thread,
+// whose data stacks are private (goose: workers are separate programs
+// with private stacks).  The dispatch ABI threads %sp for the region's
+// OWN allocations, never for captured outer ones.
+fn main() {
+    let buf: *f64 = stack_alloc(f64, 8);
+    let mut t: f64 = 0.0;
+    parfor (i in 0..4) [reduction(+:t)] {
+        t += buf[0];   // F0926: buf is data-stack memory of this thread
+    }
+    print_f64(t, 1); println();
+}

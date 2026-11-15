@@ -3,6 +3,7 @@
 // nested parfor (serialized inner, vectorizable) vs dynamic nested (work
 // stealing), defer emission, PGO block counters.
 #include "irgen.h"
+#include "dstk.h"
 
 namespace freshet {
 
@@ -175,6 +176,15 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
     }
     out << " %" << f->params[i].name << "param";
   }
+  // data stacks (goose port): a stack-using function addresses its stacks
+  // above the caller's in-use count — a hidden i64 %sp parameter (main and
+  // exported C ABI functions are entries: sp = 0, no parameter)
+  const dstk::Info* dstkInfo = dstk::infoOf(f);
+  bool needsSp = dstkInfo && dstkInfo->needsSp && f->name != "main" &&
+                 !f->exported;
+  curSpExpr = needsSp ? "%sp" : "0";
+  dstkRestores.clear();
+  if (needsSp) out << ", i64 %sp";
   // Phase 3c (report §10.3): attach the DISubprogram to the definition —
   // LLVM only emits DWARF for functions whose `define` carries `!dbg`
   out << ")" << attrs << profDef
@@ -242,6 +252,38 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
     }
   }
 
+  // data stacks (goose port): per-thread lazy init — every stack-using
+  // function entry checks that this thread's stack block is reserved and
+  // calls the runtime initializer on first use (parfor workers never use
+  // stacks in v1, so this is one predicted-not-taken branch per entry)
+  if (dstkInfo && dstkInfo->needsSp && dstk::g_total > 0) {
+    // number the operand before its user (LLVM textual IR requires
+    // ascending definition order — the historical note on the loop step)
+    std::string ixr;
+    if (needsSp) {
+      ixr = t();
+      out << "  " << ixr << " = add i64 " << curSpExpr << ", 0\n";
+    }
+    std::string slot = t();
+    out << "  " << slot << " = getelementptr [@@DSTKN@@ x ptr], ptr "
+           "@frt.dstk.tops, i64 0, i64 " << (needsSp ? ixr : "0") << "\n";
+    std::string v = t();
+    out << "  " << v << " = load ptr, ptr " << slot << "\n";
+    std::string okr = t();
+    out << "  " << okr << " = icmp ne ptr " << v << ", null\n";
+    int cont = bb++, dinit = bb++;
+    out << "  br i1 " << okr << ", label %" << l(cont) << ", label %"
+        << l(dinit) << "\n";
+    terminate();
+    out << l(dinit) << ":\n";
+    curLabelTerminated = false;
+    out << "  call void @frt_dstk_init(ptr @frt.dstk.tops, i32 @@DSTKN@@)\n";
+    out << "  br label %" << l(cont) << "\n";
+    terminate();
+    out << l(cont) << ":\n";
+    curLabelTerminated = false;
+  }
+
   // body
   for (auto* st : f->body->stmts) genStmt(st);
 
@@ -264,16 +306,32 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   out << "}\n\n";
 }
 
+// data stacks (goose port): emit the watermark restores of every scope
+// opened at or after `from` (reverse declaration order), and drop them —
+// a scope exit is a pointer store, never a walk of the allocations.
+void emitDstkRestores(size_t from) {
+  if (!G || G->dstkRestores.size() <= from) return;
+  for (size_t i = G->dstkRestores.size(); i > from; --i) {
+    auto& r = G->dstkRestores[i - 1];
+    G->out << "  store ptr " << r.second << ", ptr " << r.first << "\n";
+  }
+  G->dstkRestores.resize(from);
+}
+
 // emit all pending defers (reverse order) — used at scope exit and
 // returns. Phase 1a fix: this does NOT clear the stack — every exit
 // path must run its own copy, and block-scope removal is handled by the
 // BLOCK lowering (resize to dstart). The historical clear() made the
 // SECOND return in a function silently skip its defers (leak on that
 // path).
+// data stacks (goose port): a return also restores EVERY open scope's
+// watermark (the function's stacks die with the frame) — after the
+// defers, which may still read through the allocations.
 void emitDeferredAll() {
   for (auto it = g_defers.rbegin(); it != g_defers.rend(); ++it) {
     emitDeferCall(it->expr);
   }
+  emitDstkRestores(0);   // the frame's data stacks die with the return
 }
 
 // run the defers registered inside the current loop body (indices >=
@@ -456,6 +514,9 @@ void genStmt(Stmt* s) {
       if (!G->loopStack.empty()) {
         auto& loop = G->loopStack.back();
         emitLoopDefers(loop.deferBase);
+        // data stacks: restore the watermarks of scopes opened inside the
+        // loop (the loop's own enclosing bumps stay live)
+        emitDstkRestores(loop.dstkBase);
         G->out << "  br label %" << G->l(loop.breakBB) << "\n";
       }
       G->terminate();
@@ -465,6 +526,7 @@ void genStmt(Stmt* s) {
       if (!G->loopStack.empty()) {
         auto& loop = G->loopStack.back();
         emitLoopDefers(loop.deferBase);
+        emitDstkRestores(loop.dstkBase);
         G->out << "  br label %" << G->l(loop.continueBB) << "\n";
       }
       G->terminate();
@@ -480,6 +542,7 @@ void genStmt(Stmt* s) {
     }
     case Stmt::BLOCK: {
       size_t dstart = g_defers.size();
+      size_t dstkMark = G->dstkRestores.size();   // data-stack scope base
       for (auto* st : s->stmts) genStmt(st);
       // block-scoped defers (skipped when control already left the block)
       size_t dend = g_defers.size();
@@ -492,6 +555,10 @@ void genStmt(Stmt* s) {
         // defers already ran on the break/continue/return path; drop them
         g_defers.resize(dstart);
       }
+      // data stacks (goose port): the closing brace is the deallocation —
+      // every bump bound in this block restores its watermark, in reverse
+      // declaration order, after the block's defers
+      if (!G->curLabelTerminated) emitDstkRestores(dstkMark);
       break;
     }
     case Stmt::IF: {
@@ -557,7 +624,8 @@ void genStmt(Stmt* s) {
       int body = G->bb++;
       int exit = G->bb++;
       // Phase 1a: break targets exit; continue re-tests the header
-      G->loopStack.push_back({exit, hdr, g_defers.size(), false});
+      G->loopStack.push_back({exit, hdr, g_defers.size(), false,
+                              G->dstkRestores.size()});
       G->out << "  br label %" << G->l(hdr) << "\n";
       G->terminate();
       G->out << G->l(hdr) << ":\n";
@@ -584,7 +652,8 @@ void genStmt(Stmt* s) {
       int latch = G->bb++;
       int exit = G->bb++;
       // Phase 1a: break targets exit; continue runs the latch (the step)
-      G->loopStack.push_back({exit, latch, g_defers.size(), false});
+      G->loopStack.push_back({exit, latch, g_defers.size(), false,
+                              G->dstkRestores.size()});
       std::string iA = G->varAllocas[ivar];
       std::string lo, hi;
       // step analysis (report §7 follow-on: with F0405 downgraded to a

@@ -50,7 +50,7 @@ historical meaning; effect-specific combinations (strictfp x effects,
 inline x effects, `memory(argmem: ...)`, `memory(none)` without
 termination proof) are allocated dynamically from #62 up.
 
-**Evidence.** `tests/pos_effects_repro.fsh` prints `12` at -O0/-O3;
+**Evidence.** `tests/pos_effects_repro.fsht` prints `12` at -O0/-O3;
 `read_first` carries `#62 = { noinline nounwind memory(argmem: read)
 willreturn }` on both its definition and its call sites.  26 new
 regression tests cover every §2.4 bullet.
@@ -220,12 +220,12 @@ first, then the analysis foundation, then the new passes.
 
 | Audit item | Fix | Evidence |
 |---|---|---|
-| §4.1 predicate merge removes impure call | `mergeScan` now requires the shared condition to be referentially transparent (`exprReferentiallyTransparent`: effect-lattice-backed builtin model + pure will-return callees, strict-FP aware) | `tests/neg_lane_merge_impure.fsh` (16 calls preserved), `tests/pos_lane_merge_pure.fsh` (merge still fires) |
-| §4.2 unswitch evaluates condition on zero-trip loops | hoist requires proven trip ≥ 1 (`tripCountOf`) OR a provably total condition (`exprTotalAndPure`: no div/rem/shift by non-constant, no dereference, no may-not-return call); same rule in the deep unswitcher | `tests/neg_lane_unswitch_zero_trip.fsh` (prints 0, no trap) |
-| §4.3 unrolling does not veto `return` | `unrollInList` vetoes `info.hasReturn`; the clone-safety contract for defer/give/parfor is written out explicitly in the source | `tests/neg_unroll_return.fsh` |
-| §4.4 signed-overflow/cast hazards in const eval | new typed bit-vector evaluator `evalConstTyped` (width+signedness, wrapping ops, truncating casts, refuse-to-fold traps); `__int128`-checked trip distances; unroll literals computed mathematically then wrapped | `tests/neg_const_overflow_fold.fsh` |
+| §4.1 predicate merge removes impure call | `mergeScan` now requires the shared condition to be referentially transparent (`exprReferentiallyTransparent`: effect-lattice-backed builtin model + pure will-return callees, strict-FP aware) | `tests/neg_lane_merge_impure.fsht` (16 calls preserved), `tests/pos_lane_merge_pure.fsht` (merge still fires) |
+| §4.2 unswitch evaluates condition on zero-trip loops | hoist requires proven trip ≥ 1 (`tripCountOf`) OR a provably total condition (`exprTotalAndPure`: no div/rem/shift by non-constant, no dereference, no may-not-return call); same rule in the deep unswitcher | `tests/neg_lane_unswitch_zero_trip.fsht` (prints 0, no trap) |
+| §4.3 unrolling does not veto `return` | `unrollInList` vetoes `info.hasReturn`; the clone-safety contract for defer/give/parfor is written out explicitly in the source | `tests/neg_unroll_return.fsht` |
+| §4.4 signed-overflow/cast hazards in const eval | new typed bit-vector evaluator `evalConstTyped` (width+signedness, wrapping ops, truncating casts, refuse-to-fold traps); `__int128`-checked trip distances; unroll literals computed mathematically then wrapped | `tests/neg_const_overflow_fold.fsht` |
 | §4.5 canon is not a typed normal form | canon literals now carry value+type tags, constant folding in the key is typed and wrapping, commutativity is decided by the typed contract (no float `+`/`*` or `&&`/`\|\|` reordering) | full suite + difftest |
-| §4.6 fusion unknown-effect gap | unknown-write now rejects against ANY effect of the other loop (reads AND writes — the output-dependence case the audit called out); dependence classes documented per rule | `tests/neg_fuse_unknown_effect.fsh` (no F0908), `tests/pos_fuse_disjoint_regions.fsh` |
+| §4.6 fusion unknown-effect gap | unknown-write now rejects against ANY effect of the other loop (reads AND writes — the output-dependence case the audit called out); dependence classes documented per rule | `tests/neg_fuse_unknown_effect.fsht` (no F0908), `tests/pos_fuse_disjoint_regions.fsht` |
 
 ## §6.1/§6.3 — typed const fold + range analysis — DONE
 
@@ -248,13 +248,13 @@ All in `src/loop_transforms.cpp`, each behind an opt-in flag with a
 
 | Pass | Flag | Legality (summary) | Test |
 |---|---|---|---|
-| FreshetLICM | `--licm` | P1 immutable+unique binding, P2 no inner bindings in init, P3 referentially transparent, P4 nothing read is written by the loop, P5 non-empty trip or total init | `pos_licm.fsh` |
-| PartialUnroll | `--partial-unroll` | constant trip in (16,4096], no return/break/ivar-write; domain partitioned exactly into `lo + t*F + k` blocks plus an exact remainder loop | `pos_partial_unroll.fsh` |
-| LoopPeel | `--peel` | guard decidable at k=0 and provably constant for k≥1 (injectivity); peeled copy + remainder loop start at lo+1 | `pos_peel.fsh` |
-| LoopInterchange | `--interchange` | R1 perfect rectangular nest, R2 bounds RT+total (evaluation counts change both ways), R3 iterations independent, R4 no observable effects, R5 bounds read nothing the body writes; profitability = transposed-stride votes | `pos_interchange.fsh` |
-| LoopTile | `--tile[=I[,J]]` | R1–R5 + interval proof bounds ∈ [0,2^62] so the synthesised ceil-shift and tile arithmetic are exact; boundary tiles `imin`-clamped (exact domain) | `pos_tile.fsh` |
-| LoopDistribution | `--distribute` | D1 no cross-group flow/anti/output dependence, D2 no unknown effects, D3 no observable effects, D4 bounds RT+total (evaluated twice) | `pos_distribute.fsh` |
-| UnrollAndJam | `--unroll-and-jam` | R1–R5 + J1 writes affine in exactly one ivar (either orientation), J2 constant-trip partition | `pos_unrolljam.fsh` |
+| FreshetLICM | `--licm` | P1 immutable+unique binding, P2 no inner bindings in init, P3 referentially transparent, P4 nothing read is written by the loop, P5 non-empty trip or total init | `pos_licm.fsht` |
+| PartialUnroll | `--partial-unroll` | constant trip in (16,4096], no return/break/ivar-write; domain partitioned exactly into `lo + t*F + k` blocks plus an exact remainder loop | `pos_partial_unroll.fsht` |
+| LoopPeel | `--peel` | guard decidable at k=0 and provably constant for k≥1 (injectivity); peeled copy + remainder loop start at lo+1 | `pos_peel.fsht` |
+| LoopInterchange | `--interchange` | R1 perfect rectangular nest, R2 bounds RT+total (evaluation counts change both ways), R3 iterations independent, R4 no observable effects, R5 bounds read nothing the body writes; profitability = transposed-stride votes | `pos_interchange.fsht` |
+| LoopTile | `--tile[=I[,J]]` | R1–R5 + interval proof bounds ∈ [0,2^62] so the synthesised ceil-shift and tile arithmetic are exact; boundary tiles `imin`-clamped (exact domain) | `pos_tile.fsht` |
+| LoopDistribution | `--distribute` | D1 no cross-group flow/anti/output dependence, D2 no unknown effects, D3 no observable effects, D4 bounds RT+total (evaluated twice) | `pos_distribute.fsht` |
+| UnrollAndJam | `--unroll-and-jam` | R1–R5 + J1 writes affine in exactly one ivar (either orientation), J2 constant-trip partition | `pos_unrolljam.fsht` |
 
 Pass order (dependency-analysed): LICM → interchange → tile →
 unroll-and-jam → peel → partial-unroll → distribute.  Two `imin`/`imax`
@@ -361,7 +361,7 @@ advisor → IRgen → LLVM -O3 → superopt/precompute → PGO.
    type, silently flipping `imin(-5, 2)` to 2 — sign-sensitive typing now
    forces the signed interpretation when an operand is syntactically
    negated; the select/predicate direction in the lowering was corrected.
-4. `tests/pos_ringbuf.fsh` had stopped parsing (pre-`[reduction(+:x)]`
+4. `tests/pos_ringbuf.fsht` had stopped parsing (pre-`[reduction(+:x)]`
    clause syntax) and was silently excluded from the suite — refreshed
    and re-covered by the differential run.
 
@@ -468,18 +468,18 @@ memory are barriers).
 
 ## Evidence
 
-- `tests/pos_mem_reuse.fsh` (+F0919, one `frt_malloc` before the loop /
-  one `frt_free` after in the IR); `tests/neg_mem_reuse_readfirst.fsh`
+- `tests/pos_mem_reuse.fsht` (+F0919, one `frt_malloc` before the loop /
+  one `frt_free` after in the IR); `tests/neg_mem_reuse_readfirst.fsht`
   (never-written read vetoes, !F0919).
-- `tests/pos_mov_min.fsh` (4 rewrites: self-assign, aggregate-memcpy
+- `tests/pos_mov_min.fsht` (4 rewrites: self-assign, aggregate-memcpy
   forward, scalar forward, dead mov; the forwarding is visible as the
   dropped `llvm.memcpy`).
-- `tests/pos_batch.fsh` (+F0920, 2+2 wide de-interleave) and
-  `tests/pos_vector_plan.fsh` (+F0921 with strand/group/dataflow
+- `tests/pos_batch.fsht` (+F0920, 2+2 wide de-interleave) and
+  `tests/pos_vector_plan.fsht` (+F0921 with strand/group/dataflow
   report).
-- `tests/pos_smt_pair.fsh` (+F0922 clsA=1/clsB=2; IR shows one
+- `tests/pos_smt_pair.fsht` (+F0922 clsA=1/clsB=2; IR shows one
   `frt_parfor_pair` call, 3 chunk fns, mem_class stores at offsets
-  72); `tests/neg_smt_pair_alias.fsh` (flow dependence between regions
+  72); `tests/neg_smt_pair_alias.fsht` (flow dependence between regions
   vetoes, !F0922).
 - `scripts/rt_smt_test.c`: pure-C runtime tests — the sysfs cpu-list
   parser, and paired dispatch matching the sequential reference for

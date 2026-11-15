@@ -66,7 +66,7 @@ the effect summaries, dependence analysis and typed constant evaluator.
 line per APPLIED transform:
 
 ```json
-{"pass":"partial-unroll","fn":"main","file":"pos_prooflog.fsh","line":5,
+{"pass":"partial-unroll","fn":"main","file":"pos_prooflog.fsht","line":5,
  "premises":"constant-trip:20;domain-partition:main[16]+remainder[4];no-return,no-break;factor=8"}
 ```
 
@@ -95,7 +95,7 @@ acceptance:
   Alive2 proves the whole-module rewrite, and now additionally reports
   **"verified but NOT profitable"** separately from "not verified"
   (§7.4).
-- `src/superopt.fsh` drives the embedded bounded candidate loop.
+- `src/superopt.fsht` drives the embedded bounded candidate loop.
   `src/superopt_native.cpp` asks Z3 to prove each fixed-width identity,
   checks the materialised LLVM module, and accepts it only when in-process
   Alive2 reports a clean refinement proof and the selected cost objective

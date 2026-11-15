@@ -77,7 +77,7 @@ remainder are now lowered with the rounding-correction sequence
 operands and `r = a - q*d` for the remainder; unsigned operands keep the
 plain `lshr`/`and` forms. Verified against a C reference across i8/i16/
 i32/i64, negative dividends, divisors 1/2/4/8/16, and inside composed
-expressions — at -O0, -O2 and -O3 (`tests/pos_divrem.fsh`, expected
+expressions — at -O0, -O2 and -O3 (`tests/pos_divrem.fsht`, expected
 values embedded in the test).
 
 Also fixed while there: mixed-width arithmetic used to leave the lhs
@@ -98,8 +98,8 @@ made LLVM reject the whole function.
   `unreachable` (valid IR) instead of a fabricated zero/null value;
   a `return;` in a non-void function can no longer produce an
   ill-typed `ret void`.
-- Tests: `tests/neg_noret.fsh`, `neg_retvoid.fsh`, `neg_oneret.fsh`
-  (all `F0209`), `tests/pos_defret.fsh` (both-branch, trailing,
+- Tests: `tests/neg_noret.fsht`, `neg_retvoid.fsht`, `neg_oneret.fsht`
+  (all `F0209`), `tests/pos_defret.fsht` (both-branch, trailing,
   while(true), early-return shapes).
 
 ### 2.3 Operator checking (report §3.3) — DONE
@@ -118,7 +118,7 @@ signedness, strength reduction or shift semantics.
 
 - `<<=` / `>>=` are lexed as single tokens, parsed as assignment
   operators, type-checked and lowered (`shl` / `ashr`/`lshr` by
-  signedness) — `tests/pos_shiftassign.fsh`.
+  signedness) — `tests/pos_shiftassign.fsht`.
 - The misleading `i++` parser comment is removed (there is no `++`
   token; the spec never promised one).
 - **Additional findings in the same family, all fixed:** `give(p)` as a
@@ -152,7 +152,7 @@ Type, literals, indexing, `.len` (compile-time), `sizeof`, value copies
 (assignment and by-address parameter passing with a callee copy), nested
 arrays, arrays of structs, annotation adoption for literals, `F0212`
 for constant out-of-range indices, checked-build bounds checks.
-`tests/pos_arrays.fsh`, `tests/neg_bound.fsh`.
+`tests/pos_arrays.fsht`, `tests/neg_bound.fsht`.
 
 ### 3.2 Slices / spans `Span<T>` (report §4.1)
 
@@ -160,7 +160,7 @@ First-class `(ptr, len)` pair aggregate: `span(p, len)`, `span(arr)`,
 `s[a..b]` slicing (validated in checked builds), checked indexing,
 `.len`, `.ptr` for FFI, by-value parameter passing. Mutation through a
 view is supported; `borrowed` parameters make read-onlyness a checked
-contract. `tests/pos_spans.fsh`.
+contract. `tests/pos_spans.fsht`.
 
 ### 3.3 `break` / `continue` (report §4.4)
 
@@ -171,8 +171,8 @@ dead-code-after-return shape that produced instructions after `ret`).
 `F0213` outside a loop; `F0106` directly inside a `parfor` — until
 this integration; see section 9.2 for the new lane-local semantics.
 The unroll/fusion/lane passes veto on `hasBreak` so loop transforms
-cannot drop early exits. `tests/pos_breakcont.fsh`,
-`tests/neg_brkloop.fsh`.
+cannot drop early exits. `tests/pos_breakcont.fsht`,
+`tests/neg_brkloop.fsht`.
 
 ### 3.4 Enums, tagged unions, exhaustive `match` (report §4.3)
 
@@ -181,8 +181,8 @@ cannot drop early exits. `tests/pos_breakcont.fsh`,
 (`Color.Green`) and payload (`Ok(v)`) construction; `match` with
 positional payload bindings, wildcard `_`, and exhaustiveness checking
 (`F0204`); enums as values (copy semantics), in arrays, as function
-parameters and returns. `tests/pos_enums.fsh`,
-`tests/neg_match_nonex.fsh`.
+parameters and returns. `tests/pos_enums.fsht`,
+`tests/neg_match_nonex.fsht`.
 
 ---
 
@@ -200,7 +200,7 @@ Call-site inference from `T`-typed, `*T`, `Span<T>` and
 never emitted; every whole-program pass skips them. Nested
 instantiations (`Pair<Pair<i64,i64>, f64>`) work; struct literals adopt
 the annotated instantiation. `src/generics.cpp` (new),
-`tests/pos_generics.fsh`, `tests/neg_genericconstraint.fsh`.
+`tests/pos_generics.fsht`, `tests/neg_genericconstraint.fsht`.
 
 ### 4.2 Strings (report §4.5; maintainer decision: byte indexing)
 
@@ -212,7 +212,7 @@ the annotated instantiation. `src/generics.cpp` (new),
   `str_of`); `str_cat`, `str_eq`, `str_to_cstr`, `fmt_i64`, `fmt_f64`.
 - Runtime support added to `runtime/frt_rt.c` (out-param constructors so
   the C ABI stays simple).
-`tests/pos_strings.fsh`.
+`tests/pos_strings.fsht`.
 
 ### 4.3 `Option<T>` / `Result<T, E>` and `?` (report §4.6)
 
@@ -220,7 +220,7 @@ Prelude generic enums (lazily registered on first use) with the report's
 exact shapes; `expr?` propagates `None`/`Err` out of the enclosing
 function (family and error-payload compatibility checked in sema), runs
 defers on the early-exit path, and yields the payload on the ok path.
-`assert` remains for violated invariants. `tests/pos_optres.fsh`.
+`assert` remains for violated invariants. `tests/pos_optres.fsht`.
 
 ---
 
@@ -239,8 +239,8 @@ correctness, not preference. Because non-unit strides now compile, the
 `for` lowering actually honours the step expression (`i += E`, `i -= E`,
 `i = i ± E`, `by -1` descending ranges). The two historical negative
 tests were migrated to the warn-first contract and paired with
-strict-mode twins (`neg_arith{,_strict}.fsh`,
-`neg_straddle{,_strict}.fsh`, `neg_divzero.fsh`).
+strict-mode twins (`neg_arith{,_strict}.fsht`,
+`neg_straddle{,_strict}.fsht`, `neg_divzero.fsht`).
 
 ### 5.2 Floating-point default — Option A (report §8)
 
@@ -270,7 +270,7 @@ under `@fastmath` and a new check pins the strict default.
 - **Layout model (§5.4):** structs and `soa(S)` are untouched; the new
   types are complementary, exactly as recommended.
 
-`tests/pos_memmodes.fsh`, `tests/neg_ownedcall.fsh`.
+`tests/pos_memmodes.fsht`, `tests/neg_ownedcall.fsht`.
 
 ---
 
@@ -293,19 +293,19 @@ splicing).
   `mod::Type` in type position; qualifying a non-imported module is
   `F0004`.
 - **Resolution:** entry-file directory, then `-I<dir>`, then the
-  builtin modules directory, then `.` — for `geometry.fsh` or
-  `geometry/mod.fsh`; a missing module reports every searched path.
+  builtin modules directory, then `.` — for `geometry.fsht` or
+  `geometry/mod.fsht`; a missing module reports every searched path.
   **Circular imports are `F0004`** with the full cycle chain.
 - **IR symbol plan:** internal symbols disambiguate to
   `u_<module>$<name>` only when two modules define the same name;
   `main`, `export fn` and `extern fn` keep their exact C-ABI names.
 
-Tests: `pos_modules.fsh` (+ `tests/mods/`), `neg_import_private.fsh`,
-`neg_import_missing.fsh`, the circular-import pair.
+Tests: `pos_modules.fsht` (+ `tests/mods/`), `neg_import_private.fsht`,
+`neg_import_missing.fsht`, the circular-import pair.
 
 ### 7.2 Multi-file compilation and project builds (report §6.2) — DONE
 
-- `penstock main.fsh util.fsh` — every `.fsh` argument is a module of
+- `penstock main.fsht util.fsht` — every `.fsht` argument is a module of
   one program (the first is the entry); imports resolve the rest.
 - `penstock build [dir]` reads a `penstock.toml` manifest:
   `[project] name`, `[target] type = bin | static-lib | shared-lib` +
@@ -332,18 +332,18 @@ calls have unknown effects, so an indirect call inside `parfor` is
 `F0307` and `@pure` bodies may not contain them. Variadic C
 functions stay out of scope, as the report itself defers them.
 
-Tests: `pos_fnptr.fsh` (qsort), `neg_fnptr_parfor.fsh`.
+Tests: `pos_fnptr.fsht` (qsort), `neg_fnptr_parfor.fsht`.
 
 ### 7.4 The shipped `fsh` module (report §6.3, §4.7) — DONE
 
-`modules/fsh.fsh`, found through the builtin modules directory (no
+`modules/fsh.fsht`, found through the builtin modules directory (no
 `-I` needed): `args_count`, `args_get`, `arg_or`, `env_get`, `env_or`,
 `file_size`, `file_read`, `file_write`, `assert_eq_i64`,
 `assert_eq_f64` — ordinary I/O without a single manual `extern fn`.
 The C-level `libfsh` (`include/fsh/*.h`, `libfsh.a`) remains available
 through `extern fn` + `#link fsh` for everything not wrapped.
 
-Test: `pos_fsh_module.fsh` (argv, env, file write/read/size, defaults).
+Test: `pos_fsh_module.fsht` (argv, env, file write/read/size, defaults).
 
 ---
 
@@ -414,7 +414,7 @@ semantics**: a `break` exits only the executing lane's iteration set
 (never the whole `parfor`), `continue` skips to the lane's next
 iteration. The unroll/fusion/lane transforms still veto bodies with
 breaks, so no whole-program transform can drop an early exit.
-`tests/pos_parfor_break.fsh`.
+`tests/pos_parfor_break.fsht`.
 
 ### 9.3 Deliberately deferred (report Phase 5: "choose based on demand")
 
@@ -477,7 +477,7 @@ Both build systems were re-verified from a clean configure through
    emitted `%struct.X %param` while every call site passed `ptr`;
    `sum2(P{1.5, 2.5})` returned `1.5`. The spec's "parameters pass by
    address (callee sees a copy)" convention is now implemented on both
-   sides. (`tests/pos_structparam.fsh`.)
+   sides. (`tests/pos_structparam.fsht`.)
 2. **Constant-expressions stored into narrower slots** skipped the width
    cast (`store i32 %i64reg` — malformed IR).
 3. **`x /= 8` emitted `div`** (not even a valid LLVM opcode) — compound

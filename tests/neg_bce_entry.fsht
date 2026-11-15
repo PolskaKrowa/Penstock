@@ -1,0 +1,21 @@
+// Interprocedural BCE entry-fact seeding, differential (goose): the
+// SECOND call site passes an index the caller cannot prove in-range (an
+// untracked builtin result), so the site kills the pair cells and NO
+// entry facts are granted — get() keeps its bounds check (no entry=1 in
+// the report; the runtime value is in range so the check never fires).
+fn get(s: Span<f64>, i: usize) -> f64 {
+    return s[i];
+}
+
+fn main() {
+    let n: usize = 32;
+    let a: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = (i as f64) * 3.0; }
+    let s = span(a, n);
+    let mut t: f64 = 0.0;
+    for (i in 0..n) { t = t + get(s, i); }
+    let j: usize = imin(n, 5);     // untracked builtin result: in range
+    t = t + get(s, j);             // ...but not provably so
+    print_f64(t, 2); println();   // 1488.00 + 15.00 = 1503.00
+    free(a);
+}

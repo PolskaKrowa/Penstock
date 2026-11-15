@@ -16,6 +16,7 @@
 //     helps until the nested region drains (no blocking waits -> no
 //     deadlock).
 #include "irgen.h"
+#include "dstk.h"
 
 namespace freshet {
 
@@ -211,7 +212,8 @@ static void genCollapsedInner(Stmt* pf) {
   // Phase 3c (report §12/§14): break/continue inside a parfor body are
   // lane-local — push loop targets so BREAK/CONTINUE jump to this loop's
   // latch (continue) / exit (break: this chunk stops, others continue)
-  G->loopStack.push_back({exit, latch, deferStackDepth(), true});
+  G->loopStack.push_back({exit, latch, deferStackDepth(), true,
+                             G->dstkRestores.size()});
   genStmt(pf->body);
   G->loopStack.pop_back();
   if (!G->curLabelTerminated)
@@ -366,6 +368,29 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
   // SMT sibling lanes under FRT_SMT_INTERLEAVE=1)
   setI32(72, std::to_string(pf->smtMemClass));
 
+  // %sp threading (goose port v2): the dispatching context's first-free
+  // data-stack index rides in the range at offset 80; the runtime copies
+  // it into every task and passes it as the chunk fn's hidden 4th
+  // argument.  Each executing thread — a pool worker or the dispatching
+  // thread helping — addresses the region's stacks at [sp0, sp0+need) of
+  // its OWN per-thread tops array, so concurrent chunks never collide
+  // and the caller's live stacks [.., sp0) are disjoint by construction.
+  {
+    const dstk::RegionInfo* ri = dstk::regionInfoOf(pf);
+    size_t inUse = G->dstkRestores.size();
+    std::string sp0 = "0";
+    if (ri && ri->need > 0) {
+      if (G->curSpExpr != "0" && inUse == 0) {
+        sp0 = G->curSpExpr;
+      } else if (G->curSpExpr != "0" || inUse > 0) {
+        sp0 = G->t();
+        G->out << "  " << sp0 << " = add i64 " << G->curSpExpr << ", "
+               << inUse << "\n";
+      }
+    }
+    setI64(80, sp0);
+  }
+
   // ctxout array (the dispatch call fills it)
   r->ctxout = G->t();
   G->out << "  " << r->ctxout << " = alloca [" << MAXCTX << " x ptr]\n";
@@ -386,9 +411,22 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->bb = 1;
   auto saveAllocas = G->varAllocas;
   G->varAllocas.clear();   // fresh symbol map for the chunk fn
+  // %sp threading (goose port v2): the chunk fn carries its own stack
+  // context — the caller's pending restores and sp expression must not
+  // leak in, and the chunk fn's must not leak out
+  auto saveRestores = G->dstkRestores;
+  auto saveSpExpr = G->curSpExpr;
+  G->dstkRestores.clear();
+  const dstk::RegionInfo* ri = dstk::regionInfoOf(pf);
+  bool regionSp = ri && ri->need > 0 && dstk::g_total > 0;
+  G->curSpExpr = regionSp ? "%sp" : "0";
 
+  // hidden 4th arg i64 %sp (goose port v2): the dispatching context's
+  // first-free stack index, threaded through frt_range_t.sp0 — every
+  // chunk fn has the SAME signature, so the runtime holds one fn-ptr
+  // type; regions that use no stacks simply ignore it
   G->out << "define internal void @__pf_body_" << r.N
-         << "(i64 %lo, i64 %hi, ptr %ctx) #50 {\n";
+         << "(i64 %lo, i64 %hi, ptr %ctx, i64 %sp) #50 {\n";
   G->out << "entry:\n";
   G->curLabelTerminated = false;
 
@@ -448,6 +486,34 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->varAllocas[pf->pvar] = "%" + pf->pvar + ".addr";
   G->out << "  store i64 %lo, ptr %" << pf->pvar << ".addr\n";
 
+  // %sp threading (goose port v2): per-thread lazy stack init at the
+  // chunk fn entry — a POOL WORKER may be the first stack user on its
+  // thread (its tops array is still all-null), so every stack-using
+  // chunk fn checks and initializes before its first bump (same shape
+  // as emitFunction's entry check in irgen_stmt.cpp)
+  if (regionSp) {
+    std::string ixr = G->t();
+    G->out << "  " << ixr << " = add i64 %sp, 0\n";
+    std::string slot = G->t();
+    G->out << "  " << slot << " = getelementptr [@@DSTKN@@ x ptr], ptr "
+           << "@frt.dstk.tops, i64 0, i64 " << ixr << "\n";
+    std::string v = G->t();
+    G->out << "  " << v << " = load ptr, ptr " << slot << "\n";
+    std::string okr = G->t();
+    G->out << "  " << okr << " = icmp ne ptr " << v << ", null\n";
+    int cont = G->bb++, dinit = G->bb++;
+    G->out << "  br i1 " << okr << ", label %" << G->l(cont)
+           << ", label %" << G->l(dinit) << "\n";
+    G->terminate();
+    G->out << G->l(dinit) << ":\n";
+    G->curLabelTerminated = false;
+    G->out << "  call void @frt_dstk_init(ptr @frt.dstk.tops, i32 @@DSTKN@@)\n";
+    G->out << "  br label %" << G->l(cont) << "\n";
+    G->terminate();
+    G->out << G->l(cont) << ":\n";
+    G->curLabelTerminated = false;
+  }
+
   // loop
   int hdr = G->bb++, body = G->bb++, latch = G->bb++, exit = G->bb++;
   G->out << "  br label %" << G->l(hdr) << "\n";
@@ -472,7 +538,8 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   // body — lane-local semantics.  break -> this chunk's remaining
   // iterations are skipped (accs still written back at the exit block);
   // continue -> run the latch / next iteration.
-  G->loopStack.push_back({exit, latch, deferStackDepth(), true});
+  G->loopStack.push_back({exit, latch, deferStackDepth(), true,
+                             G->dstkRestores.size()});
   // Phase 5: @reproducible pins strict FP for the accumulator chain
   if (pf->reproducible) ++G->forceStrictFp;
   genStmt(pf->body);
@@ -512,6 +579,8 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->out.clear();
   G->out.seekp(0, std::ios::end);
   G->varAllocas = saveAllocas;
+  G->dstkRestores = saveRestores;
+  G->curSpExpr = saveSpExpr;
   G->curFnIsChunkFn = false;
   G->tmp = callerTmp;
   G->bb = callerBb;

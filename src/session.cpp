@@ -85,12 +85,12 @@ namespace {
 // The language server analyses individual editor buffers rather than a
 // whole executable target.  Only direct children of the project's `src/`
 // directory whose basename contains `main` as a standalone filename token
-// are treated as entry-point files.  In particular, src/pkg/foo_main.fsh
+// are treated as entry-point files.  In particular, src/pkg/foo_main.fsht
 // is a reusable child module and must not require fn main().
 bool lspFileRequiresMain(const std::string& filePath) {
   namespace fs = std::filesystem;
   const fs::path path = fs::path(filePath).lexically_normal();
-  if (path.extension() != ".fsh" || path.parent_path().filename() != "src")
+  if (path.extension() != ".fsht" || path.parent_path().filename() != "src")
     return false;
 
   std::string stem = path.stem().string();

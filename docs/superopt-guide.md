@@ -7,8 +7,8 @@ compiler; native library bindings provide LLVM IR operations, Z3 bit-vector
 queries, and Alive2 translation validation.
 
 ```sh
-bin/penstock -O3 program.fsh -o app
-bin/penstock -O4 --superopt-budget=10 program.fsh -o app
+bin/penstock -O3 program.fsht -o app
+bin/penstock -O4 --superopt-budget=10 program.fsht -o app
 ```
 
 ## Build stages
@@ -17,7 +17,7 @@ CMake deliberately uses a three-stage bootstrap:
 
 1. `penstock-bootstrap` is built from the normal compiler sources with
    superoptimisation disabled.
-2. That bootstrap compiler compiles `src/superopt.fsh` to a native object.
+2. That bootstrap compiler compiles `src/superopt.fsht` to a native object.
 3. The final `penstock` executable links the Freshet object, the native LLVM
    bridge, Alive2's static libraries, and static Z3.
 

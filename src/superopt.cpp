@@ -1,5 +1,5 @@
 // C++/Freshet ABI boundary for Penstock's embedded superoptimiser.
-// The search loop itself is compiled from src/superopt.fsh by the bootstrap
+// The search loop itself is compiled from src/superopt.fsht by the bootstrap
 // compiler and linked into the final Penstock executable.
 #include "common.h"
 

@@ -11,9 +11,9 @@ The previous genetic runtime tuner is still available but is opt-in because it
 executes and times a binary rather than proving instruction-sequence equivalence:
 
 ```sh
-bin/penstock -O4 program.fsh -o app
-bin/penstock -O4 --superopt-budget=20 program.fsh -o app
-bin/penstock -O4 --evo-runtime-tune --evo-budget=30 --evo-seed=42 program.fsh -o app
+bin/penstock -O4 program.fsht -o app
+bin/penstock -O4 --superopt-budget=20 program.fsht -o app
+bin/penstock -O4 --evo-runtime-tune --evo-budget=30 --evo-seed=42 program.fsht -o app
 ```
 
 ## Legacy runtime tuning (opt-in)
@@ -86,5 +86,5 @@ re-tuned binary. Typical release build:
 
 ```sh
 bin/penstock --soa=auto --use-profile=app.fprof -O4 --evo-budget=30 \
-    program.fsh -o app
+    program.fsht -o app
 ```

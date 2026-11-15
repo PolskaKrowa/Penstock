@@ -1,0 +1,21 @@
+// goose-ported @checkfree (F0924): every index in the checkfree chain is
+// proven (loop range against the asserted span length), so the promise
+// "no bounds check runs while a checkfree function does" holds.
+@checkfree
+fn sumspan(s: Span<f64>) -> f64 {
+    let m: usize = 32;
+    assert(s.len == m);
+    let mut t: f64 = 0.0;
+    for (i in 0..m) { t += s[i]; }
+    return t;
+}
+
+@checkfree
+fn main() {
+    let n: usize = 32;
+    let a: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = (i as f64) + 1.0; }
+    let s = span(a, n);
+    print_f64(sumspan(s), 2); println();
+    free(a);
+}

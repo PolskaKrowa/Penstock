@@ -1,5 +1,5 @@
 // Penstock — the Freshet compiler driver.
-//   penstock [options] file.fsh
+//   penstock [options] file.fsht
 // pipeline: preprocess -> lex -> parse -> sema -> strict checks -> ownership
 //           -> irgen (.ll) -> [+ runtime.ll] -> clang -O3 -march -> binary
 // R2 additions: --profile / --use-profile (PGO), soa support, nested parfor.
@@ -26,23 +26,23 @@ using namespace freshet;
 
 static const char* USAGE =
     "Penstock " FRESHET_VERSION " — Freshet compiler\n"
-    "usage: penstock [options] input.fsh [more.fsh ...]\n"
+    "usage: penstock [options] input.fsht [mor more.fsht ...]\n"
     "       penstock <subcommand> [args...]\n"
     "\n"
     "subcommands (Phase 3/4, report §6/§10):\n"
     "  build [--force] [dir]  compile the project in <dir> (penstock.toml;\n"
     "                    default .).  --force ignores the dependency\n"
     "                    cache and recompiles.\n"
-    "  test <file.fsh>    run every @test fn in the file (report §10.3):\n"
+    "  test <file.fsht>    run every @test fn in the file (report §10.3):\n"
     "                    per-test pass/fail lines, non-zero exit on failure\n"
-    "  fmt <file.fsh>     format source in place (report §10.2)\n"
+    "  fmt <file.fsht>     format source in place (report §10.2)\n"
     "  fmt --check <f>    exit 1 when the file is not already formatted\n"
-    "  lint <file.fsh>    diagnostics-only run (report §10.2)\n"
-    "  run <file.fsh>     compile and immediately execute\n"
+    "  lint <file.fsht>    diagnostics-only run (report §10.2)\n"
+    "  run <file.fsht>     compile and immediately execute\n"
     "\n"
-    "multi-file compilation (report §6.2): every .fsh input is a module\n"
+    "multi-file compilation (report §6.2): every .fsht input is a module\n"
     "of one program; `import geometry;` pulls a module's pub decls from\n"
-    "<dir>/geometry.fsh (search: entry dir, -I dirs, builtin modules, cwd).\n"
+    "<dir>/geometry.fsht (search: entry dir, -I dirs, builtin modules, cwd).\n"
     "\n"
     "  -o <file>          output file (default a.out; with -S: .ll, with -c: .o)\n"
     "  -S                 emit LLVM IR only (.ll)\n"
@@ -501,7 +501,7 @@ static std::string stripUserRtDecls(const std::string& ll) {
 
 // ---------------- diagnostics printing (rustc-style) -----------------------
 //   error[F0214]: division by zero
-//    --> prog.fsh:5:20
+//    --> prog.fsht:5:20
 //     |
 //   5 |     let r: i64 = x / 0;
 //     |                    ^
@@ -509,7 +509,14 @@ static std::string stripUserRtDecls(const std::string& ll) {
 //     = help: <text after " — " in the message>
 // Colour: only when stderr is a tty (or CLICOLOR_FORCE); NO_COLOR disables.
 static std::string paint(const char* sgr, const std::string& s) {
-  static const bool on = getenv("CLICOLOR_FORCE") || (!getenv("NO_COLOR") && isatty(2));
+  // CLICOLOR_FORCE=0 is NOT a force (the historical check treated any
+  // non-null value as one, so CLICOLOR_FORCE=0 overrode NO_COLOR and
+  // colourised redirected stderr — breaking greps anchored at column 0).
+  static const bool on = [] {
+    const char* f = getenv("CLICOLOR_FORCE");
+    if (f && *f && strcmp(f, "0") != 0) return true;
+    return !getenv("NO_COLOR") && isatty(2);
+  }();
   return on ? std::string("\x1b[") + sgr + "m" + s + "\x1b[0m" : s;
 }
 static const std::vector<std::string>& srcLines(const std::string& f) {
@@ -759,7 +766,7 @@ int main(int argc, char** argv) {
           file = a;
         }
         if (file.empty()) {
-          fprintf(stderr, "usage: penstock fmt [--check] <file.fsh>\n");
+          fprintf(stderr, "usage: penstock fmt [--check] <file.fsht>\n");
           return 1;
         }
         return formatSourceFile(file, check) ? 0 : 1;
@@ -911,6 +918,15 @@ int main(int argc, char** argv) {
     if (a == "--no-vector-plan")     { g_opts.vectorPlanOn = false; continue; }
     if (a == "--smt-interleave")     { g_opts.smtInterleaveOn = true; continue; }
     if (a == "--no-smt-interleave")  { g_opts.smtInterleaveOn = false; continue; }
+    // ---- goose-ported passes (bce / data stacks / sumred / basecase)
+    if (a == "--bce")              { g_opts.bceOn = true; continue; }
+    if (a == "--no-bce")           { g_opts.bceOn = false; continue; }
+    if (a == "--bce-lines")        { g_opts.bceLinesOn = true; continue; }
+    if (a == "--stacks")           { g_opts.dstkReportOn = true; continue; }
+    if (a == "--sum-reduction")    { g_opts.sumRedOn = true; continue; }
+    if (a == "--no-sum-reduction") { g_opts.sumRedOn = false; continue; }
+    if (a == "--basecase")         { g_opts.basecaseOn = true; continue; }
+    if (a == "--no-basecase")      { g_opts.basecaseOn = false; continue; }
     if (a.rfind("--proof-log=", 0) == 0) {
       g_opts.proofLogOn = true;
       g_opts.proofLogPath = a.substr(12);
@@ -1031,7 +1047,7 @@ int main(int argc, char** argv) {
       fprintf(stderr, "penstock: unknown option %s\n", a.c_str());
       return 1;
     }
-    // Phase 3a (report §6.2): every .fsh argument is a module of this
+    // Phase 3a (report §6.2): every .fsht argument is a module of this
     // compilation — the FIRST one is the entry module
     if (g_opts.input.empty()) { g_opts.input = a; continue; }
     g_opts.inputs.push_back(a);
@@ -1328,7 +1344,15 @@ int main(int argc, char** argv) {
   MemStageCounts nMemStage;
   int nBatched = 0;
   if (g_opts.optLevel >= 2 && !g_opts.noLoopOpts && !g_opts.profile) {
+    // goose basecase port runs FIRST: it pattern-matches the body as
+    // written, exactly like goose records the base case BEFORE its own
+    // optimizer touches the body (Optimizer::SetupBaseCase).
+    int nBasecase = g_opts.basecaseOn ? runBasecasePass(prog) : 0;
     nConstFold = runTypedConstFoldPass(prog);
+    // goose sumred port runs after const folding (so `s += 2.0 * a[i]`
+    // folds first) but before fusion/unrolling, which would obscure the
+    // single-statement body shape it matches.
+    int nSumRed = g_opts.sumRedOn ? runFpReductionPass(prog) : 0;
     nFuseUnroll = runFuseUnrollPasses(prog);
     nLane = runLaneAnalysisPass(prog);
     nXform = runLoopTransformPasses(prog);
@@ -1367,7 +1391,30 @@ int main(int argc, char** argv) {
               nMemStage.memReuse, nMemStage.movMin, nBatched,
               nVecNotes, nMemStage.smtPairs);
     }
+    if (nBasecase + nSumRed > 0) {
+      fprintf(stderr, "penstock: goose-ports: %d basecase inline(s), "
+                      "%d sum-reduction(s) applied\n", nBasecase, nSumRed);
+    }
   }
+
+  // ---- bounds-check elimination (goose bce port): the LAST pass before
+  // IRgen, exactly where goose runs BCE (once, after its whole optimizer,
+  // before codegen).  Off at -O0 (no optimization there, checks stay) and
+  // under --no-bce (the differential hatch: checks all stay).
+  if (g_opts.optLevel >= 1 && g_opts.bceOn && !g_opts.profile) {
+    BceCounts nBce = runBcePass(prog);
+    if (nBce.idxTotal + nBce.slTotal > 0)
+      fprintf(stderr, "penstock: bce: %d/%d index, %d/%d slice checks "
+                      "proven safe%s\n",
+              nBce.idxElided, nBce.idxTotal, nBce.slElided, nBce.slTotal,
+              nBce.entrySeeded > 0 ? "; entry facts seeded into "
+                                     "callee(s) from all-analyzed call "
+                                     "sites" : "");
+  }
+  // ---- data-stack memory model (goose port): scope/escape analysis of
+  // stack_alloc sites, the per-function stack-index layout and the
+  // F0925/F0926/F0927 diagnostics IRgen and the ownership rules need.
+  if (!g_opts.profile) runDstkAnalysis(prog);
 
   printDiags();
   if (errorCount()) return 1;

@@ -1,6 +1,8 @@
 # Freshet editor integrations
 
-This directory contains editor support for the `.fsh` Freshet language:
+This directory contains editor support for the `.fsht` Freshet language
+(the extension was renamed from `.fsh` to avoid the GLSL fragment-shader
+clash in editor filetype detection):
 
 - `vscode/` — installable VS Code extension source with TextMate highlighting and an LSP client for `freshet-language-server`.
 - `vim/` — native Vim filetype detection and syntax highlighting, plus optional `vim-lsp` registration.

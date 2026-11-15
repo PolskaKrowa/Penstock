@@ -12,7 +12,7 @@ set(PENSTOCK_SOURCES
   src/main.cpp)
 
 # Stage A0: a deliberately non-superoptimising compiler.  CMake uses this
-# binary to compile src/superopt.fsh into an object before the final compiler
+# binary to compile src/superopt.fsht into an object before the final compiler
 # is linked.  It has the same frontend/runtime paths as the final compiler,
 # but no reference to the native Z3/Alive2 bridge or the Freshet optimiser.
 add_executable(penstock-bootstrap EXCLUDE_FROM_ALL ${PENSTOCK_SOURCES})

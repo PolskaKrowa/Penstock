@@ -1,13 +1,14 @@
 # Freshet / Penstock
 
 **Freshet** is a strictly-typed, strictly-checked HPC language with C++/Rust-like
-syntax and C-level control over data layout. **Penstock** is its official compiler:
+syntax and C-level control over data layout.  Source files use the `.fsht`
+extension (renamed from `.fsh`, which clashed with GLSL fragment shaders). **Penstock** is its official compiler:
 a source-level loop-optimising, superoptimising pipeline that lowers Freshet to
 LLVM IR, drives Clang as its backend, and treats *predictable* performance bugs
 as compile-time diagnostics.
 
 ```
-penstock [options] input.fsh [more.fsh ...]
+penstock [options] input.fsht [mor more.fsht ...]
 ```
 
 ## Highlights
@@ -48,7 +49,7 @@ cmake -B build                        # configure (find or fetch the backend)
 cmake --build build -j                # bin/penstock + LSP server + libfsh
 cmake --build build --target check    # regression suite (or: ctest --test-dir build)
 
-cat > hello.fsh <<'EOF'
+cat > hello.fsht <<'EOF'
 struct Body { x: f64, y: f64, m: f64 }
 fn main() {
     let n: usize = 1000000;
@@ -63,15 +64,15 @@ fn main() {
     print_f64(mass, 2); println();     // 1000000.00
 }
 EOF
-bin/penstock --run hello.fsh
+bin/penstock --run hello.fsht
 ```
 
 Daily drivers:
 
 ```sh
-bin/penstock program.fsh -o app              # build (-O3 default)
-bin/penstock --report program.fsh -o app     # + performance report
-bin/penstock -O4 --superopt-budget=10 program.fsh -o app   # verified superopt
+bin/penstock program.fsht -o app              # build (-O3 default)
+bin/penstock --report program.fsht -o app     # + performance report
+bin/penstock -O4 --superopt-budget=10 program.fsht -o app   # verified superopt
 ```
 
 Backend pinning (`-DLLVM_ROOT=/path/to/llvm-20`), offline builds, installation

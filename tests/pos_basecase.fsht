@@ -1,0 +1,13 @@
+// goose-ported basecase (F0929): countdown's body starts with the base
+// case `if n <= 0 { return 0; }` (condition and result read only the
+// parameter), so every tail `return countdown(n - 1);` is rewritten to
+// bind n - 1 once, test the base condition inline and only recurse when
+// it fails — the leaf call returns without a frame.
+fn countdown(n: i64) -> i64 {
+    if n <= 0 { return 0; }
+    return countdown(n - 1);
+}
+
+fn main() {
+    print_i64(countdown(5)); println();   // 0
+}

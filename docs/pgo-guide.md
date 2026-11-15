@@ -4,13 +4,13 @@ Profile-guided optimization in three steps:
 
 ```
 # 1. instrument
-penstock --profile prog.fsh -o prog_prof
+penstock --profile prog.fsht -o prog_prof
 
 # 2. run with representative data  (writes prog_prof.fprof)
 ./prog_prof                     # or: FRT_PROF_OUT=my.prof ./prog_prof
 
 # 3. recompile guided
-penstock --use-profile=prog_prof.fprof prog.fsh -o prog
+penstock --use-profile=prog_prof.fprof prog.fsht -o prog
 ```
 
 ## What gets instrumented
@@ -44,7 +44,7 @@ With `--use-profile`:
   inlining/unrolling).
 - Unprofiled branches get neutral 50/50 weights.
 
-Verify with `penstock -S --use-profile=... prog.fsh -o prog.ll` and grep:
+Verify with `penstock -S --use-profile=... prog.fsht -o prog.ll` and grep:
 
 ```
 define internal i64 @u_classify(double %vparam) hot #7 !prof !100
@@ -54,7 +54,7 @@ define internal i64 @u_classify(double %vparam) hot #7 !prof !100
 
 ## PGO + performance report
 
-`penstock --report --use-profile=p.fprof prog.fsh` runs the binary once
+`penstock --report --use-profile=p.fprof prog.fsht` runs the binary once
 with `FRT_TIMING=1` and merges:
 
 1. frontend diagnostic tallies + struct layout table
@@ -87,13 +87,13 @@ instrumentation):
 
 ```sh
 # 1. training build:
-penstock --llvm-pgo-generate app.fsh -o app_prof
+penstock --llvm-pgo-generate app.fsht -o app_prof
 # 2. run with a named profile output:
 LLVM_PROFILE_FILE=app.profraw ./app_prof
 # 3. reuse (profraw / a directory of them / a comma list; raw profiles
 #    are merged automatically with llvm-profdata, which is looked up in
 #    $LLVM_ROOT/bin, then $PATH — or pointed at explicitly):
-penstock --llvm-pgo-use=app.profraw app.fsh -o app
+penstock --llvm-pgo-use=app.profraw app.fsht -o app
 ```
 
 `--llvm-profdata=<exe>` overrides the tool location.  If the tool is

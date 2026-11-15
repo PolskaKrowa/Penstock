@@ -1,6 +1,6 @@
 # Helpers provided by the installed Penstock CMake package.
 #
-# penstock_add_executable(<target> <source.fsh>
+# penstock_add_executable(<target> <source.fsht>
 #   [OUTPUT_NAME <name>]
 #   [OPTIONS <penstock-option>...]
 #   [DEPENDS <file>...])
@@ -12,7 +12,7 @@ function(penstock_add_executable target source)
     message(FATAL_ERROR "penstock_add_executable requires find_package(Penstock CONFIG)")
   endif()
   if(NOT target OR NOT source)
-    message(FATAL_ERROR "usage: penstock_add_executable(target source.fsh [...])")
+    message(FATAL_ERROR "usage: penstock_add_executable(target source.fsht [...])")
   endif()
 
   set(_one_value_args OUTPUT_NAME)

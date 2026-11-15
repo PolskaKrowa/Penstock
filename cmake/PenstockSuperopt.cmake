@@ -1,7 +1,7 @@
 # ------------------------------------------------ embedded superoptimiser
 # The stage graph is intentionally self-hosting:
 #   A. penstock-bootstrap is built without superoptimisation;
-#   B. that compiler compiles src/superopt.fsh to a native object;
+#   B. that compiler compiles src/superopt.fsht to a native object;
 #   C. final penstock links the Freshet object plus static Z3/Alive2 libraries.
 # No Souper package, alive-tv executable, or z3 executable is used at runtime.
 
@@ -723,13 +723,13 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
   add_custom_command(
     OUTPUT "${_penstock_freshet_superopt_obj}"
     COMMAND "$<TARGET_FILE:penstock-bootstrap>" -O0 -S --legacy-S
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/superopt.fsh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/superopt.fsht"
             -o "${_penstock_freshet_superopt_ll}"
     COMMAND "${LLVM_ROOT}/bin/clang" -O2 -fPIC -c
             "${_penstock_freshet_superopt_ll}"
             -o "${_penstock_freshet_superopt_obj}"
     DEPENDS penstock-bootstrap
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/superopt.fsh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/superopt.fsht"
             "${FRT_RT_CACHE}"
             "${LLVM_ROOT}/bin/clang"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"

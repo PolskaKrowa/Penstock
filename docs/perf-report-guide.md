@@ -3,7 +3,7 @@
 Enable with `--report`:
 
 ```
-penstock --report prog.fsh -o app
+penstock --report prog.fsht -o app
 ```
 
 The compiler builds `app`, executes it once with `FRT_TIMING=1` (the
@@ -90,10 +90,10 @@ Inspecting the backend artefact:
 
 ```sh
 # the module the backend optimises (input):
-penstock --emit-combined-ir kernel.fsh -o kernel
+penstock --emit-combined-ir kernel.fsht -o kernel
 # the OPTIMISED module the backend produced (output):
-penstock --emit-final-ir kernel.fsh -o kernel        # -> kernel.final.ll
+penstock --emit-final-ir kernel.fsht -o kernel        # -> kernel.final.ll
 # backend remarks + record file:
-penstock --opt-remarks=vectorize,inline kernel.fsh -o kernel
+penstock --opt-remarks=vectorize,inline kernel.fsht -o kernel
 #   -> kernel.opt-records.yaml (parsed by layer [2b] of --report)
 ```

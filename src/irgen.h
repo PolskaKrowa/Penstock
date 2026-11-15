@@ -39,6 +39,15 @@ struct IrGen {
   std::vector<std::string> deferStack;     // IR text of deferred calls
   int parforCounter = 0;
 
+  // ---- data stacks (goose port: bump-pointer scope memory) -------------
+  // per-function emission state: the current stack-index expression base
+  // ("%sp" for a stack-using fn, "0" for entries and plain callers) and
+  // the live bump-restores (slot expression, base value) of the scopes
+  // currently open — BLOCK ends, break/continue and returns emit the
+  // watermark restores from this stack (see irgen_stmt.cpp).
+  std::string curSpExpr = "0";
+  std::vector<std::pair<std::string, std::string>> dstkRestores;
+
   // Phase 1a (report §4.4): break/continue targets + the defer-stack
   // depth at loop entry (defers registered inside the body run before the
   // branch leaves the loop)
@@ -47,6 +56,10 @@ struct IrGen {
     int continueBB = -1;
     size_t deferBase = 0;
     bool isParfor = false;
+    // data stacks (goose port): live bump-restores at loop entry — a
+    // break/continue restores the watermarks of scopes opened INSIDE the
+    // loop, never the loop's own enclosing bumps
+    size_t dstkBase = 0;
   };
   std::vector<LoopCtx> loopStack;
 
@@ -171,6 +184,9 @@ std::string genAddr(Expr* e);            // lvalue -> pointer register
 void genStmt(Stmt* s);
 void genParfor(Stmt* pf);
 void emitDeferredAll();
+// data stacks (goose port): emit the watermark restores of every scope
+// opened at or after `from` (reverse declaration order) — see irgen_stmt.cpp
+void emitDstkRestores(size_t from);
 std::string genCall(Expr* e);
 std::string genSoaFieldAddr(Expr* fld);
 std::string genCastInline(Expr* fromExpr, Type* to, std::string v);

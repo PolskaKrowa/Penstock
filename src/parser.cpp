@@ -1063,7 +1063,7 @@ struct Parser {
       // (back-compat with any code using the historical form).
       bool preInline = false, preNoinline = false, preStrictfp = false;
       bool prePure = false, preFastmath = false, preHpcStrict = false;
-      bool preUnsafe = false;
+      bool preUnsafe = false, preCheckfree = false;
       std::vector<std::pair<std::string,std::string>> preAliasPairs;
       while (at("@")) {
         advance();
@@ -1076,6 +1076,7 @@ struct Parser {
         else if (attr == "hpc_strict") preHpcStrict = true;
         else if (attr == "unsafe") preUnsafe = true;
         else if (attr == "test") preTest = true;
+        else if (attr == "checkfree") preCheckfree = true;
         else if (attr == "alias") {
           expect("(", "alias");
           std::string a = expectIdent("param");
@@ -1104,6 +1105,7 @@ struct Parser {
         f->fastmath = preFastmath;
         f->hpcStrict = preHpcStrict;
         f->unsafeFn = preUnsafe;
+        f->checkfree = preCheckfree;
         for (auto& pr : preAliasPairs) f->aliasPairs.push_back(pr);
         f->name = expectIdent("fn name");
         // Phase 2a (report §4.2): generic function template
@@ -1165,6 +1167,7 @@ struct Parser {
           else if (attr == "hpc_strict") f->hpcStrict = true;
           else if (attr == "unsafe") f->unsafeFn = true;
           else if (attr == "test") f->isTest = true;
+          else if (attr == "checkfree") f->checkfree = true;
           else if (attr == "alias") {
             expect("(", "alias");
             std::string a = expectIdent("param");

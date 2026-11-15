@@ -1,0 +1,13 @@
+// goose-ported sumred (F0928) legality: `s += s * a[i];` — the accumulated
+// term READS the accumulator, so the additions to s are observable by the
+// terms and moving them is not bit-identical.  The pass must leave the
+// loop alone (no F0928); the program must still compile and run.
+fn main() {
+    let n: u64 = 37;
+    let a: *f64 = malloc(f64, n);
+    for (i in 0..n) { a[i] = 0.25; }
+    let mut s: f64 = 1.0;
+    for (i in 0..n) { s += s * a[i]; }    // e reads s -> veto
+    print_f64(s, 6); println();
+    free(a);
+}

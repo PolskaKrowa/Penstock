@@ -1,0 +1,10 @@
+// goose-ported data stacks: growth never checks a capacity — each region
+// is reserved up front with a PROT_NONE guard page behind it, and the
+// runtime's SIGSEGV handler turns a walk into the guard into a clean
+// overflow report.  With FRT_DSTK_RESERVE=1048576 (1 MiB), the write
+// below lands in the guard and the process exits 134 with the message.
+fn main() {
+    let p: *f64 = stack_alloc(f64, 300000);
+    p[140000] = 1.0;   // base + 1.12 MiB: inside the 1 MiB guard region
+    print_f64(p[0], 1); println();
+}

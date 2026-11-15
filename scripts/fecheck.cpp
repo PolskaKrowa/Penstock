@@ -7,7 +7,7 @@
 // file.  Useful for sandbox/no-LLVM environments (scripts/build.sh
 // builds it) and for pass-level differential testing of the IR text.
 //
-// usage: fecheck [flags] input.fsh [-o out.ll]
+// usage: fecheck [flags] input.fsht [-o out.ll]
 //   flags: -O0..-O4, and every loop-pass / mem-stage flag penstock
 //   understands (--mem-reuse, --mov-minimize, --batch-ops,
 //   --vector-plan, --smt-interleave, --no-loop-opts, --licm, ...).
@@ -58,6 +58,17 @@ static void parseArgs(int argc, char** argv, std::string* input,
     if (a == "--no-vector-plan") { g_opts.vectorPlanOn = false; continue; }
     if (a == "--smt-interleave") { g_opts.smtInterleaveOn = true; continue; }
     if (a == "--no-smt-interleave") { g_opts.smtInterleaveOn = false; continue; }
+    // goose-ported passes
+    if (a == "--bce") { g_opts.bceOn = true; continue; }
+    if (a == "--no-bce") { g_opts.bceOn = false; continue; }
+    if (a == "--bce-lines") { g_opts.bceLinesOn = true; continue; }
+    if (a == "--stacks") { g_opts.dstkReportOn = true; continue; }
+    if (a == "--sum-reduction") { g_opts.sumRedOn = true; continue; }
+    if (a == "--no-sum-reduction") { g_opts.sumRedOn = false; continue; }
+    if (a == "--basecase") { g_opts.basecaseOn = true; continue; }
+    if (a == "--no-basecase") { g_opts.basecaseOn = false; continue; }
+    if (a == "--checked") { g_opts.checked = true; continue; }
+    if (a == "--no-bounds-check") { g_opts.noBoundsCheck = true; continue; }
     if (a.rfind("--target-vector-width=", 0) == 0) {
       g_opts.targetVectorWidth = atoi(a.c_str() + 22);
       continue;
@@ -76,7 +87,7 @@ int main(int argc, char** argv) {
   std::string input, outLl;
   parseArgs(argc, argv, &input, &outLl);
   if (input.empty()) {
-    fprintf(stderr, "usage: fecheck [flags] input.fsh [-o out.ll]\n");
+    fprintf(stderr, "usage: fecheck [flags] input.fsht [-o out.ll]\n");
     return 1;
   }
 
@@ -106,7 +117,9 @@ int main(int argc, char** argv) {
 
   // ---- loop passes + mem & vectorisation stage (same order as main)
   if (g_opts.optLevel >= 2 && !g_opts.noLoopOpts) {
+    if (g_opts.basecaseOn) runBasecasePass(prog);
     runTypedConstFoldPass(prog);
+    if (g_opts.sumRedOn) runFpReductionPass(prog);
     runFuseUnrollPasses(prog);
     runLaneAnalysisPass(prog);
     runLoopTransformPasses(prog);
@@ -115,6 +128,10 @@ int main(int argc, char** argv) {
     runSmtInterleavePass(prog);
     if (g_opts.parforAdvisorOn) runParforAdvisorPass(prog);
   }
+  // ---- bounds-check elimination + data-stack analysis (same order/gates
+  // as main: BCE last before IRgen, dstk analysis right after it)
+  if (g_opts.optLevel >= 1 && g_opts.bceOn) runBcePass(prog);
+  runDstkAnalysis(prog);
 
   // ---- notes / diagnostics
   int errors = 0;

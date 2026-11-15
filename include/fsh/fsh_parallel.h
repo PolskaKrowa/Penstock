@@ -2,6 +2,10 @@
  *
  * The historical runtime exposes:
  *   int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx);
+ *     (the range's chunk fn carries a hidden 4th argument since the
+ *      goose data-stack port: the data-stack index base, frt_range_t.sp0
+ *      at offset 80 — libfsh bodies never use data stacks, so the
+ *      fsh_parallel_for adaptor passes 0)
  *   int32_t __frt_env_threads;
  *   void frt_init(void);
  *

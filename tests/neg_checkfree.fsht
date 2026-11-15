@@ -1,0 +1,16 @@
+// goose-ported @checkfree (F0924) legality: helper keeps an unprovable
+// check (runtime j), and the checkfree caller inherits the violation
+// transitively — "no bounds check runs while a checkfree function does".
+fn helper(s: Span<f64>, j: usize) -> f64 {
+    return s[j];
+}
+
+@checkfree
+fn main() {
+    let a: *f64 = malloc(f64, 4);
+    let s = span(a, 4);
+    let mut k: usize = 0;
+    k = k + 3;
+    print_f64(helper(s, k), 2); println();
+    free(a);
+}

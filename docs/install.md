@@ -84,7 +84,7 @@ If the Clang installation moves or you want to use another supported backend,
 set `LLVM_ROOT` to the LLVM prefix containing `bin/clang` and `bin/clang++`:
 
 ```sh
-LLVM_ROOT=/usr/lib/llvm-21 penstock -O3 hello.fsh -o hello
+LLVM_ROOT=/usr/lib/llvm-21 penstock -O3 hello.fsht -o hello
 ```
 
 Installed compiler scratch files and the generated runtime IR cache are kept
@@ -104,9 +104,9 @@ project(MyFreshetApp LANGUAGES C CXX)
 find_package(Penstock CONFIG REQUIRED)
 
 penstock_add_executable(my_app
-  src/main.fsh
+  src/main.fsht
   OPTIONS -O3 --portable
-  DEPENDS src/constants.fsh)
+  DEPENDS src/constants.fsht)
 ```
 
 The function creates an `ALL` build target named `my_app` and builds the
@@ -131,9 +131,9 @@ be called directly:
 find_package(Penstock CONFIG REQUIRED)
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/my_app"
-  COMMAND Penstock::compiler -O3 "${CMAKE_CURRENT_SOURCE_DIR}/src/main.fsh"
+  COMMAND Penstock::compiler -O3 "${CMAKE_CURRENT_SOURCE_DIR}/src/main.fsht"
           -o "${CMAKE_CURRENT_BINARY_DIR}/my_app"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.fsh"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.fsht"
   VERBATIM)
 add_custom_target(my_app ALL
   DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/my_app")

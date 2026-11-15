@@ -141,9 +141,14 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
   sym.ty = t;
   sym.mut = s->mut;
   sym.declLoc = s->loc;   // Phase 4: LSP goto-definition / rename
-  // ownership: malloc result / give-received
+  // ownership: malloc result / give-received.  stack_alloc results are
+  // writable through immutable bindings like owned heap (the binding is
+  // const, the scope exclusively owns the memory) — but they are NOT
+  // heap-owned: free() on them is F0927 and they never leak (the
+  // scope-exit watermark restore frees them).
   if (s->init->k == Expr::CALL && s->init->name == "malloc") sym.owned = true;
   if (s->init->k == Expr::CALL && s->init->name == "soa_new") sym.owned = true;
+  if (s->init->k == Expr::CALL && s->init->name == "stack_alloc") sym.owned = true;
   fs->varDepth[s->var] = fs->parforDepth;
   fs->declare(sym);
 }

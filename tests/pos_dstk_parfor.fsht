@@ -1,0 +1,28 @@
+// %sp threading through frt_parfor (goose port v2): a dispatched parfor
+// body is lowered to a chunk fn `__pf_body_N(lo, hi, ctx, %sp)` whose
+// hidden %sp is the dispatching context's first-free stack index, threaded
+// through frt_range_t.sp0 at offset 80.  Each executing thread (a pool
+// worker or the helping dispatcher) bumps its OWN per-thread tops array
+// at [sp0, sp0+need), so the region-local stack_alloc below and the
+// stack-using helper called from the body both work — per iteration:
+// p[1] = 2i+1 and scratch_fill(i, i+2) = i + (i+1) = 2i+1, so the
+// reduction sums (4i+2) over i in 0..8 = 4*28+16 = 128.
+fn scratch_fill(lo: usize, hi: usize, seed: f64) -> f64 {
+    let p: *f64 = stack_alloc(f64, hi - lo);
+    let mut t: f64 = 0.0;
+    for (i in lo..hi) { p[i - lo] = (i as f64) * seed; }
+    for (i in lo..hi) { t += p[i - lo]; }
+    return t;   // p dies here (watermark restore at the fn scope end)
+}
+
+fn main() {
+    let mut t: f64 = 0.0;
+    parfor (i in 0..8) [reduction(+:t)] {
+        let p: *f64 = stack_alloc(f64, 4);   // region-local stack
+        p[0] = (i as f64) * 2.0;
+        p[1] = p[0] + 1.0;
+        t += p[1];
+        t += scratch_fill(i, i + 2, 1.0);    // stack-using callee
+    }
+    print_f64(t, 2); println();              // 128.00
+}

@@ -22,8 +22,8 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/fsh/"
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/runtime/frt_rt.c"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/penstock/runtime")
 # Phase 3 (report §6.3): the Freshet-facing stdlib module — installed where
-# builtinModulesDir() finds it (<prefix>/share/penstock/modules/fsh.fsh)
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/modules/fsh.fsh"
+# builtinModulesDir() finds it (<prefix>/share/penstock/modules/fsh.fsht)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/modules/fsh.fsht"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/penstock/modules")
 # Long-form diagnostic pages for `penstock --explain` (docs/errors/<ID>.md);
 # installed where explainCode() looks: <prefix>/share/penstock/errors

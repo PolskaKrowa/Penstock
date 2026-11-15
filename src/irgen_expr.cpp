@@ -178,9 +178,10 @@ std::string genAddr(Expr* e) {
           idx = w;
         }
         // bounds check (checked builds only; constants are proven safe in
-        // sema)
-        if (!(e->rhs->constant && e->rhs->k == Expr::INT &&
-              e->rhs->ival < bt->arrLen)) {
+        // sema, and the BCE pass (goose port) proves the rest it can)
+        if (!(e->bceSafe ||
+              (e->rhs->constant && e->rhs->k == Expr::INT &&
+               e->rhs->ival < bt->arrLen))) {
           std::string lenV = G->t();
           G->out << "  " << lenV << " = add i64 0, " << bt->arrLen << "\n";
           emitBoundsCheck(idx, lenV, e->loc);
@@ -209,7 +210,7 @@ std::string genAddr(Expr* e) {
                  << " " << idx << " to i64\n";
           idx = w;
         }
-        emitBoundsCheck(idx, len, e->loc);
+        if (!e->bceSafe) emitBoundsCheck(idx, len, e->loc);
         std::string a = G->t();
         G->out << "  " << a << " = getelementptr inbounds "
                << G->llvmType(bt->pointee) << ", ptr " << data << ", i64 "
@@ -233,7 +234,7 @@ std::string genAddr(Expr* e) {
                  << " " << idx << " to i64\n";
           idx = w;
         }
-        emitBoundsCheck(idx, len, e->loc);
+        if (!e->bceSafe) emitBoundsCheck(idx, len, e->loc);
         std::string a = G->t();
         G->out << "  " << a << " = getelementptr inbounds i8, ptr " << data
                << ", i64 " << idx << "\n";
@@ -879,8 +880,9 @@ std::string genExpr(Expr* e) {
           hv = genCastInline(e->rhs, Type::simple(Type::I64), hv);
         hi = hv;
       }
-      // checked builds validate 0 <= lo <= hi <= len
-      if (boundsChecksEnabled()) {
+      // checked builds validate 0 <= lo <= hi <= len (the BCE pass —
+      // goose port — proves what it can and marks e->bceSafe)
+      if (boundsChecksEnabled() && !e->bceSafe) {
         std::string c1 = G->t();
         G->out << "  " << c1 << " = icmp ule i64 " << lo << ", " << hi << "\n";
         std::string c2 = G->t();

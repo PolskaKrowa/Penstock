@@ -40,11 +40,23 @@ namespace freshet {
 namespace {
 
 // provenance of the root variable of a FIELD/INDEX chain
-enum RootKind { RK_SCALAR_LOCAL, RK_PARAM, RK_LOCAL_PTR, RK_GLOBAL, RK_UNKNOWN };
+enum RootKind { RK_SCALAR_LOCAL, RK_PARAM, RK_LOCAL_PTR, RK_STACK,
+                RK_GLOBAL, RK_UNKNOWN };
+
+// names of this fn bound (directly or through copies/spans/casts) to
+// stack_alloc memory — filled per-fn by collectStackRooted; single-
+// threaded pass state like the rest of the walker
+static std::set<std::string> g_stackRooted;
+
+static void collectStackRooted(Stmt* s);
 
 RootKind classifyRoot(FnSema* fs, Expr* root) {
   if (!root || root->k != Expr::IDENT) return RK_UNKNOWN;
   const std::string& n = root->name;
+  // data stacks (goose port v2): a binding rooted at stack_alloc memory
+  // is per-thread scratch — invisible outside the call — checked before
+  // the generic pointer case below
+  if (!n.empty() && g_stackRooted.count(n)) return RK_STACK;
   if (fs) {
     if (Sym* s = fs->lookup(n)) {
       if (s->k == Sym::PARAM) return RK_PARAM;
@@ -57,6 +69,45 @@ RootKind classifyRoot(FnSema* fs, Expr* root) {
   }
   if (root->globalRef || lookupGlobal(n)) return RK_GLOBAL;
   return RK_UNKNOWN;
+}
+
+// fill g_stackRooted from a fn body: LET names whose initializer is a
+// stack_alloc, a cast of an already-rooted name, or a re-binding from
+// one — in declaration order (copies follow their source).  A span LET
+// (let s = span(p, n)) stays a VALUE binding: its construction is an
+// unmodelled builtin (unknownCall below), which conservatively covers
+// every access through it in the same fn.
+static void collectStackRooted(Stmt* s) {
+  if (!s) return;
+  auto exprRoots = [&](Expr* e, const std::string& var) {
+    if (!e || var.empty()) return;
+    if (e->k == Expr::CALL && e->name == "stack_alloc") {
+      g_stackRooted.insert(var);
+    } else if (e->k == Expr::CAST) {
+      Expr* b = e->base;
+      if (b && b->k == Expr::IDENT && !b->name.empty() &&
+          g_stackRooted.count(b->name))
+        g_stackRooted.insert(var);
+    }
+  };
+  switch (s->k) {
+    case Stmt::LET: exprRoots(s->init, s->var); break;
+    case Stmt::ASSIGN:
+      // re-binding a rooted name from another rooted name keeps it rooted
+      if (s->lhs && s->lhs->k == Expr::IDENT && s->rhs &&
+          s->rhs->k == Expr::IDENT && !s->rhs->name.empty() &&
+          g_stackRooted.count(s->rhs->name))
+        g_stackRooted.insert(s->lhs->name);
+      else if (s->lhs && s->lhs->k == Expr::IDENT)
+        g_stackRooted.erase(s->lhs->name);   // unrooted rebinding
+      break;
+    default: break;
+  }
+  collectStackRooted(s->body);
+  collectStackRooted(s->thenB);
+  collectStackRooted(s->elseB);
+  for (auto* st : s->stmts) collectStackRooted(st);
+  for (auto& arm : s->matchArms) collectStackRooted(arm.body);
 }
 
 // root of a FIELD/INDEX chain (field-derefs and indexes are the memory
@@ -73,6 +124,7 @@ void readOfRoot(FnSema* fs, Expr* root, Effects& e) {
   switch (classifyRoot(fs, root)) {
     case RK_PARAM:        e.readsArg = true; break;
     case RK_LOCAL_PTR:    e.readsArg = e.readsOther = true; break;  // param or heap
+    case RK_STACK:        e.readsStack = true; break;   // per-thread scratch
     case RK_GLOBAL:       e.readsOther = true; break;
     case RK_SCALAR_LOCAL: break;                                  // alloca load
     case RK_UNKNOWN:      e.readsArg = e.readsOther = true; break;
@@ -82,6 +134,7 @@ void writeOfRoot(FnSema* fs, Expr* root, Effects& e) {
   switch (classifyRoot(fs, root)) {
     case RK_PARAM:        e.writesArg = true; break;
     case RK_LOCAL_PTR:    e.writesArg = e.writesOther = true; break;
+    case RK_STACK:        e.writesStack = true; break;  // per-thread scratch
     case RK_GLOBAL:       e.writesOther = true; break;
     case RK_SCALAR_LOCAL: break;                                  // alloca store
     case RK_UNKNOWN:      e.writesArg = e.writesOther = true; break;
@@ -100,6 +153,35 @@ void readThrough(FnSema* fs, Expr* leaf, Effects& e) {
 // name handled here (caller then treats it as unknown).
 // `strictfp` selects the strict-FP lowering, where sin/cos/... stay
 // scalar libm calls that may read/write errno (memory).
+// A bounds-check site (checked builds / -O0/-O1) may TRAP: the abort path
+// writes stderr and does not return, exactly like `assert`.  A function
+// whose effect summary omits this is attributed `willreturn` (and possibly
+// stronger), which let the -O1+ backend delete a failing check's trap as
+// side-effect-free dead code — wrong code in every checked build (found
+// while testing the BCE port: an out-of-range index printed 0.00 instead
+// of aborting at -O2).  Mirrors irgen_expr.cpp's emitBoundsCheck call
+// sites; the BCE pass may later elide the check, which only loses the
+// willreturn attribute (never unsound).
+static void checkSiteEffect(Expr* e, Effects& eff) {
+  if (g_opts.noBoundsCheck) return;
+  if (!g_opts.checked && g_opts.optLevel > 1) return;
+  Type* bt = e->base ? e->base->ty : nullptr;
+  bool emits = false;
+  if (e->k == Expr::SLICE) {
+    emits = true;                      // 0 <= lo <= hi <= len is checked
+  } else if (bt && (bt->k == Type::SPAN || bt->k == Type::STR)) {
+    emits = true;
+  } else if (bt && bt->k == Type::ARRAY) {
+    // a constant index in range is proven in sema and never checked
+    emits = !(e->rhs && e->rhs->k == Expr::INT && e->rhs->constant &&
+              e->rhs->ival < bt->arrLen);
+  }
+  if (emits) {
+    eff.io = true;
+    eff.mayNotReturn = true;
+  }
+}
+
 void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
   // lowered to llvm.* intrinsics: memory-free
   static const std::set<std::string> kIntrinsicMath = {
@@ -122,6 +204,18 @@ void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
   }
   if (n == "malloc" || n == "soa_new") { e.allocates = true; return; }
   if (n == "free" || n == "soa_free")  { e.freesMem = true; return; }
+  // data stacks (goose port v2): the bump loads and stores the
+  // thread-local stack-top array — per-thread scratch that no other
+  // thread, iteration or caller can observe (the %sp-threaded parfor
+  // dispatch gives every executing thread its own stacks), so it is
+  // NOT "other" memory for the observable-impurity lattice; the
+  // fn-attribute derivation still sees it (memory(readwrite), never
+  // memory(none)) via readsStack/writesStack
+  if (n == "stack_alloc") {
+    e.readsStack = true;
+    e.writesStack = true;
+    return;
+  }
   if (n == "print" || n == "print_f64" || n == "print_i64" ||
       n == "print_u64" || n == "println") { e.io = true; return; }
   if (n == "assert") {                  // abort path: writes stderr, may not return
@@ -151,7 +245,8 @@ void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
 // reads/writes argument memory receives such a root, the callee may
 // touch this function's own stack or heap, which is "other" memory, not
 // argmem — recording only writesArg there would be unsound.
-struct RootProbe { bool anyLocal = false, anyGlobal = false; };
+struct RootProbe { bool anyLocal = false, anyGlobal = false;
+                   bool anyStack = false; };
 void probeArgRoots(FnSema* fs, Expr* arg, RootProbe& p) {
   if (!arg) return;
   Expr* r = arg;
@@ -163,6 +258,7 @@ void probeArgRoots(FnSema* fs, Expr* arg, RootProbe& p) {
     case RK_SCALAR_LOCAL:
     case RK_LOCAL_PTR: p.anyLocal = true; break;
     case RK_GLOBAL:    p.anyGlobal = true; break;
+    case RK_STACK:     p.anyStack = true; break;
     default: break;
   }
 }
@@ -204,6 +300,7 @@ struct EffectWalker {
         // p[i] / soa[i] — a load through the base (or a soa plane access)
         readThrough(fs, e, eff);
         if (viol) violate("reads memory through '" + rootName(e) + "'", e->loc);
+        checkSiteEffect(e, eff);   // the bounds check may trap (like assert)
         walkExpr(e->rhs, eff);
         walkExpr(e->base, eff);
         return;
@@ -247,6 +344,7 @@ struct EffectWalker {
       case Expr::SLICE:     // Phase 1c: base[lo..hi] — reads the base
         readThrough(fs, e, eff);
         if (viol) violate("reads memory through '" + rootName(e) + "'", e->loc);
+        checkSiteEffect(e, eff);   // the slice bounds check may trap
         walkExpr(e->base, eff);
         walkExpr(e->lhs, eff);
         walkExpr(e->rhs, eff);
@@ -312,6 +410,13 @@ struct EffectWalker {
       if (p.anyLocal || p.anyGlobal) {
         if (c.readsArg)  c.readsOther = true;
         if (c.writesArg) c.writesOther = true;
+      }
+      // a data-stack-rooted argument (goose port v2): the callee's
+      // argmem access on it touches THIS thread's per-thread stacks —
+      // scratch, not observable "other" memory
+      if (p.anyStack) {
+        if (c.readsArg)  c.readsStack = true;
+        if (c.writesArg) c.writesStack = true;
       }
       if (viol) {
         // @pure callers may only call functions that touch no memory
@@ -495,6 +600,8 @@ void computeEffects(Program* p) {
     changed = false;
     for (auto* f : fns) {
       FnSema* fs = semaForFn(f);
+      g_stackRooted.clear();
+      collectStackRooted(f->body);
       EffectWalker w{f, fs, &cur, nullptr};
       Effects e;
       w.walkStmt(f->body, e);
@@ -589,6 +696,8 @@ void computeEffects(Program* p) {
   for (auto* f : fns) {
     if (!f->userPure) continue;
     FnSema* fs = semaForFn(f);
+    g_stackRooted.clear();
+    collectStackRooted(f->body);
     std::vector<PureViolation> viol;
     EffectWalker w{f, fs, &cur, &viol};
     Effects e;   // recomputed only to drive the walker

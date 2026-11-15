@@ -25,7 +25,7 @@
 /* from runtime/frt_rt.c (compiled together) */
 extern int frt_parse_cpu_list(const char* s, int* out, int cap);
 typedef struct {
-  void (*body)(int64_t, int64_t, void*);
+  void (*body)(int64_t, int64_t, void*, int64_t);
   int64_t lo, hi, chunk;
   int32_t nthreads, affinity, ctx_size;
   int32_t repro;
@@ -33,6 +33,7 @@ typedef struct {
   void* ctx_template;
   int64_t body_cost;
   int32_t mem_class;
+  int64_t sp0;   /* data-stack index base (goose port v2, offset 80) */
 } fsh_range_mirror_t;
 extern int32_t frt_parfor(fsh_range_mirror_t* r, void** ctxout, int32_t maxctx);
 extern int64_t frt_parfor_pair(fsh_range_mirror_t* a, void** ctxA,
@@ -88,7 +89,8 @@ typedef struct {
   char _pad[64 - 3 * 8];   /* ctx blocks are >= 64B (memcpy contract) */
 } gather_ctx_t;
 
-static void gather_body(int64_t lo, int64_t hi, void* vctx) {
+static void gather_body(int64_t lo, int64_t hi, void* vctx, int64_t sp) {
+  (void)sp;
   gather_ctx_t* gc = (gather_ctx_t*)vctx;
   for (int64_t i = lo; i < hi; ++i)
     gc->pc->sink[i] = gc->src[gc->perm[i]];
@@ -100,7 +102,8 @@ typedef struct {
   char _pad[64 - 8];
 } compute_ctx_t;
 
-static void compute_body(int64_t lo, int64_t hi, void* vctx) {
+static void compute_body(int64_t lo, int64_t hi, void* vctx, int64_t sp) {
+  (void)sp;
   compute_ctx_t* cc = (compute_ctx_t*)vctx;
   double x = 1.000001;
   for (int64_t i = lo; i < hi; ++i) {
@@ -110,7 +113,7 @@ static void compute_body(int64_t lo, int64_t hi, void* vctx) {
   }
 }
 
-static void fill_range(fsh_range_mirror_t* r, void (*body)(int64_t, int64_t, void*),
+static void fill_range(fsh_range_mirror_t* r, void (*body)(int64_t, int64_t, void*, int64_t),
                        void* tmpl, int64_t lo, int64_t hi, int32_t mem_class,
                        int64_t body_cost) {
   memset(r, 0, sizeof *r);
@@ -155,8 +158,8 @@ static int run_pair_case(int64_t n, int64_t costA, int64_t costB,
   gather_ctx_t gc = {&pc, src, perm};
   compute_ctx_t cc = {&pc};
   /* sequential reference */
-  gather_body(0, n, &gc);
-  compute_body(0, n, &cc);
+  gather_body(0, n, &gc, 0);
+  compute_body(0, n, &cc, 0);
 
   pc.sink = sink;
   pc.fsink = fsink;

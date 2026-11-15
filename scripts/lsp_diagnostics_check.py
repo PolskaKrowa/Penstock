@@ -57,7 +57,7 @@ def run_document(path, text):
 
 # A real narrowing cast should cover the full expression and explain what
 # can be lost. Cast-like text in both supported comment forms must be ignored.
-initial_diags = run_document("/tmp/penstock-lsp-check.fsh", """\
+initial_diags = run_document("/tmp/penstock-lsp-check.fsht", """\
 fn narrow(x: usize) -> u8 {
     return x as u8;
 }
@@ -81,19 +81,19 @@ for detail in ("usize", "u8", "0..255", "256", "truncated"):
     assert detail in message, f"cast warning missing useful detail {detail!r}: {message}"
 
 # No fn main() requirement for ordinary source files or for files in nested
-# src subdirectories. It applies only to direct src/*.fsh files with `main`
+# src subdirectories. It applies only to direct src/*.fsht files with `main`
 # as a standalone token in the basename.
 def has_main_error(path):
     return any(d.get("code") == "F0206" for d in
                run_document(path, "fn helper() {}\n"))
 
 cases = {
-    "/tmp/penstock-project/src/helper.fsh": False,
-    "/tmp/penstock-project/src/domain.fsh": False,
-    "/tmp/penstock-project/src/foo_main.fsh": True,
-    "/tmp/penstock-project/src/main.fsh": True,
-    "/tmp/penstock-project/src/foo/bar_main.fsh": False,
-    "/tmp/penstock-project/main.fsh": False,
+    "/tmp/penstock-project/src/helper.fsht": False,
+    "/tmp/penstock-project/src/domain.fsht": False,
+    "/tmp/penstock-project/src/foo_main.fsht": True,
+    "/tmp/penstock-project/src/main.fsht": True,
+    "/tmp/penstock-project/src/foo/bar_main.fsht": False,
+    "/tmp/penstock-project/main.fsht": False,
 }
 for path, expected in cases.items():
     actual = has_main_error(path)
@@ -108,8 +108,8 @@ with tempfile.TemporaryDirectory(prefix="freshet-lsp-import-diags-") as td:
     root = pathlib.Path(td)
     src = root / "src"
     src.mkdir()
-    entry_path = src / "main.fsh"
-    module_path = src / "maths.fsh"
+    entry_path = src / "main.fsht"
+    module_path = src / "maths.fsht"
     module_text = """pub fn divide_by_ten(value: usize) -> usize {
     return value / 10;
 }

@@ -5,7 +5,7 @@ surface syntax, C-level control over data layout, and a compiler that
 treats predictable performance bugs as compile errors.
 
 ```
-penstock [options] file.fsh
+penstock [options] file.fsht
   -o <file>   -S (emit .ll)  -c (emit .o)  -O<0-4>  -march=<t>
   --run  --report  --profile  --use-profile=<f>  --keep-ir
   --threads=<n>  --soa=warn|auto|aosoa  -I<dir>  --no-loop-opts
@@ -709,7 +709,7 @@ On the sweep benchmark the auto transform measures 85 ms →
 
 At `-O3` and `-O4`, Penstock runs a bounded instruction superoptimiser whose
 control loop is written in Freshet and linked into the compiler. CMake builds a
-non-superoptimising bootstrap compiler, compiles `src/superopt.fsh` with it,
+non-superoptimising bootstrap compiler, compiles `src/superopt.fsht` with it,
 then links that object into the final compiler alongside static Z3 and
 in-process Alive2 libraries. Runtime execution does not require Souper,
 `alive-tv`, or the `z3` command-line tool.
@@ -818,7 +818,7 @@ Two patterns waste that throughput:
 Both transforms are pure AST restructures (statements shared, no new
 bindings); outputs are bit-identical by construction and verified
 against `--no-loop-opts` builds in the test suite. On the
-batch-pipeline benchmark (`tests/bench_fuse.fsh`) fusion alone measures
+batch-pipeline benchmark (`tests/bench_fuse.fsht`) fusion alone measures
 **95 ms → 53 ms (~1.8×)** on the 2-vCPU sandbox; the cross-lane hoist is
 measured at parity there (LLVM's own unswitcher handles the small case,
 but its complexity gates can bail on fat bodies — the source-level
@@ -860,7 +860,7 @@ They run post-sema / post-checks / post-Phase-D, pre-IRgen, like every
 other R4 transform, and each applied rewrite records its legality
 premises in the `--proof-log`.
 
-**`--mem-reuse` (F0919) — allocation churn elimination.**
+**`--mem-reuse` (`F0919`) — allocation churn elimination.**
 Two shapes:
 
 - *Loop churn*: a `for`/`while` loop (never `parfor` — its iterations
@@ -896,7 +896,7 @@ write goes through an immutable non-owned binding).  The mis-grouped
 scalar ops that survive into the vectoriser as lane-crossing shuffles
 are the vectorised-mov half of the family — addressed by `--batch-ops`.
 
-**`--batch-ops` (F0920) and `--vector-plan` (F0921) — separable-routine
+**`--batch-ops` (`F0920`) and `--vector-plan` (`F0921`) — separable-routine
 analysis and SLP batching.**  The vectorisation helper: for every
 straight-line statement list (and loop body) it builds the def-use +
 memory-dependence DAG (scalar names; memory (root, index-canonical +
@@ -934,6 +934,126 @@ region's chunk partition and reduction combine order are unchanged —
 only the execution overlap differs.  Without SMT (or with the env off)
 the pair degenerates to dispatching both regions' chunks on the
 ordinary FIFO queue: identical semantics, no placement control.
+
+### 14.5 Goose-ported passes (`F0923`–`F0929`)
+
+These passes are adapted from the [Goose programming
+language](https://github.com/aardappel/goose) — a memory-safe systems
+language with no heap allocator, GC or lifetime annotations whose
+benchmarks run 3.3x faster than idiomatic C++ — ported where Penstock's
+LLVM-IR backend does not already provide the equivalent (goose emits C
+and must do its own inlining, tail-recursion elimination and
+reassociation; the `clang -O3` backend already does all three on our
+`.ll`, so goose's `optimize.h`/`optimize_tre.h`/`optimize_reassoc.h`
+are deliberately not ported).
+
+**`--bce` (`F0923`) and `@checkfree fn` (`F0924`) — bounds-check
+elimination.** A port of goose's BCE (its largest optimisation pass): a
+flow-sensitive difference-constraint solver maintains facts of the form
+`l <= r + c` over four base kinds — the constant zero, integer
+variables, the lengths of span/str/soa variables, and (via `let`
+bindings) their known values.  Every base carries a *generation*; a kill
+(an assignment, a re-binding, a call whose footprint writes globals)
+opens a new generation, and facts stay pinned to the generation they
+were proven about — so a stale fact can never prove anything about a new
+value.  Facts are seeded by loop and `parfor` iteration ranges
+(`i in 0..n` gives `0 <= i <= n-1`, evaluated once at loop entry, so the
+snapshot survives kills inside the body), by `assert` and dominating
+`if`/`while` conditions, by span/slice construction
+(`span(p, n)` gives `len == n`; `s[lo..hi]` gives `len == hi-lo`), and
+by completed checks (a check that ran — or was proven — bounds its
+index for everything after it).  Queries run Bellman-Ford with
+saturating arithmetic over the fact graph plus per-type range axioms for
+narrow integers.  A site is elided only when `0 <= idx <= len-1` is
+*proven* in signed arithmetic (which makes the emitted unsigned compare
+unfailable); anything unproven keeps its check.  The solver is
+*interprocedural* like goose's `SeedEntryFacts`: at every direct call
+site the caller records what it proved about the callee's integer
+arguments and span/str/soa argument lengths, as pairwise `param_x <=
+param_y + c` constraints (the weakest any site states); once every site
+of a callee has been analyzed — and nothing reaches it opaquely (its
+value taken, an export, a `@test` entry, an unresolvable call) — the
+callee is *seeded at entry* with that table, so checks inside it can be
+elided under preconditions every caller already establishes.  Seeded
+facts are pinned to the callee's entry generations: a re-assigned
+parameter kills them exactly like a local fact.  `--bce` is on by
+default from `-O1` (like goose; `--no-bce` is the differential hatch),
+`--bce-lines` prints goose's per-line elided/kept report, and
+`@checkfree fn` errors (`F0924`) if any check the pass would keep
+remains in the function or anything it calls — goose's "no bounds check
+runs while a checkfree function does".
+
+**`--stacks` (`F0925`), `F0926`, `F0927` — the data-stack memory
+model.** `stack_alloc(T, n)` allocates `n` elements of `T` from the
+function's *data stack* — a per-thread bump-pointer region reserved up
+front (default 1 GiB, `FRT_DSTK_RESERVE` raises it) with a guard page
+behind it that turns pathological growth into a clean runtime abort —
+and the allocation dies when its scope ends (watermark restore, in
+reverse declaration order, on every exit path including
+`return`/`break`/`continue`, after defers).  Like goose's `gs_sp`,
+functions that use data stacks (directly or through callees) take a
+hidden `i64 %sp` parameter; a callee's stacks start above everything
+the caller has in use at the call, so the per-program stack count is
+computed statically (fixpoint over the call graph; cycles share one
+count, and no stack may be live across a call into a recursive cycle —
+`F0927`).  `%sp` also threads through `parfor`: a dispatched body's
+chunk function takes the dispatching context's first-free index as a
+hidden fourth argument (carried in the range struct at offset 80), so
+`stack_alloc` — and calls to stack-using functions — work lexically
+inside `parfor` bodies; every executing thread (a pool worker or the
+helping dispatcher) bumps its own per-thread stack array, so concurrent
+chunks never collide, and a region that (transitively) re-enters its
+own dispatch context across a live stack is `F0927` (unbounded need).
+A binding of the *enclosing* context that points into data-stack memory
+must not be referenced inside a dispatched body (`F0926` region capture)
+— the chunk function may execute on another thread, whose stacks are
+private (goose: workers are separate programs).  A *collapsed*
+(rectangular, serialized) inner `parfor` runs in the same chunk function
+and thread and uses the enclosing stacks freely.
+
+`stack_alloc` memory is scope-owned, and the checker proves it with
+*static-root lifetime proofs* (goose's root rules: a slice "carries a
+static root, the variable that bounds the lifetime of what it
+views").  Every value that may reference data-stack memory carries a
+root set — the `let` bindings whose `stack_alloc` regions it points
+into; copies, casts and `span(x, n)` propagate it.  `free` on it,
+returning it, `give`-ing it, or an owned argument is `F0926`; storing
+it into a global, or through a pointer into memory whose root *outlives*
+the source's, is `F0926`; but a store into a destination lexically
+nested within (or equal to) every source root's scope is *proven safe*
+— the destination dies before the memory it now references.  Passing
+stack memory to a callee is judged by an interprocedural non-escape
+summary (a fixpoint over every function's body): a parameter that never
+lets a reference escape — it is only read through, copied into locals
+that die with the call — makes the call PROVEN safe; a parameter that
+may escape (the body returns it, stores it into a global or into caller
+memory, or captures it in a `parfor` region) is `F0926`.  extern
+(imported) functions are trusted like goose §7.10: they may write
+through what they are handed but reach nothing else.  `--stacks` prints
+goose's per-function own/with-callees layout report (`F0925`), plus one
+line per stack-using `parfor` region.  Remaining limits, each diagnosed
+rather than silently wrong: `stack_alloc` must be the direct initializer
+of a `let` (`F0927`), and a stack-using function may not be exported or
+taken as a function value (`F0927`).
+
+**`--sum-reduction` (`F0928`) — bit-identical blocked float sums.** A
+port of goose's `sumred` loop shaping: `for (i in lo..hi) { s += e; }`
+with `s` a `f32`/`f64` local that `e` neither reads nor writes is
+regrouped into blocks of 8: the eight terms are computed first
+(independent, so the term computation vectorises) and then folded into
+`s` one by one **in the original order** — every result is bit for bit
+identical because the addition chain is unchanged, and an aborting term
+aborts at the same term either way.
+
+**`--basecase` (`F0929`) — recursive base-case inlining.** A port of
+goose's base-case inlining for self-recursive functions: a function
+whose body starts with `if c { return e; }` (where `c` and `e` read
+only parameters and globals, with no calls) gets every tail
+`return f(a...)` rewritten to `{ let p... = a...; if c[p:=p] { return
+e[p:=p]; } return f(p...); }` — the base case returns without a frame,
+removing half the calls of a complete tree walk.  (Only
+return-position self-calls: Freshet's `if` is a statement, not an
+expression like goose's.)
 
 ## 15. Toolchain support
 
@@ -1000,11 +1120,11 @@ fn helper() { ... }       // private: invisible outside the module
 - **Resolution.** `import geometry;` searches the entry file's
   directory, then `-I<dir>` directories, then the builtin modules
   directory (where the shipped `fsh` module lives), then `.` — for
-  `geometry.fsh` or `geometry/mod.fsh`. Missing module → `F0004`
+  `geometry.fsht` or `geometry/mod.fsht`. Missing module → `F0004`
   with the searched paths. **Circular imports are `F0004`** with the
   full cycle chain.
-- **Multi-file compilation.** `penstock main.fsh util.fsh` — every
-  `.fsh` argument is a module of ONE program (the first is the entry).
+- **Multi-file compilation.** `penstock main.fsht util.fsht` — every
+  `.fsht` argument is a module of ONE program (the first is the entry).
   Imports resolve the rest. Internal symbols disambiguate to
   `u_<module>$<name>` in the IR only when two modules define the same
   name; `main`, `export fn` and `extern fn` keep their exact C-ABI
@@ -1015,7 +1135,7 @@ fn helper() { ... }       // private: invisible outside the module
   name = "demo"
   [target]
   type = "bin"            # bin | static-lib | shared-lib
-  src  = ["src/main.fsh"] # entry modules (imports pull the rest)
+  src  = ["src/main.fsht"] # entry modules (imports pull the rest)
   [build]
   opt = 3
   threads = 0
@@ -1062,19 +1182,19 @@ qsort(d as *u8, n, sizeof(i64), cmp_desc);   // Freshet fn as callback
 
 ## 18. Tooling: test runner, formatter, linter, debug info (report §10)
 
-- **`penstock test <file.fsh>`** — every zero-arg void `@test fn` runs
+- **`penstock test <file.fsht>`** — every zero-arg void `@test fn` runs
   through a generated harness main: per-test `test name ... ok|FAIL`
   lines, a `N/M tests passed` summary, and exit code 1 on any failure.
   An `assert` inside a test aborts into a SIGABRT long-jump ISOLATED to
   that test — the suite continues. `@test` fns must be non-generic,
   parameterless and return void (`F0005` otherwise).
-- **`penstock fmt [--check] <file.fsh>`** — compiler-aware, token-level
+- **`penstock fmt [--check] <file.fsht>`** — compiler-aware, token-level
   formatter (4-space indent, 78-column short-block collapse,
   house-style signatures, comments preserved). SAFETY GATE: the output
   is only written when its token stream is IDENTICAL to the input's —
   the formatter can never change what the program means. `--check`
   exits 1 when a file is not already formatted.
-- **`penstock lint <file.fsh>`** — front-end only; prints every E-/W-/
+- **`penstock lint <file.fsht>`** — front-end only; prints every E-/W-/
   N- diagnostic and exits non-zero on errors (report §10.2: the natural
   home for optional performance-policy checks).
 - **`penstock -g` / `--debug`** — DWARF source-level debug info: line

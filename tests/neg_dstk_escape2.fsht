@@ -1,0 +1,14 @@
+// Interprocedural non-escape summaries (goose callee root rules): leaky
+// RETURNS its span parameter, so its summary marks the parameter as
+// escaping — passing data-stack memory at it is F0926 (the returned span
+// would dangle in the caller the moment the owning scope ends).
+fn leaky(s: Span<f64>) -> Span<f64> {
+    return s;
+}
+
+fn main() {
+    let p: *f64 = stack_alloc(f64, 4);
+    p[0] = 3.5;
+    let q = leaky(span(p, 4));   // F0926: arg-escape
+    print_f64(q[0], 1); println();
+}
