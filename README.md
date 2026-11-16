@@ -1,5 +1,5 @@
 <div align=center>
-  <img width="1178" height="330" alt="penstock logo" src="https://github.com/user-attachments/assets/ed6bb07e-547a-4921-9837-1c39e696b8df" />
+  <img width="2172" height="724" alt="penstock logo" src="https://github.com/user-attachments/assets/3b050cf4-52e7-4791-9158-ae6997844938" />
 </div>
 
 # Freshet / Penstock
