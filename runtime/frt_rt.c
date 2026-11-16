@@ -1276,6 +1276,144 @@ char* frt_str_to_cstr(const char* p, int64_t len) {
   return out;
 }
 
+/* ---------------- dynamic collections (fsht-02:01) ---------------------- */
+/* frt_vec layout must match the compiler's prelude Vec<T> struct:
+ *   { void* data; int64_t len; int64_t cap; }   (24 bytes)
+ * esz is the monomorphised element size; elements are copied bytewise
+ * (POD only — owning element types are rejected at compile time in the
+ * fsht-02:01 first cut).  Every release path nulls `data` so the
+ * compiler's scope-exit drops and move null-out keep this idempotent. */
+typedef struct {
+  void* data;
+  int64_t len;
+  int64_t cap;
+} frt_vec;
+
+static void frt_vec_reserve(frt_vec* v, int64_t need, int64_t esz) {
+  if (need <= v->cap) return;
+  if (need < 0 || esz <= 0 ||
+      need > (int64_t)(INT64_MAX / 2) / esz) {
+    fprintf(stderr, "freshet: Vec capacity overflow (%lld x %lld bytes)\n",
+            (long long)need, (long long)esz);
+    abort();
+  }
+  int64_t nc = v->cap ? v->cap : 8;
+  while (nc < need) nc *= 2;
+  void* nd = realloc(v->data, (size_t)nc * (size_t)esz);
+  if (!nd) {
+    fprintf(stderr, "freshet: out of memory growing a Vec\n");
+    abort();
+  }
+  v->data = nd;
+  v->cap = nc;
+}
+
+void frt_vec_init(frt_vec* v) {
+  v->data = NULL;
+  v->len = 0;
+  v->cap = 0;
+}
+
+void frt_vec_with_cap(frt_vec* v, int64_t cap, int64_t esz) {
+  v->data = NULL;
+  v->len = 0;
+  v->cap = 0;
+  if (cap > 0) frt_vec_reserve(v, cap, esz);
+}
+
+void frt_vec_from(frt_vec* v, const void* p, int64_t n, int64_t esz) {
+  v->data = NULL;
+  v->len = 0;
+  v->cap = 0;
+  if (n > 0) {
+    frt_vec_reserve(v, n, esz);
+    memcpy(v->data, p, (size_t)n * (size_t)esz);
+  }
+  v->len = n > 0 ? n : 0;
+}
+
+void frt_vec_clone(frt_vec* out, const frt_vec* src, int64_t esz) {
+  frt_vec_from(out, src->data, src->len, esz);
+}
+
+void frt_vec_push(frt_vec* v, const void* e, int64_t esz) {
+  frt_vec_reserve(v, v->len + 1, esz);
+  memcpy((char*)v->data + (size_t)v->len * (size_t)esz, e, (size_t)esz);
+  v->len += 1;
+}
+
+int32_t frt_vec_pop(frt_vec* v, void* out, int64_t esz) {
+  if (v->len <= 0) return 0;
+  v->len -= 1;
+  memcpy(out, (const char*)v->data + (size_t)v->len * (size_t)esz,
+         (size_t)esz);
+  return 1;
+}
+
+int32_t frt_vec_get(const frt_vec* v, int64_t i, void* out, int64_t esz) {
+  if (i < 0 || i >= v->len) return 0;
+  memcpy(out, (const char*)v->data + (size_t)i * (size_t)esz, (size_t)esz);
+  return 1;
+}
+
+void frt_vec_insert(frt_vec* v, int64_t i, const void* e, int64_t esz) {
+  if (i < 0 || i > v->len) {
+    fprintf(stderr, "freshet: vec_insert index %lld out of range [0, %lld]\n",
+            (long long)i, (long long)v->len);
+    abort();
+  }
+  frt_vec_reserve(v, v->len + 1, esz);
+  char* base = (char*)v->data;
+  if (i < v->len)
+    memmove(base + (size_t)(i + 1) * (size_t)esz,
+            base + (size_t)i * (size_t)esz,
+            (size_t)(v->len - i) * (size_t)esz);
+  memcpy(base + (size_t)i * (size_t)esz, e, (size_t)esz);
+  v->len += 1;
+}
+
+int32_t frt_vec_remove(frt_vec* v, int64_t i, void* out, int64_t esz) {
+  if (i < 0 || i >= v->len) return 0;
+  char* base = (char*)v->data;
+  memcpy(out, base + (size_t)i * (size_t)esz, (size_t)esz);
+  if (i + 1 < v->len)
+    memmove(base + (size_t)i * (size_t)esz,
+            base + (size_t)(i + 1) * (size_t)esz,
+            (size_t)(v->len - i - 1) * (size_t)esz);
+  v->len -= 1;
+  return 1;
+}
+
+void frt_vec_truncate(frt_vec* v, int64_t n) {
+  if (n < 0) n = 0;
+  if (n < v->len) v->len = n;
+}
+
+void frt_vec_resize(frt_vec* v, int64_t n, const void* fill, int64_t esz) {
+  if (n < 0) n = 0;
+  if (n > v->len) {
+    frt_vec_reserve(v, n, esz);
+    char* base = (char*)v->data;
+    for (int64_t i = v->len; i < n; ++i)
+      memcpy(base + (size_t)i * (size_t)esz, fill, (size_t)esz);
+  }
+  v->len = n;
+}
+
+void frt_vec_clear(frt_vec* v) {
+  v->len = 0;
+}
+
+void frt_vec_free(frt_vec* v) {
+  if (v->data) {
+    free(v->data);
+    v->data = NULL;
+  }
+  v->len = 0;
+  v->cap = 0;
+}
+
+
 /* ---------------- test runner (report §10.3) ---------------------------- */
 /* frt_test_* backs `penstock test`.  The generated harness main calls
  * frt_test_setup() once, then per @test fn:

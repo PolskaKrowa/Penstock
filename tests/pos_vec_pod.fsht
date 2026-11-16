@@ -1,0 +1,41 @@
+// fsht-02:01 — Vec<T> over POD structs (the numeric-HPC shape), bools,
+// and str views as elements (non-owning types are legal elements)
+struct Particle { x: f64, y: f64, mass: f64 }
+
+fn main() {
+    // struct elements: memcpy semantics
+    let mut ps: Vec<Particle> = vec_new(Particle, 4);
+    for (i in 0..6) {
+        vec_push(&ps, Particle { x: i as f64, y: -1.0 * i as f64, mass: 2.0 });
+    }
+    let mut total: f64 = 0.0;
+    for (i in 0..ps.len) {
+        total = total + ps[i].mass;
+    }
+    print_f64(total, 1); print(" "); print_i64(ps.len); println();  // 12.0 6
+
+    // element write through the struct field
+    ps[0].x = 42.5;
+    print_f64(ps[0].x, 1); println();                                // 42.5
+
+    // bool elements
+    let mut flags: Vec<bool> = vec_new(bool, 2);
+    vec_push(&flags, true);
+    vec_push(&flags, false);
+    if (flags[0]) { print("T"); } else { print("F"); }
+    if (flags[1]) { print("T"); } else { print("F"); }
+    println();                                                       // TF
+
+    // f32 elements (narrower scalars)
+    let mut fs: Vec<f32> = vec_new(f32, 4);
+    vec_push(&fs, 1.5);
+    vec_push(&fs, 2.5);
+    print_f64(fs[0] as f64 + fs[1] as f64, 1); println();           // 4.0
+
+    // u8 elements: a growable byte buffer (fsht-02:01's ByteBuffer shape)
+    let mut bytes: Vec<u8> = vec_new(u8, 4);
+    for (i in 0..8) {
+        vec_push(&bytes, i as u8);
+    }
+    print_i64(bytes[7]); print(" "); print_i64(bytes.len); println();   // 7 8
+}   // ps, flags, fs, bytes all drop here

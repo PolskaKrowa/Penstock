@@ -1,0 +1,72 @@
+// fsht-02:01 (registry 02.09.01) — Vec<T> basics: construction, push,
+// indexing, len/capacity, drop-on-scope-exit (no explicit frees at all).
+fn main() {
+    // construction + growth
+    let mut v: Vec<i64> = vec_new(i64, 4);
+    for (i in 0..10) {
+        vec_push(&v, i as i64 * i as i64);
+    }
+    print_i64(v.len); print(" "); print_i64(vec_capacity(v)); println();   // 10 16
+
+    // checked indexing (read + write)
+    let mut s: i64 = 0;
+    for (i in 0..v.len) {
+        s = s + v[i];
+    }
+    print_i64(s); println();                                             // 285
+
+    v[0] = 100;
+    print_i64(v[0]); print(" "); print_i64(v[9]); println();              // 100 81
+
+    // Option-returning access
+    let top: Option<i64> = vec_pop(&v);
+    match (top) {
+        Some(x) => { print_i64(x); println(); }                          // 81
+        None => { print("empty"); println(); }
+    }
+
+    // empty pop -> None
+    let mut e: Vec<i64> = vec_new(i64);
+    let got: Option<i64> = vec_pop(&e);
+    match (got) {
+        Some(x) => { print("some "); print_i64(x); println(); }
+        None => { print("none"); println(); }
+    }
+
+    // vec_get on live data
+    let g: Option<i64> = vec_get(v, 3);
+    match (g) {
+        Some(x) => { print_i64(x); println(); }                          // 9
+        None => { print("?"); println(); }
+    }
+
+    // slices are borrowed Span views, no copy
+    let view: Span<i64> = v[2..6];
+    print_i64(view.len); print(" "); print_i64(view[0]); print(" ");
+    print_i64(view[3]); println();                                        // 4 4 25
+
+    let w: Span<i64> = vec_slice(v, 0, v.len);
+    print_i64(w.len); println();                                         // 9
+
+    // insert / remove / truncate / resize / clear
+    let mut u: Vec<f64> = vec_new(f64);
+    vec_push(&u, 1.5);
+    vec_push(&u, 3.5);
+    vec_insert(&u, 1, 2.5);
+    print_f64(u[0], 1); print(" "); print_f64(u[1], 1); print(" ");
+    print_f64(u[2], 1); println();                                       // 1.5 2.5 3.5
+    let rm: Option<f64> = vec_remove(&u, 0);
+    match (rm) {
+        Some(x) => { print_f64(x, 1); println(); }                       // 1.5
+        None => { print("?"); println(); }
+    }
+    vec_resize(&u, 4, 9.5);
+    print_f64(u[3], 1); print(" "); print_i64(u.len); println();         // 9.5 4
+    vec_truncate(&u, 2);
+    print_i64(u.len); println();                                         // 2
+    if (vec_is_empty(e)) { print("empty"); } else { print("full"); }
+    print(" "); print_i64(vec_len(u)); println();                         // empty 2
+    vec_clear(&u);
+    print_i64(u.len); println();                                         // 0
+    // no vec_free anywhere: every binding above drops at scope exit
+}

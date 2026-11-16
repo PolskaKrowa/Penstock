@@ -1,0 +1,6 @@
+// fsht-02:01 — double free: manual vec_free twice
+fn main() {
+    let mut v: Vec<i64> = vec_new(i64, 2);
+    vec_free(&v);
+    vec_free(&v);   // F0301
+}

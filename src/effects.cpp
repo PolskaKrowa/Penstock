@@ -208,6 +208,26 @@ void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
   }
   if (n == "malloc" || n == "soa_new") { e.allocates = true; return; }
   if (n == "free" || n == "soa_free")  { e.freesMem = true; return; }
+  // fsht-02:01 (registry 02.09.01): dynamic-collection builtins —
+  // constructors allocate; growth mutators may realloc (alloc + write
+  // through the container root); in-place mutators write through the
+  // container root; vec_free frees.  The read-only accessors classify
+  // through the argument root in the call-site walker (below), exactly
+  // like soa_len/soa_field_ptr.
+  if (n == "vec_new" || n == "vec_from_span" || n == "vec_from_array" ||
+      n == "vec_clone") { e.allocates = true; return; }
+  if (n == "vec_push" || n == "vec_insert" || n == "vec_resize" ||
+      n == "vec_reserve") {
+    e.allocates = true;
+    e.writesArg = true;
+    return;
+  }
+  if (n == "vec_pop" || n == "vec_remove" || n == "vec_truncate" ||
+      n == "vec_clear") { e.writesArg = true; return; }
+  if (n == "vec_free") { e.freesMem = true; return; }
+  if (n == "vec_len" || n == "vec_capacity" || n == "vec_is_empty" ||
+      n == "vec_get" || n == "vec_slice")
+    return;   // reads classified through the argument root
   // data stacks (goose port v2): the bump loads and stores the
   // thread-local stack-top array — per-thread scratch that no other
   // thread, iteration or caller can observe (the %sp-threaded parfor
@@ -469,6 +489,34 @@ struct EffectWalker {
       if (viol) violate("reads memory through '" + rootName(e->args[0]) + "'", e->loc);
       return;
     }
+    // fsht-02:01: Vec accessors — reads (and, for mutators, writes)
+    // classify through the container argument's root; the container arg
+    // is `&v` for the &mut forms and a plain Vec value for readers.  The
+    // builtin's own flags (allocates/freesMem from builtinEffects) merge
+    // here too — this branch returns early.
+    if (n.rfind("vec_", 0) == 0 && !e->args.empty() &&
+        n != "vec_new") {
+      eff.merge(be);
+      Expr* a0 = e->args[0];
+      if (a0->k == Expr::UN && a0->op == "&") a0 = a0->rhs;
+      bool mutator = (n == "vec_push" || n == "vec_insert" ||
+                      n == "vec_resize" || n == "vec_reserve" ||
+                      n == "vec_pop" || n == "vec_remove" ||
+                      n == "vec_truncate" || n == "vec_clear" ||
+                      n == "vec_free");
+      readThroughArg(a0, eff);
+      if (mutator) writeThroughArg(a0, eff);
+      if (viol) {
+        if (be.allocates)
+          violate("allocates memory ('" + n + "')", e->loc);
+        else if (be.freesMem)
+          violate("frees memory ('" + n + "')", e->loc);
+        else
+          violate(std::string(mutator ? "mutates" : "reads") +
+                  " a container through '" + rootName(a0) + "'", e->loc);
+      }
+      return;
+    }
     if (viol) {
       if (be.io) violate("performs I/O ('" + n + "')", e->loc);
       else if (be.allocates) violate("allocates memory ('" + n + "')", e->loc);
@@ -610,6 +658,19 @@ void computeEffects(Program* p) {
       EffectWalker w{f, fs, &cur, nullptr};
       Effects e;
       w.walkStmt(f->body, e);
+      // fsht-02:01: a function with container bindings or container
+      // parameters emits hidden scope-exit drop calls (irgen injects
+      // them after this analysis) — the summary must never claim
+      // memory(none) for such a function.  freesMem is the conservative
+      // marker: it keeps the fn out of readnone groups without claiming
+      // observable writes.
+      {
+        bool hasContainer = false;
+        for (auto& sym : fs->allSyms)
+          if (sym.k == Sym::PARAM || sym.k == Sym::VAR)
+            if (isContainerType(sym.ty)) { hasContainer = true; break; }
+        if (hasContainer) e.freesMem = true;
+      }
       // a user @pure promise does NOT relax the summary — it is validated
       // separately below; if it holds, the inferred summary is already
       // clean, and if it does not hold we reject the program.

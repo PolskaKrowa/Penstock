@@ -176,7 +176,7 @@ shipped default is the placeholder `PolskaKrowa/Freshet-lang`.
 ## Status
 
 Version `0.1.0-INDEV`. The two integration reports document what is
-implemented and what is deliberately deferred (variadic `extern fn`, dynamic
-arrays beyond `String`, numeric text parsing, LSP completions/inlay hints):
+implemented and what is deliberately deferred (variadic `extern fn`, numeric
+text parsing, LSP completions/inlay hints):
 [docs/report-integration.md](docs/report-integration.md) and
 [docs/optimization-integration.md](docs/optimization-integration.md).

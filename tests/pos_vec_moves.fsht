@@ -1,0 +1,70 @@
+// fsht-02:01 (registry 02.09.02) — container move semantics: by-value
+// transfer moves, give() moves, return moves, manual free overrides the
+// drop, clone makes an owned copy.  Runs clean under the leak-free model.
+fn take(owned v: Vec<i64>) -> i64 {
+    // ownership received: the param binding owns the buffer and drops it
+    return vec_len(v) as i64;
+}
+fn take_plain(v: Vec<f64>) -> f64 {
+    // plain by-value container params are moves too (fsht-02:01)
+    let mut s: f64 = 0.0;
+    for (i in 0..v.len) {
+        s = s + v[i];
+    }
+    return s;
+}
+fn make() -> Vec<i64> {
+    // returning a container moves it out to the caller
+    let mut v: Vec<i64> = vec_new(i64, 8);
+    vec_push(&v, 3);
+    vec_push(&v, 4);
+    return v;
+}
+fn sum(view: Span<i64>) -> i64 {
+    // borrowed view of caller-owned memory (the classic pattern)
+    let mut s: i64 = 0;
+    for (i in 0..view.len) {
+        s = s + view[i];
+    }
+    return s;
+}
+fn main() {
+    // let-move: b owns it now, a is invalidated (used later = F0301)
+    let mut a: Vec<i64> = vec_new(i64, 4);
+    vec_push(&a, 10);
+    let b: Vec<i64> = a;
+
+    // give() at a call site — the explicit ownership transfer
+    let n: i64 = take(give(b)) as i64;
+    print_i64(n); println();                       // 1
+
+    // by-value param without give() is a move as well
+    let mut f: Vec<f64> = vec_new(f64, 2);
+    vec_push(&f, 1.5);
+    vec_push(&f, 2.5);
+    print_f64(take_plain(f), 1); println();        // 4.0
+
+    // returned containers carry ownership to the caller
+    let r: Vec<i64> = make();
+    print_i64(r.len); print(" "); print_i64(r[1]); println();   // 2 4
+
+    // clone: an owned deep copy, both drop independently
+    let mut c: Vec<i64> = vec_clone(r);
+    vec_push(&c, 99);
+    print_i64(c.len); print(" "); print_i64(r.len); println();  // 3 2
+
+    // manual free pre-empts the scope-exit drop (the binding is inert
+    // afterwards — touching it is F0301, see neg_vec_useafterfree)
+    vec_free(&c);
+
+    // borrowed views over the still-owned r
+    print_i64(sum(r[0..r.len])); println();        // 7
+    print_i64(sum(vec_slice(r, 0, r.len))); println();   // 7
+
+    // move through re-binding after the old value is gone
+    let mut d: Vec<i64> = vec_new(i64, 1);
+    vec_push(&d, 8);
+    vec_free(&d);
+    let e: Vec<i64> = make();       // fresh value into a freed slot
+    print_i64(e[0]); println();     // 3
+}   // r, e (and the inert d) drop here — exactly one free each

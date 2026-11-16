@@ -60,6 +60,9 @@ struct IrGen {
     // break/continue restores the watermarks of scopes opened INSIDE the
     // loop, never the loop's own enclosing bumps
     size_t dstkBase = 0;
+    // fsht-02:01: container drops registered at loop entry — break /
+    // continue flush the body-scoped drops before branching out
+    size_t dropBase = 0;
   };
   std::vector<LoopCtx> loopStack;
 
@@ -193,6 +196,13 @@ std::string genCastInline(Expr* fromExpr, Type* to, std::string v);
 // depth of the defer stack (irgen_stmt.cpp) — parfor chunk fns push
 // loop contexts whose deferBase must match the CURRENT depth
 size_t deferStackDepth();
+// fsht-02:01 (registry 02.09.02): container drop stack — same contract
+// as the defer depth above; moves null the source binding's data field;
+// pushContainerDrop registers a scope-exit drop for a Vec<T> slot
+size_t containerDropDepth();
+void nullContainerSource(Expr* src, Type* cty);
+void pushContainerDrop(const std::string& alloca, Type* cty);
+void emitContainerDropsAll();
 
 // profile loading (irgen_pgo.cpp)
 void loadProfile(const std::string& path);

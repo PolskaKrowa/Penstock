@@ -1,0 +1,8 @@
+// fsht-02:01 — container mutation inside parfor is a race on the header
+fn main() {
+    let mut v: Vec<usize> = vec_new(usize, 4);
+    parfor (i in 0..4) {
+        vec_push(&v, i);   // F0307
+    }
+    print_i64(v.len); println();
+}

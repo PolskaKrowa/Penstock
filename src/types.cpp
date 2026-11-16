@@ -57,6 +57,15 @@ std::vector<EnumDef*> allEnumDefs() {
   return out;
 }
 
+// fsht-02:01: every registered struct (the nesting checks in
+// checks.cpp walk them)
+std::vector<StructDef*> allStructDefs() {
+  auto& r = registry();
+  std::vector<StructDef*> out;
+  for (auto& [n, v] : r) out.push_back(v.back());
+  return out;
+}
+
 void registerEnum(EnumDef* ed) {
   auto& r = enumRegistry();
   // Phase 3a: same name in DIFFERENT modules is legal (private decls);
@@ -318,6 +327,59 @@ std::string typeToString(Type* t) {
                                          : "enum <unresolved>";
   }
   return "?";
+}
+
+
+
+// ------------------------------------------------- fsht-02:01 containers
+// Vec<T> template instantiations and the prelude String are the owned
+// dynamic collections (registry 02.09.01).  Recognition is structural:
+// String by its prelude name, Vec<T> by the templateOf back-pointer every
+// monomorphised instance now carries.
+bool isContainerType(Type* t) {
+  if (!t || t->k != Type::STRUCT || !t->sdef) return false;
+  if (t->sdef->name == "String") return true;
+  return t->sdef->templateOf && t->sdef->templateOf->name == "Vec";
+}
+
+// Vec<T> -> T (the recorded first type argument); String -> nullptr.
+Type* containerElemType(Type* t) {
+  if (!t || t->k != Type::STRUCT || !t->sdef) return nullptr;
+  if (t->sdef->templateOf && t->sdef->templateOf->name == "Vec" &&
+      !t->sdef->targs.empty())
+    return t->sdef->targs[0];
+  return nullptr;
+}
+
+// is `t` free of owned containers at every nesting level?  Vec element
+// types, struct fields, array elements, enum payloads and span elements
+// must all satisfy this: nested ownership (a container that owns another
+// container, directly or through an aggregate) needs drop elaboration
+// through user shapes and stays out of the fsht-02:01 first cut.
+bool isNonOwningType(Type* t) {
+  if (!t) return false;
+  if (isContainerType(t)) return false;
+  switch (t->k) {
+    case Type::STRUCT: {
+      // a generic template's fields are unresolved; templates are never
+      // value types at runtime, so accept them here (the instance check
+      // below is the one that matters) — plain structs recurse.
+      for (auto& f : t->sdef->fields)
+        if (f.ty && !isNonOwningType(f.ty)) return false;
+      return true;
+    }
+    case Type::ENUM: {
+      for (auto& v : t->edef->variants)
+        for (auto& f : v.fields)
+          if (f.ty && !isNonOwningType(f.ty)) return false;
+      return true;
+    }
+    case Type::ARRAY:
+    case Type::SPAN:
+      return isNonOwningType(t->pointee);
+    default:
+      return true;   // scalars, str views, raw pointers, fn ptrs, void
+  }
 }
 
 } // namespace freshet

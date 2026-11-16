@@ -66,6 +66,25 @@ declare void @frt_string_init(ptr)
 declare void @frt_string_from(ptr, ptr, i64)
 declare void @frt_string_append(ptr, ptr, i64)
 declare void @frt_string_free(ptr)
+; fsht-02:01 (registry 02.09.01): dynamic-collection runtime.  Vec<T> is
+; the { ptr, i64, i64 } struct; esz is the monomorphised element size.
+; Constructors write through an OUT pointer (C ABI parity with String).
+; frt_vec_pop/get/remove return i32 "found" and write the element
+; through `out` — irgen builds the Option<T> from that flag.
+declare void @frt_vec_init(ptr)
+declare void @frt_vec_with_cap(ptr, i64, i64)
+declare void @frt_vec_from(ptr, ptr, i64, i64)
+declare void @frt_vec_clone(ptr, ptr, i64)
+declare void @frt_vec_push(ptr, ptr, i64)
+declare i32 @frt_vec_pop(ptr, ptr, i64)
+declare i32 @frt_vec_get(ptr, i64, ptr, i64)
+declare void @frt_vec_insert(ptr, i64, ptr, i64)
+declare i32 @frt_vec_remove(ptr, i64, ptr, i64)
+declare void @frt_vec_reserve(ptr, i64, i64)
+declare void @frt_vec_truncate(ptr, i64)
+declare void @frt_vec_resize(ptr, i64, ptr, i64)
+declare void @frt_vec_clear(ptr)
+declare void @frt_vec_free(ptr)
 declare void @frt_fmt_f64(ptr, double, i64)
 declare void @frt_fmt_i64(ptr, i64)
 declare ptr @frt_str_to_cstr(ptr, i64)
@@ -184,11 +203,11 @@ std::string IrGen::doubleToHex(double d) {
   return buf;
 }
 std::string IrGen::floatToHex(float f) {
-  char buf[32];
-  union { float f; uint32_t u; } u;
-  u.f = f;
-  snprintf(buf, sizeof buf, "0x%08X", u.u);
-  return buf;
+  // LLVM textual IR fp constants are ALWAYS the 16-hex-digit double-width
+  // encoding, even for float-typed values (the 8-digit 32-bit form is a
+  // parse error since LLVM 15).  Every f32 value is exactly representable
+  // as the double of the same value, so widen through double.
+  return doubleToHex((double)f);
 }
 
 std::string IrGen::esc(const std::string& s) {

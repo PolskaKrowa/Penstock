@@ -57,6 +57,29 @@ static Type* bindType(Type* placeholder, const std::string& tyName, SrcLoc loc) 
 Type* typeExpr(FnSema* fs, Expr* e);   // in sema_expr.cpp
 void tryResolveVariantExpr(FnSema* fs, Expr* e, Type* expected);  // sema_expr.cpp
 
+// fsht-02:01: is `e` a borrowed view (str / Span<T>) rooted at a LOCAL
+// Vec<T> binding?  The provenance matters because the container drops at
+// scope exit — returning such a view (or a binding that holds one) would
+// dangle.  Views of PARAMS are fine (the caller owns them); String keeps
+// its fsht-01:01 manual model, so str views of local Strings stay legal.
+static Expr* containerViewRoot(FnSema* fs, Expr* e) {
+  if (!e || !e->ty) return nullptr;
+  if (e->ty->k != Type::SPAN && e->ty->k != Type::STR) return nullptr;
+  Expr* root = e;
+  if (root->k == Expr::CALL && (root->name == "str_of" ||
+                                 root->name == "vec_slice") &&
+      !root->args.empty())
+    root = root->args[0];
+  if (root->k == Expr::UN && root->op == "&") root = root->rhs;
+  if (root->k == Expr::SLICE) root = root->base;
+  if (!root || root->k != Expr::IDENT || !root->sym) return nullptr;
+  if (root->sym->k != Sym::VAR) return nullptr;   // params: caller owns
+  if (!isContainerType(root->sym->ty)) return nullptr;
+  if (!containerElemType(root->sym->ty)) return nullptr;   // String: manual model
+  (void)fs;
+  return root;
+}
+
 static void declareVarFromInit(FnSema* fs, Stmt* s) {
   Type* t = nullptr;
   if (s->hasAnn) t = s->annTy;
@@ -97,6 +120,11 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
     }
     // check init compatible
     Type* it = typeExpr(fs, s->init);
+    // fsht-02:01: record view bindings whose provenance is a local
+    // container — returning them dangles after the scope-exit drop
+    if (it && (it->k == Type::SPAN || it->k == Type::STR) &&
+        containerViewRoot(fs, s->init))
+      fs->containerViewVars.insert(s->var);
     if (it && !typesCompatible(t, it)) {
       // literal adoption: constant int to any int type
       bool ok = false;
@@ -310,6 +338,12 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       if (s->lhs->ty && s->lhs->ty->k == Type::STRUCT)
         tryAdoptStructLiteral(s->rhs, s->lhs->ty);
       Type* rt = typeExpr(fs, s->rhs);
+      // fsht-02:01: assignments seed the same view-provenance record the
+      // LET path keeps — a Span/str binding written from a local
+      // container-rooted view must not be returned out of the fn
+      if (rt && (rt->k == Type::SPAN || rt->k == Type::STR) &&
+          s->lhs->k == Expr::IDENT && containerViewRoot(fs, s->rhs))
+        fs->containerViewVars.insert(s->lhs->name);
       if (!s->lhs->isLvalue) {
         diag(Diag::Error, Code::Type, "left side of assignment is not assignable",
              s->loc);
@@ -378,6 +412,25 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         if (fs->fn->ret->k == Type::STRUCT)
           tryAdoptStructLiteral(s->retVal, fs->fn->ret);
         Type* t = typeExpr(fs, s->retVal);
+        // fsht-02:01: returning a borrowed view of a LOCAL container —
+        // the container drops at every fn exit, so the view would dangle.
+        // Views of params stay legal (the caller owns them); returning the
+        // container itself moves it and is fine.
+        {
+          Expr* badRoot = containerViewRoot(fs, s->retVal);
+          bool viaBinding = s->retVal->k == Expr::IDENT &&
+                            fs->containerViewVars.count(s->retVal->name) > 0;
+          if (badRoot || viaBinding) {
+            diag(Diag::Error, Code::Own,
+                 std::string("returning a borrowed view of a local Vec<T> — "
+                 "the container drops at fn exit and the view dangles; "
+                 "return the container itself (a move) or take a Span "
+                 "parameter (fsht-03:02 tracks the lifetime analysis that "
+                 "will replace this restriction)"),
+                 s->loc,
+                 "kind=view-escape");
+          }
+        }
         if (fs->fn->ret->k != Type::VOID && t &&
             !typesCompatible(fs->fn->ret, t)) {
           // literal adoption (same rule as call arguments): `return 10;`

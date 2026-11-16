@@ -52,6 +52,28 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
       impure = true;
       return;
     }
+    // fsht-02:01 (registry 02.09.01): dynamic collections in parfor —
+    // constructors allocate (same policy as malloc above) and mutators
+    // race on the container header across lanes; the supported pattern
+    // is a Span view taken before the loop (vec_slice / indexing are
+    // reads).  Pure readers (vec_len/capacity/is_empty/get/slice) pass.
+    if (n.rfind("vec_", 0) == 0) {
+      bool banned = (n == "vec_new" || n == "vec_from_span" ||
+                     n == "vec_from_array" || n == "vec_clone" ||
+                     n == "vec_push" || n == "vec_pop" ||
+                     n == "vec_insert" || n == "vec_remove" ||
+                     n == "vec_reserve" || n == "vec_truncate" ||
+                     n == "vec_resize" || n == "vec_clear" ||
+                     n == "vec_free");
+      if (banned) {
+        diag(Diag::Error, Code::Thread,
+             "container call '" + n + "' inside parfor — take a Span view "
+             "before the loop (vec_slice) and keep mutations out of it",
+             x->loc, "call=" + n);
+        impure = true;
+      }
+      return;
+    }
     if (n == "memcpy" || n == "memset") {
       // allowed only on parfor-local or plane-disjoint memory; conservative:
       // allowed (aliasing already checked at call sites)

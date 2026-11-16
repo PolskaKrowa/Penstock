@@ -503,6 +503,313 @@ std::string genCall(Expr* e) {
     return v2;
   }
 
+  // ---------------- fsht-02:01 (registry 02.09.01): Vec<T> builtins
+  //
+  // Vec<T> is a struct { data: *T, len: u64, cap: u64 } passed by
+  // address; esz is the monomorphised element size.  Constructors write
+  // through an out slot and return it (aggregate value = address), the
+  // same shape as the String constructors above.  Fallible accessors
+  // build Option<T> from the runtime's i32 found-flag.
+  if (n.rfind("vec_", 0) == 0) {
+    // container type: constructors take it from the CALL's return type
+    // (the element type argument is not an expression); mutators and
+    // readers take it from their container argument
+    Type* vty = nullptr;
+    if (n == "vec_new" || n == "vec_from_span" || n == "vec_from_array" ||
+        n == "vec_clone") {
+      if (e->ty && e->ty->k == Type::STRUCT && containerElemType(e->ty))
+        vty = e->ty;
+    } else if (!e->args.empty() && e->args[0]->ty) {
+      Type* a0 = e->args[0]->ty;
+      if (a0->k == Type::PTR && a0->pointee && containerElemType(a0->pointee))
+        vty = a0->pointee;
+      else if (containerElemType(a0))
+        vty = a0;
+    }
+    Type* elem = vty ? containerElemType(vty) : nullptr;
+    int64_t esz = elem ? (int64_t)typeSizeOf(elem) : 8;
+
+    // widen an index/count argument to i64 at the boundary
+    auto widenIdx = [&](int i) {
+      std::string v = genExpr(e->args[i]);
+      if (e->args[i]->ty && e->args[i]->ty->bits() < 64) {
+        std::string op = e->args[i]->ty->isSigned() ? "sext" : "zext";
+        std::string w = G->t();
+        G->out << "  " << w << " = " << op << " i" << e->args[i]->ty->bits()
+               << " " << v << " to i64\n";
+        return w;
+      }
+      return v;
+    };
+    // scratch slot holding one element (scalar/pair: stored; aggregate:
+    // copied from the value address)
+    auto elemScratch = [&](int i) {
+      Type* et = e->args[i]->ty;
+      std::string tmp = G->t();
+      G->out << "  " << tmp << " = alloca " << G->llvmType(et) << ", align "
+             << typeAlignOf(et) << "\n";
+      std::string val = genExpr(e->args[i]);
+      if (et->k == Type::STRUCT || et->k == Type::ENUM ||
+          et->k == Type::ARRAY) {
+        G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << tmp << ", ptr "
+               << val << ", i64 " << typeSizeOf(et) << ", i1 false)\n";
+      } else if (et->isPair()) {
+        G->out << "  store { ptr, i64 } " << val << ", ptr " << tmp << "\n";
+      } else {
+        // bool VALUES are i1 registers while the slot uses the i8 C ABI —
+        // widen at the boundary (same rule as genArg)
+        if (et->k == Type::BOOL) {
+          std::string w = G->t();
+          G->out << "  " << w << " = zext i1 " << val << " to i8\n";
+          val = w;
+        }
+        G->out << "  store " << G->llvmType(et) << " " << val << ", ptr "
+               << tmp << "\n";
+      }
+      return tmp;
+    };
+    // build Option<T> (tag + payload copy) from the found-flag register
+    auto buildOption = [&](const std::string& found,
+                           const std::string& elemAddr) {
+      Type* ot = e->ty;
+      EnumDef* ed = ot->edef;
+      int someIdx = 0, noneIdx = 1;
+      for (auto& v : ed->variants) {
+        if (v.name == "Some") someIdx = v.idx;
+        if (v.name == "None") noneIdx = v.idx;
+      }
+      std::string slot = G->t();
+      G->out << "  " << slot << " = alloca " << G->llvmType(ot) << ", align "
+             << ed->align << "\n";
+      std::string nz = G->t();
+      G->out << "  " << nz << " = icmp ne i32 " << found << ", 0\n";
+      std::string tag = G->t();
+      G->out << "  " << tag << " = select i1 " << nz << ", i64 " << someIdx
+             << ", i64 " << noneIdx << "\n";
+      G->out << "  store i64 " << tag << ", ptr " << slot << "\n";
+      const EnumVariant& sv = ed->variants[someIdx];
+      if (!sv.fields.empty()) {
+        Type* ft = sv.fields[0].ty;
+        std::string pay = G->t();
+        G->out << "  " << pay << " = getelementptr i8, ptr " << slot
+               << ", i64 " << (8 + sv.offsets[0]) << "\n";
+        if (ft->k == Type::STRUCT || ft->k == Type::ENUM ||
+            ft->k == Type::ARRAY) {
+          G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << pay
+                 << ", ptr " << elemAddr << ", i64 " << typeSizeOf(ft)
+                 << ", i1 false)\n";
+        } else if (ft->isPair()) {
+          std::string val = G->t();
+          G->out << "  " << val << " = load { ptr, i64 }, ptr " << elemAddr
+                 << "\n";
+          G->out << "  store { ptr, i64 } " << val << ", ptr " << pay << "\n";
+        } else {
+          std::string val = G->t();
+          G->out << "  " << val << " = load " << G->llvmType(ft) << ", ptr "
+                 << elemAddr << "\n";
+          G->out << "  store " << G->llvmType(ft) << " " << val << ", ptr "
+                 << pay << "\n";
+        }
+      }
+      return slot;
+    };
+
+    if (n == "vec_new") {
+      std::string outS = G->t();
+      G->out << "  " << outS << " = alloca " << G->llvmType(e->ty)
+             << ", align " << typeAlignOf(e->ty) << "\n";
+      if (e->args.size() == 2) {
+        std::string cap = widenIdx(1);
+        G->out << "  call void @frt_vec_with_cap(ptr " << outS << ", i64 "
+               << cap << ", i64 " << esz << ")\n";
+      } else {
+        G->out << "  call void @frt_vec_init(ptr " << outS << ")\n";
+      }
+      return outS;
+    }
+    if (n == "vec_from_span" || n == "vec_from_array") {
+      std::string outS = G->t();
+      G->out << "  " << outS << " = alloca " << G->llvmType(e->ty)
+             << ", align " << typeAlignOf(e->ty) << "\n";
+      std::string p, len;
+      if (e->args[0]->ty->k == Type::SPAN) {
+        std::string val = genExpr(e->args[0]);   // { ptr, i64 }
+        p = G->t();
+        G->out << "  " << p << " = extractvalue { ptr, i64 } " << val
+               << ", 0\n";
+        len = G->t();
+        G->out << "  " << len << " = extractvalue { ptr, i64 } " << val
+               << ", 1\n";
+      } else {   // fixed array: base storage, length from the type
+        p = genAddr(e->args[0]);
+        if (p.empty()) p = genExpr(e->args[0]);
+        len = std::to_string(e->args[0]->ty->arrLen);
+      }
+      G->out << "  call void @frt_vec_from(ptr " << outS << ", ptr " << p
+             << ", i64 " << len << ", i64 " << esz << ")\n";
+      return outS;
+    }
+    if (n == "vec_clone") {
+      std::string outS = G->t();
+      G->out << "  " << outS << " = alloca " << G->llvmType(e->ty)
+             << ", align " << typeAlignOf(e->ty) << "\n";
+      std::string src = genExpr(e->args[0]);   // container value = address
+      G->out << "  call void @frt_vec_clone(ptr " << outS << ", ptr " << src
+             << ", i64 " << esz << ")\n";
+      return outS;
+    }
+    if (n == "vec_push") {
+      std::string v = genExpr(e->args[0]);   // &v -> the binding's slot
+      std::string tmp = elemScratch(1);
+      G->out << "  call void @frt_vec_push(ptr " << v << ", ptr " << tmp
+             << ", i64 " << esz << ")\n";
+      return "";
+    }
+    if (n == "vec_pop") {
+      std::string v = genExpr(e->args[0]);
+      std::string tmp = G->t();
+      G->out << "  " << tmp << " = alloca " << G->llvmType(elem) << ", align "
+             << typeAlignOf(elem) << "\n";
+      std::string found = G->t();
+      G->out << "  " << found << " = call i32 @frt_vec_pop(ptr " << v
+             << ", ptr " << tmp << ", i64 " << esz << ")\n";
+      return buildOption(found, tmp);
+    }
+    if (n == "vec_get") {
+      std::string v = genExpr(e->args[0]);
+      std::string idx = widenIdx(1);
+      std::string tmp = G->t();
+      G->out << "  " << tmp << " = alloca " << G->llvmType(elem) << ", align "
+             << typeAlignOf(elem) << "\n";
+      std::string found = G->t();
+      G->out << "  " << found << " = call i32 @frt_vec_get(ptr " << v
+             << ", i64 " << idx << ", ptr " << tmp << ", i64 " << esz
+             << ")\n";
+      return buildOption(found, tmp);
+    }
+    if (n == "vec_remove") {
+      std::string v = genExpr(e->args[0]);
+      std::string idx = widenIdx(1);
+      std::string tmp = G->t();
+      G->out << "  " << tmp << " = alloca " << G->llvmType(elem) << ", align "
+             << typeAlignOf(elem) << "\n";
+      std::string found = G->t();
+      G->out << "  " << found << " = call i32 @frt_vec_remove(ptr " << v
+             << ", i64 " << idx << ", ptr " << tmp << ", i64 " << esz
+             << ")\n";
+      return buildOption(found, tmp);
+    }
+    if (n == "vec_insert") {
+      std::string v = genExpr(e->args[0]);
+      std::string idx = widenIdx(1);
+      std::string tmp = elemScratch(2);
+      G->out << "  call void @frt_vec_insert(ptr " << v << ", i64 " << idx
+             << ", ptr " << tmp << ", i64 " << esz << ")\n";
+      return "";
+    }
+    if (n == "vec_reserve") {
+      std::string v = genExpr(e->args[0]);
+      std::string cnt = widenIdx(1);
+      G->out << "  call void @frt_vec_reserve(ptr " << v << ", i64 " << cnt
+             << ", i64 " << esz << ")\n";
+      return "";
+    }
+    if (n == "vec_truncate") {
+      std::string v = genExpr(e->args[0]);
+      std::string cnt = widenIdx(1);
+      G->out << "  call void @frt_vec_truncate(ptr " << v << ", i64 " << cnt
+             << ")\n";
+      return "";
+    }
+    if (n == "vec_resize") {
+      std::string v = genExpr(e->args[0]);
+      std::string cnt = widenIdx(1);
+      std::string tmp = elemScratch(2);
+      G->out << "  call void @frt_vec_resize(ptr " << v << ", i64 " << cnt
+             << ", ptr " << tmp << ", i64 " << esz << ")\n";
+      return "";
+    }
+    if (n == "vec_clear" || n == "vec_free") {
+      std::string v = genExpr(e->args[0]);
+      if (n == "vec_clear")
+        G->out << "  call void @frt_vec_clear(ptr " << v << ")\n";
+      else
+        G->out << "  call void @frt_vec_free(ptr " << v
+               << ")\n";   // frees + nulls — later drops no-op
+      return "";
+    }
+    if (n == "vec_len" || n == "vec_capacity") {
+      // field 1 (len) / field 2 (cap) — v.len / v.cap work directly too
+      std::string v = genExpr(e->args[0]);
+      std::string fp = G->t();
+      G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(vty)
+             << ", ptr " << v << ", i32 0, i32 " << (n == "vec_len" ? 1 : 2)
+             << "\n";
+      std::string r = G->t();
+      G->out << "  " << r << " = load i64, ptr " << fp << "\n";
+      return r;
+    }
+    if (n == "vec_is_empty") {
+      std::string v = genExpr(e->args[0]);
+      std::string lp = G->t();
+      G->out << "  " << lp << " = getelementptr inbounds " << G->llvmType(vty)
+             << ", ptr " << v << ", i32 0, i32 1\n";
+      std::string len = G->t();
+      G->out << "  " << len << " = load i64, ptr " << lp << "\n";
+      std::string r = G->t();
+      G->out << "  " << r << " = icmp eq i64 " << len << ", 0\n";
+      return r;
+    }
+    if (n == "vec_slice") {
+      // borrowed view { data + lo*esz, hi - lo } — checks like slicing
+      std::string v = genExpr(e->args[0]);
+      std::string dp = G->t();
+      G->out << "  " << dp << " = getelementptr inbounds " << G->llvmType(vty)
+             << ", ptr " << v << ", i32 0, i32 0\n";
+      std::string data = G->t();
+      G->out << "  " << data << " = load ptr, ptr " << dp << "\n";
+      std::string lp = G->t();
+      G->out << "  " << lp << " = getelementptr inbounds " << G->llvmType(vty)
+             << ", ptr " << v << ", i32 0, i32 1\n";
+      std::string len = G->t();
+      G->out << "  " << len << " = load i64, ptr " << lp << "\n";
+      std::string lo = widenIdx(1);
+      std::string hi = widenIdx(2);
+      std::string c1 = G->t();
+      G->out << "  " << c1 << " = icmp ule i64 " << lo << ", " << hi << "\n";
+      std::string c2 = G->t();
+      G->out << "  " << c2 << " = icmp ule i64 " << hi << ", " << len << "\n";
+      std::string both = G->t();
+      G->out << "  " << both << " = and i1 " << c1 << ", " << c2 << "\n";
+      int cont = G->bb++;
+      int trap = G->bb++;
+      G->out << "  br i1 " << both << ", label %" << G->l(cont)
+             << ", label %" << G->l(trap) << "\n";
+      G->terminate();
+      G->out << G->l(trap) << ":\n";
+      G->curLabelTerminated = false;
+      G->out << "  call void @frt_bound_trap(i64 " << lo << ", i64 " << len
+             << ")\n";
+      G->out << "  unreachable\n";
+      G->terminate();
+      G->out << G->l(cont) << ":\n";
+      G->curLabelTerminated = false;
+      std::string ptr = G->t();
+      G->out << "  " << ptr << " = getelementptr inbounds "
+             << G->llvmType(elem) << ", ptr " << data << ", i64 " << lo
+             << "\n";
+      std::string nlen = G->t();
+      G->out << "  " << nlen << " = sub i64 " << hi << ", " << lo << "\n";
+      std::string v1 = G->t();
+      G->out << "  " << v1 << " = insertvalue { ptr, i64 } poison, ptr "
+             << ptr << ", 0\n";
+      std::string v2 = G->t();
+      G->out << "  " << v2 << " = insertvalue { ptr, i64 } " << v1
+             << ", i64 " << nlen << ", 1\n";
+      return v2;
+    }
+  }
+
   // ---------------- user functions
   FnDecl* f = e->callee;
   // Phase 3b (report §6.3): indirect call through a fn-pointer LOCAL —
@@ -687,6 +994,16 @@ std::string genCall(Expr* e) {
   if (!dstkArg.empty())
     G->out << (argRegs.empty() ? "" : ", ") << "i64 " << dstkArg;
   G->out << ")" << attrs << dbgAttr << "\n";
+  // fsht-02:01 (registry 02.09.02): by-value Vec<T> arguments are MOVES —
+  // the callee copied the struct and owns the buffer, so the caller's
+  // binding is invalidated here (null its data field; the pending
+  // scope-exit drop becomes a no-op and the ownership analysis rejects
+  // any later use of the argument binding)
+  for (size_t i = 0; i < e->args.size() && i < f->params.size(); ++i) {
+    Type* pt = f->params[i].ty;
+    if (pt && pt->k == Type::STRUCT && containerElemType(pt))
+      nullContainerSource(e->args[i], pt);
+  }
   // bool RETURN ABI (mirror of genArg's parameter widening): the callee
   // returns the i8 C ABI; bool VALUES in this function are i1 registers,
   // so narrow the call result before it feeds conditions / bool slots.

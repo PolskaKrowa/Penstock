@@ -1,0 +1,15 @@
+// fsht-02:01 — the parfor pattern for containers: build serially, take a
+// borrowed Span view, then read the view in parallel lanes (mutation
+// stays outside the loop; see neg_vec_parfor_mut for the rejected shape)
+fn main() {
+    let mut v: Vec<f64> = vec_new(f64, 64);
+    for (i in 0..256) {
+        vec_push(&v, (i as f64) * 0.5);
+    }
+    let view: Span<f64> = vec_slice(v, 0, v.len);
+    let mut acc: f64 = 0.0;
+    parfor (i in 0..view.len) [reduction(+:acc)] {
+        acc = acc + view[i];
+    }
+    print_f64(acc, 2); println();                 // sum 0.5..127.5 = 16320.00
+}   // v drops at main end

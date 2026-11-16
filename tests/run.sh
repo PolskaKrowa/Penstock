@@ -613,6 +613,21 @@ run_err "generic constraint violation" tests/neg_genericconstraint.fsht F0203
 run_ok "strings: str views + String + fmt" tests/pos_strings.fsht "hello|5|65 67|world|5|eq ne|abcdef|6|count: 42|12345|3.14|hello, freshet!|pi 3"
 run_ok "Option/Result + ? propagation" tests/pos_optres.fsht "5|1001|2|none|26|1001|42|none|7"
 
+echo "== fsht-02:01: dynamic collections (registry 02.09.01/02.09.02) =="
+run_ok "Vec<T>: construction, growth, indexing, slicing" tests/pos_vec_basics.fsht "10 16|285|100 81|81|none|9|4 4 25|9|1.5 2.5 3.5|1.5|9.5 4|2|empty 2|0"
+run_ok "Vec<T> over POD structs, bools, f32, u8" tests/pos_vec_pod.fsht "12.0 6|42.5|TF|4.0|7 8"
+run_ok "Vec<T> moves: let-move, give, by-value, return, clone, manual free" tests/pos_vec_moves.fsht "1|4.0|2 4|3 2|7|7|3"
+run_ok "Vec<T> through generic fns + span views" tests/pos_vec_generic.fsht "30|1.8|6|5"
+run_ok "parfor over a container's Span view" tests/pos_vec_parfor_view.fsht "16320.00"
+run_err "container use-after-move (F0301)" tests/neg_vec_move.fsht F0301
+run_err "container use-after-free (F0301)" tests/neg_vec_useafterfree.fsht F0301
+run_err "container double free (F0301)" tests/neg_vec_doublefree.fsht F0301
+run_err "rebinding a container that still owns (F0301)" tests/neg_vec_rebind.fsht F0301
+run_err "owning element type rejected (F0201)" tests/neg_vec_owned_elem.fsht F0201
+run_err "container nested in a struct rejected (F0201)" tests/neg_vec_structfield.fsht F0201
+run_err "returning a container view dangles (F0301)" tests/neg_vec_viewescape.fsht F0301
+run_err "container mutation inside parfor (F0307)" tests/neg_vec_parfor_mut.fsht F0307
+
 echo "== Memory modes (report §5) =="
 run_ok "owned/borrowed/unsafe" tests/pos_memmodes.fsht "6.0|5 6|11"
 run_err "own-call owned param without give" tests/neg_ownedcall.fsht F0303

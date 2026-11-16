@@ -111,6 +111,76 @@ static void ensurePreludeEnum(const std::string& name) {
   if (ed) registerEnum(ed);
 }
 
+// fsht-02:01: public wrapper for sema callers (vec_pop/vec_get/vec_remove
+// build Option<T> results) — the prelude enums register on first use
+EnumDef* ensurePreludeEnumType(const std::string& name) {
+  ensurePreludeEnum(name);
+  return findEnumDef(name);
+}
+
+// fsht-02:01 (registry 02.09.01) — the Vec<T> dynamic-collection template.
+// Same trick as user generic structs: a template StructDef whose fields
+// carry textual encodings the binder resolves per instantiation, so
+//   Vec<T> = { data: *T, len: u64, cap: u64 }
+// monomorphises through the ordinary instantiateStruct path (Vec$i64,
+// Vec$f64, Vec$struct.Particle ...).  The {data,len} prefix keeps a Vec
+// slicing into a Span<T> a two-field view exactly like String -> str.
+StructDef* ensurePreludeVec(Program* prog) {
+  if (StructDef* sd = findStructDef("Vec")) return sd;
+  StructDef* sd = new StructDef();
+  sd->name = "Vec";
+  sd->isGeneric = true;
+  sd->tparams = {"T"};
+  auto addField = [&](const std::string& n, Type* t,
+                      const std::string& enc) {
+    Field f;
+    f.name = n;
+    f.ty = t;              // nullptr for *T: bound only at instantiation
+    f.tyName = enc;        // binder encoding ("*:T" / "u64")
+    f.idx = (int)sd->fields.size();
+    sd->fields.push_back(f);
+  };
+  addField("data", nullptr, "*:T");
+  addField("len", Type::simple(Type::USIZE), "u64");
+  addField("cap", Type::simple(Type::USIZE), "u64");
+  registerStruct(sd);
+  if (prog) {
+    sd->id = (int)prog->structs.size();
+    prog->structs.push_back(sd);
+  }
+  return sd;
+}
+
+// instantiate Vec<elem> with the owned-element gate (fsht-02:01 first
+// cut: elements must be non-owning — Vec<String>/Vec<Vec<T>> and
+// containers inside structs/enums/arrays are deferred with 02.09.02)
+StructDef* instantiateVecType(Program* prog, Type* elem, SrcLoc loc) {
+  if (!elem || elem->k == Type::VOID) {
+    diag(Diag::Error, Code::Type,
+         "Vec<T> needs a concrete element type", loc);
+    return ensurePreludeVec(prog);
+  }
+  // a generic template is not a usable element (Vec<Vec<...>> shapes are
+  // rejected below anyway; this guards a bare template slipping through
+  // an un-instantiated name)
+  if (elem->k == Type::STRUCT && elem->sdef && elem->sdef->isGeneric) {
+    diag(Diag::Error, Code::Type,
+         "Vec<T> element '" + elem->sdef->name +
+         "' is a generic template, not a concrete type", loc);
+    return ensurePreludeVec(prog);
+  }
+  if (!isNonOwningType(elem)) {
+    diag(Diag::Error, Code::Type,
+         "Vec<" + typeToString(elem) + ">: owning element types are not "
+         "supported yet (fsht-02:01 first cut — registry 02.09.02 tracks "
+         "nested ownership); use non-owning elements",
+         loc);
+    return ensurePreludeVec(prog);
+  }
+  ensurePreludeVec(prog);
+  return instantiateStruct(prog, findStructDef("Vec"), {elem}, loc);
+}
+
 // ---------------------------------------------------------------- binder
 // Resolve the parser's textual type encoding (see parser.cpp) to a Type*.
 // `tmap` substitutes generic template parameters inside a template body
@@ -330,6 +400,9 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       }
     }
     // struct template?
+    // fsht-02:01: the Vec<T> prelude template registers lazily, exactly
+    // like String, so `gen:Vec(i64)` resolves on first use.
+    if (qualMod.empty() && name == "Vec") ensurePreludeVec(prog);
     StructDef* tmpl = qualMod.empty() ? findStructDef(name)
                                       : findStructInModule(lookupName, qualMod);
     if (tmpl && !qualMod.empty()) {
@@ -365,6 +438,10 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
                loc);
           return Type::simple(Type::VOID);
         }
+      // fsht-02:01: Vec instantiations go through the element gate
+      // (owning elements rejected for the first cut).
+      if (name == "Vec" && args.size() == 1)
+        return Type::structOf(instantiateVecType(prog, args[0], loc));
       return Type::structOf(instantiateStruct(prog, tmpl, args, loc));
     }
     // enum template? (incl. the Option/Result prelude)
@@ -434,6 +511,14 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
   if (name == "str") return Type::simple(Type::STR);
   // prelude String (owned growable buffer) registers on first use
   if (name == "String") ensurePreludeString(prog);
+  // fsht-02:01: bare `Vec` (no <T>) is the generic template — not a
+  // usable value type; point the diagnostic at the missing argument.
+  if (name == "Vec") {
+    ensurePreludeVec(prog);
+    diag(Diag::Error, Code::Type,
+         "Vec requires a type argument: Vec<T>", loc);
+    return Type::simple(Type::VOID);
+  }
   if (tmap) {
     auto it = tmap->find(name);
     if (it != tmap->end()) return it->second;
@@ -536,6 +621,9 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
   sd->name = mangled;
   sd->alignOverride = tmpl->alignOverride;
   sd->loc = tmpl->loc;
+  // fsht-02:01: mark the instance's originating template so container
+  // predicates can recognise Vec<T> instantiations structurally.
+  sd->templateOf = tmpl;
   // Phase 3a: the instance belongs to the TEMPLATE's module (its field
   // encodings resolve there) and inherits pub-ness so imported-module
   // instantiations stay visible to the caller.

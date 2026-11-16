@@ -1,0 +1,36 @@
+// fsht-02:01 — Vec<T> through the generic machinery: one fn, several
+// element types; slices hand borrowed views to generic code
+fn vec_sum<T: Numeric>(v: Vec<T>) -> T {
+    // by-value container param = a move (callee owns it; drops at exit)
+    let mut s: T = 0 as T;
+    for (i in 0..v.len) {
+        s = s + v[i];
+    }
+    return s;
+}
+fn span_sum<T: Numeric>(view: Span<T>) -> T {
+    let mut s: T = 0 as T;
+    for (i in 0..view.len) {
+        s = s + view[i];
+    }
+    return s;
+}
+fn main() {
+    let mut ints: Vec<i64> = vec_new(i64, 4);
+    vec_push(&ints, 10);
+    vec_push(&ints, 20);
+    print_i64(vec_sum(ints)); println();           // 30 (moved in)
+
+    let mut flts: Vec<f64> = vec_new(f64, 2);
+    vec_push(&flts, 0.5);
+    vec_push(&flts, 1.25);
+    print_f64(vec_sum(flts), 1); println();        // 1.8 (1 decimal digit) (moved in)
+
+    // borrowed views through the same generic fn
+    let mut v: Vec<i64> = vec_new(i64, 4);
+    vec_push(&v, 1);
+    vec_push(&v, 2);
+    vec_push(&v, 3);
+    print_i64(span_sum(v[0..v.len])); println();   // 6
+    print_i64(span_sum(vec_slice(v, 1, 3))); println();   // 5
+}   // v drops here

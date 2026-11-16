@@ -215,6 +215,11 @@ struct StructDef {
   // tparams; empty for non-instantiated structs) — drives inference at
   // generic call sites
   std::vector<Type*> targs;
+  // fsht-02:01: for a monomorphised instance, the template it came from
+  // (nullptr for directly-declared structs and for the templates
+  // themselves).  Lets the container predicates recognise Vec<T>
+  // instantiations structurally instead of by name mangling.
+  StructDef* templateOf = nullptr;
   // computed layout
   std::vector<uint64_t> offsets, sizes;
   uint64_t size = 0, align = 0, padBytes = 0;
@@ -259,8 +264,35 @@ EnumDef* findEnumDef(const std::string& name);
 void registerEnum(EnumDef* ed);
 void computeEnumLayout(EnumDef* e);
 std::vector<EnumDef*> allEnumDefs();
+std::vector<StructDef*> allStructDefs();
 // prelude types (generics.cpp): String struct + Option/Result enums
 StructDef* ensurePreludeString(Program* prog);
+
+// fsht-02:01 (registry 02.09.01/02.09.02) — dynamic collections.
+// Vec<T> is a builtin GENERIC template struct (monomorphised per element
+// type exactly like user generic structs) laid out as the triple
+//   { data: *T, len: u64, cap: u64 }
+// and the prelude String is the same shape over u8.  Both are OWNED
+// containers: the ownership analysis tracks them (moves invalidate,
+// rebinding while owning is an error) and irgen drops them at scope
+// exit through the frt_vec_*/frt_string_* runtime (the runtime frees
+// only a non-null data pointer and nulls it after every transfer or
+// free, so drops are idempotent and moved-from bindings are inert).
+StructDef* ensurePreludeVec(Program* prog);
+StructDef* instantiateVecType(Program* prog, Type* elem, SrcLoc loc);
+// prelude enum templates (Option/Result) for sema callers
+EnumDef* ensurePreludeEnumType(const std::string& name);
+// container predicates (types.cpp): a struct type that is the prelude
+// String or any Vec<T> instantiation
+bool isContainerType(Type* t);
+// true when `t` may legally appear as a Vec element type / inside a
+// non-owning aggregate: scalars, str views, POD structs, arrays, enums,
+// spans over non-owning elements.  Containers (String, Vec<T>) are
+// owned and rejected — nested ownership is deferred (registry 02.09.02
+// follow-up).
+bool isNonOwningType(Type* t);
+// Vec<T> -> T; nullptr for String
+Type* containerElemType(Type* t);
 
 // ---------------------------------------------------------------- symbol info
 struct Expr; struct Stmt; struct FnDecl;
@@ -296,6 +328,11 @@ struct FnSema {
   std::map<std::string, std::vector<SrcLoc>> parforWrites;
   std::map<std::string, int> varDepth;
   std::set<std::string> reductionVars;
+  // fsht-02:01: bindings holding a borrowed view (str / Span<T>) whose
+  // provenance is a local Vec<T> — returning them out of the fn would
+  // dangle after the container's scope-exit drop (the lifetime analysis
+  // of fsht-03:02 is the full fix)
+  std::set<std::string> containerViewVars;
   std::map<Stmt*, std::string> stmtWrites;  // ASSIGN stmt -> root var name
 
   Sym* lookup(const std::string& n) {

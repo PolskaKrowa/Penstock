@@ -214,7 +214,7 @@ static void genCollapsedInner(Stmt* pf) {
   // lane-local — push loop targets so BREAK/CONTINUE jump to this loop's
   // latch (continue) / exit (break: this chunk stops, others continue)
   G->loopStack.push_back({exit, latch, deferStackDepth(), true,
-                             G->dstkRestores.size()});
+                             G->dstkRestores.size(), containerDropDepth()});
   genStmt(pf->body);
   G->loopStack.pop_back();
   if (!G->curLabelTerminated)
@@ -537,7 +537,7 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   // iterations are skipped (accs still written back at the exit block);
   // continue -> run the latch / next iteration.
   G->loopStack.push_back({exit, latch, deferStackDepth(), true,
-                             G->dstkRestores.size()});
+                             G->dstkRestores.size(), containerDropDepth()});
   // Phase 5: @reproducible pins strict FP for the accumulator chain
   if (pf->reproducible) ++G->forceStrictFp;
   genStmt(pf->body);

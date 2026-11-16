@@ -100,6 +100,15 @@ static bool isBuiltinCall(const std::string& n) {
     "str_eq", "str_cat", "str_to_cstr",
     "string_new", "string_from", "string_append", "string_free",
     "str_of", "fmt_f64", "fmt_i64",
+    // fsht-02:01 (registry 02.09.01): dynamic collections.  Vec<T> is a
+    // prelude generic struct; the API is free functions in the String
+    // style — &v for mutation, plain v for reads, Option<T> for
+    // fallible access.
+    "vec_new", "vec_from_span", "vec_from_array", "vec_clone",
+    "vec_push", "vec_pop", "vec_get", "vec_insert", "vec_remove",
+    "vec_reserve", "vec_truncate", "vec_resize", "vec_clear",
+    "vec_free", "vec_len", "vec_capacity", "vec_is_empty",
+    "vec_slice",
   };
   return b.count(n) > 0;
 }
@@ -422,6 +431,215 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
       diag(Diag::Error, Code::Args, "str_of expects a *String",
            e->loc);
     return Type::simple(Type::STR);
+  }
+
+  // ---------------- fsht-02:01 (registry 02.09.01): dynamic collections
+  //
+  // Vec<T> is a prelude generic struct; the builtin surface mirrors the
+  // String API style: &v for mutation, plain v for reads, Option<T> for
+  // fallible access, Span<T> for borrowed views (slicing copies nothing).
+  // All of these BORROW the container — ownership transfer happens only
+  // through by-value parameter passing, return, and give().
+  auto asVecArg = [&](int i) -> Type* {
+    Type* t = argT(i);
+    if (t && t->k == Type::STRUCT && containerElemType(t)) return t;
+    return nullptr;
+  };
+  auto vecRefArg = [&](const char* what, int i) -> Type* {
+    // (&v) form: *Vec<T>
+    Type* t = argT(i);
+    if (t && t->k == Type::PTR && t->pointee && t->pointee->k == Type::STRUCT &&
+        containerElemType(t->pointee))
+      return t->pointee;
+    diag(Diag::Error, Code::Args,
+         std::string(what) + " expects (&mut Vec<T>, ...) — take the address with &v",
+         e->loc);
+    return nullptr;
+  };
+  auto needMutBinding = [&](int i) -> bool {
+    Expr* a = i < (int)e->args.size() ? e->args[i] : nullptr;
+    if (a && a->k == Expr::UN && a->op == "&" && a->rhs &&
+        a->rhs->k == Expr::IDENT && a->rhs->sym && !a->rhs->sym->mut) {
+      diag(Diag::Error, Code::Args,
+           "'" + a->rhs->name + "' must be a `let mut` binding to mutate it",
+           e->loc);
+      return false;
+    }
+    return true;
+  };
+  auto optOf = [&](Type* elem) -> Type* {
+    if (!elem) return Type::simple(Type::VOID);
+    ensurePreludeEnumType("Option");
+    return Type::enumOf(instantiateEnum(currentProgram(),
+                                        findEnumDef("Option"), {elem}, e->loc));
+  };
+  // constant literal adoption (the user-call rule): vec_push(&v, 5) with a
+  // Vec<i64> adopts the element type for the literal instead of erroring
+  auto adoptConst = [&](int i, Type* elem) {
+    Expr* a = i < (int)e->args.size() ? e->args[i] : nullptr;
+    if (a && elem && a->ty && a->constant && a->ty->isNum() && elem->isNum() &&
+        a->ty->k != elem->k)
+      a->ty = elem;
+  };
+  if (n == "vec_new") {
+    // vec_new(T) or vec_new(T, cap) — element type first (malloc
+    // precedent); capacity 0 means "first push allocates"
+    if (e->args.size() != 1 && e->args.size() != 2) {
+      diag(Diag::Error, Code::Args,
+           "vec_new expects (T) or (T, cap), got " +
+           std::to_string(e->args.size()) + " args",
+           e->loc);
+      return Type::simple(Type::VOID);
+    }
+    Type* elem = nullptr;
+    Expr* tArg = e->args[0];
+    if (tArg->k == Expr::IDENT) elem = typeFromIdent(tArg->name);
+    // the String prelude registers lazily; resolve it so the owning-element
+    // gate below reports the real reason instead of "not a type"
+    if (!elem && tArg->k == Expr::IDENT && tArg->name == "String") {
+      ensurePreludeString(currentProgram());
+      if (StructDef* sd = findStructDef("String")) elem = Type::structOf(sd);
+    }
+    if (!elem) {
+      diag(Diag::Error, Code::Args,
+           "vec_new's first argument must be a type", e->loc);
+      return Type::simple(Type::VOID);
+    }
+    if (e->args.size() == 2 && (!argT(1) || !argT(1)->isInt())) {
+      diag(Diag::Error, Code::Args,
+           "vec_new capacity must be an integer", e->loc);
+    }
+    return Type::structOf(instantiateVecType(currentProgram(), elem, e->loc));
+  }
+  if (n == "vec_from_span" || n == "vec_from_array" || n == "vec_clone") {
+    Type* elem = nullptr;
+    if (n == "vec_from_span") {
+      need(1);
+      if (argT(0) && argT(0)->k == Type::SPAN) elem = argT(0)->pointee;
+      else diag(Diag::Error, Code::Args,
+               "vec_from_span expects a Span<T>", e->loc);
+    } else if (n == "vec_from_array") {
+      need(1);
+      if (argT(0) && argT(0)->k == Type::ARRAY) elem = argT(0)->pointee;
+      else diag(Diag::Error, Code::Args,
+               "vec_from_array expects a [T; N]", e->loc);
+    } else {
+      need(1);
+      Type* v = asVecArg(0);
+      if (v) elem = containerElemType(v);
+      else diag(Diag::Error, Code::Args,
+               "vec_clone expects a Vec<T>", e->loc);
+    }
+    if (!elem) return Type::simple(Type::VOID);
+    return Type::structOf(instantiateVecType(currentProgram(), elem, e->loc));
+  }
+  if (n == "vec_push") {
+    need(2);
+    Type* v = vecRefArg("vec_push", 0);
+    needMutBinding(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    adoptConst(1, elem);
+    if (elem && argT(1) && !typesEquivalent(argT(1), elem)) {
+      diag(Diag::Error, Code::Args,
+           "vec_push element must be " + typeToString(elem) + ", got " +
+           typeToString(argT(1)), e->loc);
+    }
+    return Type::simple(Type::VOID);
+  }
+  if (n == "vec_pop" || n == "vec_remove") {
+    // mutating fallible access: Option<T> out through &mut v
+    need(n == "vec_pop" ? 1 : 2);
+    Type* v = vecRefArg(n.c_str(), 0);
+    needMutBinding(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    if (n == "vec_remove" && argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_remove index must be an integer", e->loc);
+    return optOf(elem);
+  }
+  if (n == "vec_get") {
+    // pure read: the container argument is borrowed by value
+    need(2);
+    Type* v = asVecArg(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    if (!v)
+      diag(Diag::Error, Code::Args,
+           "vec_get expects a Vec<T> by value", e->loc);
+    if (argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_get index must be an integer", e->loc);
+    return optOf(elem);
+  }
+  if (n == "vec_insert") {
+    need(3);
+    Type* v = vecRefArg("vec_insert", 0);
+    needMutBinding(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    adoptConst(2, elem);
+    if (argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_insert index must be an integer", e->loc);
+    if (elem && argT(2) && !typesEquivalent(argT(2), elem)) {
+      diag(Diag::Error, Code::Args,
+           "vec_insert element must be " + typeToString(elem) + ", got " +
+           typeToString(argT(2)), e->loc);
+    }
+    return Type::simple(Type::VOID);
+  }
+  if (n == "vec_reserve" || n == "vec_truncate") {
+    need(2);
+    vecRefArg(n.c_str(), 0);
+    needMutBinding(0);
+    if (argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           std::string(n) + " count must be an integer", e->loc);
+    return Type::simple(Type::VOID);
+  }
+  if (n == "vec_resize") {
+    need(3);
+    Type* v = vecRefArg("vec_resize", 0);
+    needMutBinding(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    adoptConst(2, elem);
+    if (argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_resize count must be an integer", e->loc);
+    if (elem && argT(2) && !typesEquivalent(argT(2), elem)) {
+      diag(Diag::Error, Code::Args,
+           "vec_resize fill must be " + typeToString(elem) + ", got " +
+           typeToString(argT(2)), e->loc);
+    }
+    return Type::simple(Type::VOID);
+  }
+  if (n == "vec_clear" || n == "vec_free") {
+    need(1);
+    vecRefArg(n.c_str(), 0);
+    needMutBinding(0);
+    return Type::simple(Type::VOID);
+  }
+  if (n == "vec_len" || n == "vec_capacity" || n == "vec_is_empty") {
+    need(1);
+    if (!asVecArg(0))
+      diag(Diag::Error, Code::Args,
+           std::string(n) + " expects a Vec<T> by value", e->loc);
+    return n == "vec_is_empty" ? Type::simple(Type::BOOL)
+                               : Type::simple(Type::USIZE);
+  }
+  if (n == "vec_slice") {
+    need(3);
+    Type* v = asVecArg(0);
+    Type* elem = v ? containerElemType(v) : nullptr;
+    if (!v)
+      diag(Diag::Error, Code::Args,
+           "vec_slice expects (Vec<T>, lo, hi)", e->loc);
+    if (argT(1) && !argT(1)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_slice start must be an integer", e->loc);
+    if (argT(2) && !argT(2)->isInt())
+      diag(Diag::Error, Code::Args,
+           "vec_slice end must be an integer", e->loc);
+    if (!elem) return Type::spanOf(Type::simple(Type::U8));
+    return Type::spanOf(elem);
   }
   // math
   static const std::set<std::string> math1 = {
@@ -775,10 +993,10 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         return bad("unknown intrinsic: " + e->name);
       }
       if (isBuiltinCall(e->name)) {
-        // malloc(T, n) / soa_new(Struct, n) / stack_alloc(T, n): first arg
-        // is a type name, not an expression — skip expression typing for it
+        // malloc(T, n) / soa_new(Struct, n) / stack_alloc(T, n) / vec_new(T, cap):
+        // first arg is a type name, not an expression — skip expression typing for it
         size_t skipTypeArg = (e->name == "malloc" || e->name == "soa_new" ||
-                              e->name == "stack_alloc") ? 1 : 0;
+                              e->name == "stack_alloc" || e->name == "vec_new") ? 1 : 0;
         for (size_t ai = 0; ai < e->args.size(); ++ai) {
           if (ai < skipTypeArg) {
             e->args[ai]->ty = Type::simple(Type::U64);
@@ -870,7 +1088,11 @@ Type* typeExpr(FnSema* fs, Expr* e) {
                  e->name + ": expected " + typeToString(pt) + ", got " +
                  typeToString(at), e->loc);
         }
-        if (e->argGive[i] && !(at && at->isPtr())) {
+        if (e->argGive[i] && !(at && at->isPtr()) &&
+            // fsht-02:01: give() of a container is a move (registry
+            // 02.09.02) — struct containers are as transferable as
+            // owned pointers
+            !(at && at->k == Type::STRUCT && containerElemType(at))) {
           diag(Diag::Error, Code::Own, "give() requires a pointer",
                e->loc);
         }
@@ -1078,6 +1300,14 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         e->isLvalue = true;
         return e->ty;
       }
+      // fsht-02:01 (registry 02.09.01): Vec<T> indexing — the element is
+      // an lvalue; bounds-checked against the runtime len like a Span
+      if (bt->k == Type::STRUCT && isContainerType(bt) &&
+          containerElemType(bt)) {
+        e->ty = containerElemType(bt);
+        e->isLvalue = true;
+        return e->ty;
+      }
       // Phase 2b (report §4.5): str indexing yields the i-th BYTE (u8);
       // the view itself is immutable
       if (bt->k == Type::STR) {
@@ -1200,6 +1430,14 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       if (bt->k == Type::ARRAY || bt->k == Type::SPAN) {
         e->ty = Type::spanOf(bt->pointee);
         return e->ty;   // a[i..j] -> Span<T> view, no copy
+      }
+      // fsht-02:01 (registry 02.09.01): slicing a Vec<T> yields a
+      // borrowed Span<T> view (no copy); slicing an owned String yields
+      // a str view — the {data,len} prefix makes both free
+      if (bt->k == Type::STRUCT && isContainerType(bt)) {
+        Type* elem = containerElemType(bt);
+        e->ty = elem ? Type::spanOf(elem) : Type::simple(Type::STR);
+        return e->ty;
       }
       if (bt->k == Type::PTR)
         return bad("cannot slice a raw pointer — build a Span first: "

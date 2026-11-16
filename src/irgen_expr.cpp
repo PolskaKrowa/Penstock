@@ -217,6 +217,39 @@ std::string genAddr(Expr* e) {
                << idx << "\n";
         return a;
       }
+      // ---- fsht-02:01 (registry 02.09.01): Vec<T> — the struct slot's
+      // { data, len } fields drive indexing exactly like a Span: load the
+      // data pointer, bounds-check against the runtime len, GEP the
+      // element.  The element is an lvalue (v[i] = x works).
+      if (bt && bt->k == Type::STRUCT && isContainerType(bt) &&
+          containerElemType(bt)) {
+        std::string base = genAddr(e->base);
+        if (base.empty()) base = genExpr(e->base);
+        std::string dp = G->t();
+        G->out << "  " << dp << " = getelementptr inbounds "
+               << G->llvmType(bt) << ", ptr " << base << ", i32 0, i32 0\n";
+        std::string data = G->t();
+        G->out << "  " << data << " = load ptr, ptr " << dp << "\n";
+        std::string lp = G->t();
+        G->out << "  " << lp << " = getelementptr inbounds "
+               << G->llvmType(bt) << ", ptr " << base << ", i32 0, i32 1\n";
+        std::string len = G->t();
+        G->out << "  " << len << " = load i64, ptr " << lp << "\n";
+        std::string idx = genExpr(e->rhs);
+        if (e->rhs->ty && e->rhs->ty->bits() < 64) {
+          std::string op = e->rhs->ty->isSigned() ? "sext" : "zext";
+          std::string w = G->t();
+          G->out << "  " << w << " = " << op << " i" << e->rhs->ty->bits()
+                 << " " << idx << " to i64\n";
+          idx = w;
+        }
+        if (!e->bceSafe) emitBoundsCheck(idx, len, e->loc);
+        std::string a = G->t();
+        G->out << "  " << a << " = getelementptr inbounds "
+               << G->llvmType(containerElemType(bt)) << ", ptr " << data
+               << ", i64 " << idx << "\n";
+        return a;
+      }
       // ---- str: same as Span but the element is i8 and immutable
       if (bt && bt->k == Type::STR) {
         std::string val = genExpr(e->base);
@@ -592,8 +625,8 @@ std::string genExpr(Expr* e) {
       }
       std::string a = genAddr(e);
       std::string r = G->t();
-      G->out << "  " << r << " = load " << G->llvmType(e->ty) << ", ptr " << a
-             << "\n";
+      G->out << "  " << r << " = load " << G->scalarCodegenTy(e->ty)
+             << ", ptr " << a << "\n";
       return r;
     }
     case Expr::FIELD: {
@@ -638,8 +671,8 @@ std::string genExpr(Expr* e) {
         return genAddr(e);
       std::string a = genAddr(e);
       std::string r = G->t();
-      G->out << "  " << r << " = load " << G->llvmType(e->ty) << ", ptr " << a
-             << "\n";
+      G->out << "  " << r << " = load " << G->scalarCodegenTy(e->ty)
+             << ", ptr " << a << "\n";
       return r;
     }
     case Expr::UN: {
@@ -873,6 +906,22 @@ std::string genExpr(Expr* e) {
         baseLen = G->t();
         G->out << "  " << baseLen << " = add i64 0, " << bt->arrLen << "\n";
       }
+      // fsht-02:01 (registry 02.09.01): container bases — Vec<T> loads
+      // { data, len } through the struct's first two fields (the view
+      // is free, no copy); String slices to a str view the same way
+      if (basePtr.empty() && bt->k == Type::STRUCT && isContainerType(bt)) {
+        std::string v = genExpr(e->base);   // container value = address
+        std::string dp = G->t();
+        G->out << "  " << dp << " = getelementptr inbounds "
+               << G->llvmType(bt) << ", ptr " << v << ", i32 0, i32 0\n";
+        basePtr = G->t();
+        G->out << "  " << basePtr << " = load ptr, ptr " << dp << "\n";
+        std::string lp = G->t();
+        G->out << "  " << lp << " = getelementptr inbounds "
+               << G->llvmType(bt) << ", ptr " << v << ", i32 0, i32 1\n";
+        baseLen = G->t();
+        G->out << "  " << baseLen << " = load i64, ptr " << lp << "\n";
+      }
       // hi defaults to the full length
       std::string hi = baseLen;
       if (e->rhs) {
@@ -906,8 +955,16 @@ std::string genExpr(Expr* e) {
         G->curLabelTerminated = false;
       }
       // data pointer advanced by lo elements
-      std::string elemTy = (bt->k == Type::STR) ? std::string("i8")
-                                                : G->llvmType(bt->pointee);
+      std::string elemTy;
+      if (bt->k == Type::STR) {
+        elemTy = "i8";
+      } else if (bt->k == Type::STRUCT) {
+        // container base: Vec<T> elements, or bytes for String
+        Type* el = containerElemType(bt);
+        elemTy = el ? G->llvmType(el) : std::string("i8");
+      } else {
+        elemTy = G->llvmType(bt->pointee);
+      }
       std::string ptr = G->t();
       G->out << "  " << ptr << " = getelementptr inbounds " << elemTy
              << ", ptr " << basePtr << ", i64 " << lo << "\n";

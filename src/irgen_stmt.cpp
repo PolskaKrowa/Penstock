@@ -72,6 +72,64 @@ struct DeferEntry {
 };
 static std::vector<DeferEntry> g_defers;
 
+// ---------------- fsht-02:01 container drop stack (registry 02.09.02)
+// Scope-exit destruction for owned Vec<T> bindings, mirroring the defer
+// stack's lifecycle exactly: entries push at the LET (and for by-value
+// container params, which own their copy from fn entry), every scope
+// exit flushes its own entries in reverse declaration order, break /
+// continue flush the loop body's entries, and returns flush everything
+// (emitDeferredAll).  The runtime frees only a non-null data pointer and
+// nulls it after every transfer/free, so a moved-from or manually freed
+// binding's drop is a no-op — drops are idempotent and cannot double-free.
+// The prelude String deliberately stays on its fsht-01:01 manual model
+// (string_free) in this increment: str views routinely escape via
+// str_of(), so auto-drop awaits the lifetime analysis of fsht-03:02.
+struct DropEntry {
+  std::string alloca;   // the container binding's slot
+};
+static std::vector<DropEntry> g_drops;
+
+size_t containerDropDepth() { return g_drops.size(); }
+
+static void emitDropEntry(const DropEntry& d) {
+  G->out << "  call void @frt_vec_free(ptr " << d.alloca << ")\n";
+}
+
+// flush every pending drop (reverse order) — return paths and fn end
+void emitContainerDropsAll() {
+  for (size_t i = g_drops.size(); i > 0; --i) emitDropEntry(g_drops[i - 1]);
+}
+
+// flush the drops registered inside the current loop body (indices >=
+// base) before a break/continue branches out — mirrors emitLoopDefers
+static void emitLoopDrops(size_t base) {
+  for (size_t i = g_drops.size(); i > base; --i) emitDropEntry(g_drops[i - 1]);
+}
+
+// fsht-02:01: a by-value transfer of a Vec<T> (let-move, assignment,
+// call argument, return) leaves the source binding inert — store null
+// over its data field (field 0).  `e` may be the give()-wrapped form.
+void nullContainerSource(Expr* src, Type* cty) {
+  if (!src || !cty || !containerElemType(cty)) return;   // Vec only
+  Expr* r = src;
+  if (r->k == Expr::CALL && r->name == "give" && !r->args.empty())
+    r = r->args[0];
+  if (!r || r->k != Expr::IDENT || !r->sym) return;   // temporaries own nothing
+  std::string addr = G->varAllocas[r->name];
+  if (addr.empty()) return;
+  std::string fp = G->t();
+  G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(cty)
+         << ", ptr " << addr << ", i32 0, i32 0\n";
+  G->out << "  store ptr null, ptr " << fp
+         << "  ; fsht-02:01 move — source binding invalidated\n";
+}
+
+// push a scope-exit drop for a container binding slot (Vec<T> only)
+void pushContainerDrop(const std::string& alloca, Type* cty) {
+  if (!cty || !containerElemType(cty)) return;
+  g_drops.push_back({alloca});
+}
+
 // irgen_parfor.cpp pushes LoopCtx entries whose deferBase must match the
 // CURRENT defer depth (break/continue inside parfor bodies flush the
 // body-registered defers before branching, exactly like ordinary loops)
@@ -89,6 +147,7 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   tmp = 1;
   bb = 1;
   g_defers.clear();
+  g_drops.clear();
   varAllocas.clear();
 
   // PGO function counter
@@ -244,6 +303,10 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
       out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << varAllocas[pm.name]
           << ", ptr %" << pm.name << "param, i64 " << typeSizeOf(pt)
           << ", i1 false)\n";
+      // fsht-02:01: a by-value Vec<T> parameter moves its ownership in
+      // (the caller nulls its side after the call) — the callee's copy is
+      // dropped at fn exit like any container binding
+      pushContainerDrop(varAllocas[pm.name], pt);
     } else {
       // scalars, pointers, SOA descriptors (a ptr value) and pair
       // aggregates all store directly
@@ -332,6 +395,11 @@ void emitDeferredAll() {
     emitDeferCall(it->expr);
   }
   emitDstkRestores(0);   // the frame's data stacks die with the return
+  // fsht-02:01: user defers may have freed (and nulled) containers —
+  // run every pending scope-exit drop after them; null sources make the
+  // already-transferred ones no-ops.  Like the defers, this does NOT
+  // clear the stack: block-scope removal is the BLOCK lowering's job.
+  emitContainerDropsAll();
 }
 
 // run the defers registered inside the current loop body (indices >=
@@ -362,6 +430,14 @@ void genStmt(Stmt* s) {
           // aggregate by address: copy the value's storage into the var
           G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << a << ", ptr "
                  << v << ", i64 " << typeSizeOf(dt) << ", i1 false)\n";
+          // fsht-02:01 (registry 02.09.02): container bindings own their
+          // heap buffer — register the scope-exit drop, and an IDENT-
+          // rooted initialiser is a MOVE (the source binding is nulled,
+          // the ownership analysis rejects later uses of it)
+          if (isContainerType(dt)) {
+            pushContainerDrop(a, dt);
+            nullContainerSource(s->init, dt);
+          }
         } else if (dt && dt->k == Type::SOA) {
           G->out << "  store ptr " << v << ", ptr " << a << "\n";
         } else if (dt && dt->isPair()) {
@@ -425,6 +501,10 @@ void genStmt(Stmt* s) {
         std::string dst = genAddr(s->lhs);
         G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << dst << ", ptr "
                << src << ", i64 " << typeSizeOf(lt) << ", i1 false)\n";
+        // fsht-02:01: assigning a container moves it — the source
+        // binding is nulled (ownership analysis demands the target be
+        // free/moved first, so no old allocation is leaked here)
+        nullContainerSource(s->rhs, lt);
         break;
       }
       if (lt && lt->isPair()) {
@@ -471,6 +551,9 @@ void genStmt(Stmt* s) {
           std::string v = G->t();
           G->out << "  " << v << " = load " << G->llvmType(rt) << ", ptr "
                  << src << "\n";
+          // fsht-02:01: returning a container moves it out — null the
+          // source binding so the pending scope-exit drop is a no-op
+          nullContainerSource(s->retVal, rt);
           emitDeferredAll();
           G->out << "  ret " << G->llvmType(rt) << " " << v
                  << G->dbg(s->loc.line, s->loc.col) << "\n";
@@ -514,6 +597,9 @@ void genStmt(Stmt* s) {
       if (!G->loopStack.empty()) {
         auto& loop = G->loopStack.back();
         emitLoopDefers(loop.deferBase);
+        // fsht-02:01: containers bound inside the loop body drop with
+        // the body scope — flush before the branch leaves
+        emitLoopDrops(loop.dropBase);
         // data stacks: restore the watermarks of scopes opened inside the
         // loop (the loop's own enclosing bumps stay live)
         emitDstkRestores(loop.dstkBase);
@@ -526,6 +612,7 @@ void genStmt(Stmt* s) {
       if (!G->loopStack.empty()) {
         auto& loop = G->loopStack.back();
         emitLoopDefers(loop.deferBase);
+        emitLoopDrops(loop.dropBase);
         emitDstkRestores(loop.dstkBase);
         G->out << "  br label %" << G->l(loop.continueBB) << "\n";
       }
@@ -542,6 +629,7 @@ void genStmt(Stmt* s) {
     }
     case Stmt::BLOCK: {
       size_t dstart = g_defers.size();
+      size_t dropStart = g_drops.size();   // fsht-02:01 container scope base
       size_t dstkMark = G->dstkRestores.size();   // data-stack scope base
       for (auto* st : s->stmts) genStmt(st);
       // block-scoped defers (skipped when control already left the block)
@@ -554,6 +642,15 @@ void genStmt(Stmt* s) {
       } else if (dend > dstart) {
         // defers already ran on the break/continue/return path; drop them
         g_defers.resize(dstart);
+      }
+      // fsht-02:01: block-scoped containers drop at the closing brace,
+      // reverse declaration order, after this scope's defers
+      if (g_drops.size() > dropStart) {
+        if (!G->curLabelTerminated) {
+          for (size_t i = g_drops.size(); i > dropStart; --i)
+            emitDropEntry(g_drops[i - 1]);
+        }
+        g_drops.resize(dropStart);
       }
       // data stacks (goose port): the closing brace is the deallocation —
       // every bump bound in this block restores its watermark, in reverse
@@ -625,7 +722,7 @@ void genStmt(Stmt* s) {
       int exit = G->bb++;
       // Phase 1a: break targets exit; continue re-tests the header
       G->loopStack.push_back({exit, hdr, g_defers.size(), false,
-                              G->dstkRestores.size()});
+                              G->dstkRestores.size(), g_drops.size()});
       G->out << "  br label %" << G->l(hdr) << "\n";
       G->terminate();
       G->out << G->l(hdr) << ":\n";
@@ -653,7 +750,7 @@ void genStmt(Stmt* s) {
       int exit = G->bb++;
       // Phase 1a: break targets exit; continue runs the latch (the step)
       G->loopStack.push_back({exit, latch, g_defers.size(), false,
-                              G->dstkRestores.size()});
+                              G->dstkRestores.size(), g_drops.size()});
       std::string iA = G->varAllocas[ivar];
       std::string lo, hi;
       // step analysis (report §7 follow-on: with F0405 downgraded to a

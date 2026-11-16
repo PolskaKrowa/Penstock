@@ -1,0 +1,7 @@
+// fsht-02:01 — use-after-move: `let b = a;` MOVES the container
+fn main() {
+    let mut a: Vec<i64> = vec_new(i64, 2);
+    vec_push(&a, 7);
+    let b: Vec<i64> = a;
+    print_i64(a[0]); println();   // F0301: a was moved into b
+}

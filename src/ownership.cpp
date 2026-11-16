@@ -16,8 +16,24 @@ struct OwnInfo {
   std::string var;
   OwnState st = OS_NONE;
   bool owned = false;
+  // fsht-02:01 (registry 02.09.02): the binding is an owned Vec<T> —
+  // tracked for moves/invalidation like an owned pointer, but never for
+  // scope leaks (irgen emits the scope-exit drop; the runtime keeps
+  // drops idempotent through the nulled data pointer)
+  bool container = false;
   SrcLoc allocLoc, freeLoc;
 };
+
+// fsht-02:01: constructors producing a fresh owned container
+static bool containerCtorCall(const std::string& n) {
+  return n == "vec_new" || n == "vec_from_span" ||
+         n == "vec_from_array" || n == "vec_clone";
+}
+
+// fsht-02:01: mutators that consume &mut Vec<T> / free it
+static bool containerReleaseCall(const std::string& n) {
+  return n == "vec_free";
+}
 
 struct OwnCtx {
   std::map<std::string, OwnInfo> vars;
@@ -100,6 +116,8 @@ static void applyFree(OwnCtx& ctx, const std::string& v, SrcLoc at,
 
 static std::string rootVarName(Expr* e) {
   while (e && (e->k == Expr::INDEX || e->k == Expr::FIELD)) e = e->base;
+  // fsht-02:01: container mutators take &v — unwrap the address-of
+  if (e && e->k == Expr::UN && e->op == "&") e = e->rhs;
   return (e && e->k == Expr::IDENT) ? e->name : "";
 }
 
@@ -138,7 +156,8 @@ static void ownBlock(OwnCtx& ctx, FnSema* fs, Stmt* b,
   // run defers in reverse (simulate: apply frees)
   for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
     Expr* de = it->expr;
-    if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free")) {
+    if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free" ||
+                                de->name == "vec_free")) {
       std::string v = rootVarName(de->args.empty() ? nullptr : de->args[0]);
       if (!v.empty()) {
         auto f = ctx.vars.find(v);
@@ -157,6 +176,9 @@ static void ownBlock(OwnCtx& ctx, FnSema* fs, Stmt* b,
   if (checkLeaks) {
     for (auto& [v, oi] : ctx.vars) {
       if (!oi.owned) continue;
+      // fsht-02:01: containers never leak their scope — the codegen
+      // emits the scope-exit drop (the analysis tracks moves/frees only)
+      if (oi.container) continue;
       auto before = entry.find(v);
       bool preExisting = before != entry.end();
       if (oi.st == OS_ALIVE && !preExisting) {
@@ -181,9 +203,27 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
       OwnInfo oi;
       oi.var = s->var;
       oi.st = OS_ALIVE;
+      // fsht-02:01: the binding's TYPE decides container tracking (the
+      // ann type is resolved by sema before this pass)
+      Type* letTy = s->annTy;
+      oi.container = letTy && isContainerType(letTy) &&
+                     containerElemType(letTy);
       oi.owned = (s->init->k == Expr::CALL && (s->init->name == "malloc" ||
-                                               s->init->name == "soa_new"));
+                                               s->init->name == "soa_new")) ||
+                 (oi.container && s->init->k == Expr::CALL &&
+                  containerCtorCall(s->init->name)) ||
+                 (oi.container && s->init->k == Expr::IDENT);
       oi.allocLoc = s->loc;
+      // fsht-02:01 move-out invalidation: `let b = a;` with a container
+      // `a` MOVES the buffer — mark the source binding moved (uses of it
+      // after this line are F0301 use-after-move)
+      if (oi.container && s->init->k == Expr::IDENT) {
+        auto it = ctx.vars.find(s->init->name);
+        if (it != ctx.vars.end() && it->second.container) {
+          if (it->second.st == OS_ALIVE)
+            applyFree(ctx, s->init->name, s->loc, true);
+        }
+      }
       ctx.vars[s->var] = oi;
       // let x = give-expr? not valid; give only in call args
       break;
@@ -193,6 +233,20 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
       checkExprUses(ctx, s->rhs, s->loc);
       std::string lv = rootVarName(s->lhs);
       if (s->lhs->k == Expr::IDENT && !lv.empty()) {
+        // fsht-02:01: rebinding a container that still owns its buffer is
+        // an error — the old allocation would leak (drops only see the
+        // current slot contents); free it or move it out first
+        {
+          auto it = ctx.vars.find(lv);
+          if (it != ctx.vars.end() && it->second.container &&
+              it->second.st == OS_ALIVE && it->second.owned) {
+            diag(Diag::Error, Code::Own,
+                 "rebinding container '" + lv + "' while it still owns its "
+                 "allocation — free it (vec_free) or move it first",
+                 s->loc,
+                 "var=" + lv + ",kind=rebind-container");
+          }
+        }
         // rebinding an owned var: old value must be freed first (or moved)
         auto it = ctx.vars.find(lv);
         if (it != ctx.vars.end() && it->second.owned &&
@@ -205,9 +259,22 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         OwnInfo oi;
         oi.var = lv;
         oi.st = OS_ALIVE;
+        Type* asTy = s->lhs->ty;
+        oi.container = asTy && isContainerType(asTy) && containerElemType(asTy);
         oi.owned = (s->rhs->k == Expr::CALL && (s->rhs->name == "malloc" ||
-                                                s->rhs->name == "soa_new"));
+                                                s->rhs->name == "soa_new")) ||
+                   (oi.container && s->rhs->k == Expr::CALL &&
+                    containerCtorCall(s->rhs->name)) ||
+                   (oi.container && s->rhs->k == Expr::IDENT);
         oi.allocLoc = s->loc;
+        // move-out invalidation for `b = a` container sources
+        if (oi.container && s->rhs->k == Expr::IDENT) {
+          auto src = ctx.vars.find(s->rhs->name);
+          if (src != ctx.vars.end() && src->second.container) {
+            if (src->second.st == OS_ALIVE)
+              applyFree(ctx, s->rhs->name, s->loc, true);
+          }
+        }
         ctx.vars[lv] = oi;
       } else if (s->lhs->k == Expr::INDEX || s->lhs->k == Expr::FIELD) {
         // writing through pointer is fine (borrow in place)
@@ -296,7 +363,8 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
     case Stmt::EXPR: {
       checkExprUses(ctx, s->expr, s->loc);
       if (s->expr->k == Expr::CALL) {
-        if (s->expr->name == "free" || s->expr->name == "soa_free") {
+        if (s->expr->name == "free" || s->expr->name == "soa_free" ||
+            containerReleaseCall(s->expr->name)) {
           std::string v = rootVarName(s->expr->args.empty() ? nullptr : s->expr->args[0]);
           if (!v.empty()) applyFree(ctx, v, s->loc, false);
         }
@@ -309,18 +377,27 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         FnDecl* callee = s->expr->callee;
         if (callee) {
           for (size_t i = 0; i < s->expr->args.size(); ++i) {
-            if (!s->expr->argGive[i]) continue;
+            // fsht-02:01: a by-value Vec<T> parameter is a move whether or
+            // not the call site wraps it in give() — irgen nulls the
+            // source binding after the call
+            Type* pt = i < callee->params.size() ? callee->params[i].ty
+                                                  : nullptr;
+            bool containerArg = pt && pt->k == Type::STRUCT &&
+                                containerElemType(pt);
+            if (!s->expr->argGive[i] && !containerArg) continue;
             std::string v = rootVarName(s->expr->args[i]);
             if (v.empty()) continue;
             auto it = ctx.vars.find(v);
-            if (it == ctx.vars.end() || !it->second.owned) {
-              diag(Diag::Error, Code::Own,
-                   "give() of non-owned pointer '" + v + "'",
-                   s->loc,
-                   "var=" + v + ",kind=move-nonowned");
-            } else {
-              applyFree(ctx, v, s->loc, true);
+            if (it == ctx.vars.end()) continue;
+            if (!it->second.owned && !it->second.container) {
+              if (s->expr->argGive[i])
+                diag(Diag::Error, Code::Own,
+                     "give() of non-owned pointer '" + v + "'",
+                     s->loc,
+                     "var=" + v + ",kind=move-nonowned");
+              continue;
             }
+            applyFree(ctx, v, s->loc, true);
           }
         }
       }
@@ -379,7 +456,8 @@ void runOwnershipAnalysis(Program* p) {
     // function-end defers
     for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
       Expr* de = it->expr;
-      if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free")) {
+      if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free" ||
+                                  de->name == "vec_free")) {
         std::string v = rootVarName(de->args.empty() ? nullptr : de->args[0]);
         if (!v.empty()) {
           auto f = ctx.vars.find(v);
@@ -396,6 +474,8 @@ void runOwnershipAnalysis(Program* p) {
     }
     // leaks: owned & alive at fn end (unless returned)
     for (auto& [v, oi] : ctx.vars) {
+      // fsht-02:01: containers drop at every fn exit — never a leak
+      if (oi.container) continue;
       if (oi.owned && oi.st == OS_ALIVE) {
         diag(Diag::Error, Code::Own,
              "leak: owned '" + v + "' (malloc at line " +

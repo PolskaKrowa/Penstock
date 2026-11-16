@@ -1,0 +1,6 @@
+// fsht-02:01 — containers nested in aggregates rejected (no drop walk)
+struct Holder { v: Vec<i64>, n: i64 }
+fn main() {
+    let h: Holder = Holder { v: vec_new(i64, 2), n: 1 };   // F0201
+    print_i64(h.n); println();
+}

@@ -1,0 +1,11 @@
+// fsht-02:01 — returning a borrowed view of a LOCAL container dangles
+// (the container drops at fn exit)
+fn leaky() -> Span<i64> {
+    let mut v: Vec<i64> = vec_new(i64, 4);
+    vec_push(&v, 1);
+    return v[0..v.len];   // F0301: view outlives the container
+}
+fn main() {
+    let s: Span<i64> = leaky();
+    print_i64(s.len); println();
+}
