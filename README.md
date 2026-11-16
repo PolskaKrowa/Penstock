@@ -1,7 +1,5 @@
 <div align=center>
-  <img width="730" height="411" alt="freshet logo" src="https://github.com/user-attachments/assets/930e9c07-4517-476c-a494-bd82b2694e46" />
-  
-  Working logo for Freshet (Separate logo for Penstock is in progress.)
+  <img width="1086" height="362" alt="penstock logo" src="https://github.com/user-attachments/assets/cd0eb0a9-2abe-4bb2-b899-6f7a06ad9434" />
 </div>
 
 # Freshet / Penstock
