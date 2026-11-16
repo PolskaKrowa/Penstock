@@ -1,0 +1,87 @@
+# Freshet-lang benchmarks — Penstock vs idiomatic C++, hand-tuned C++ and
+# safe Rust, with in-detail annotation of every function another language
+# beat Penstock on.
+#
+# This job REQUIRES a self-hosted runner with hardware performance
+# counters (perf + PMU access): the whole point is instruction-level,
+# perf-annotated comparison of the generated code of both implementations.
+# It never runs on GitHub-hosted runners by design — hosted runners have
+# no PMU access, and this workflow would rather skip than fabricate
+# cycle numbers. (Static-only analysis can always be run manually:
+# tools/lang-bench/run.sh --perf off.)
+#
+# FRESHET_LANG_REPO points at the standards repository carrying the
+# kernels (benchmarks/KERNELS.md is the normative spec).
+name: freshet-lang-benchmarks
+on:
+  workflow_dispatch:
+    inputs:
+      freshet_lang_repo:
+        description: 'Freshet-lang repository (owner/repo)'
+        default: 'PolskaKrowa/Freshet-lang'
+        required: true
+      kernels:
+        description: 'Kernel subset (empty = all 12)'
+        default: ''
+        required: false
+  schedule:
+    - cron: '0 3 * * 1'   # weekly benchmark run
+
+env:
+  FRESHET_LANG_REPO: ${{ github.event.inputs.freshet_lang_repo || 'PolskaKrowa/Freshet-lang' }}
+
+jobs:
+  bench:
+    runs-on: [self-hosted, perf]   # perf + PMU required; never hosted
+    timeout-minutes: 180
+    steps:
+      - name: Checkout Penstock
+        uses: actions/checkout@v4
+      - name: Checkout Freshet-lang (kernels + drivers)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRESHET_LANG_REPO }}
+          path: Freshet-lang
+      - name: Toolchain sanity (perf + PMU)
+        run: |
+          set -e
+          perf stat -e cycles,instructions -- true
+          echo "perf + hardware counters OK"
+          clang++ --version | head -n1
+          rustc --version || echo "rustc missing — rust columns will be skipped"
+      - name: Build Penstock
+        run: |
+          set -e
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+      - name: Run benchmarks (checksum-gated)
+        run: |
+          set -e
+          PEN=$(ls build/bin/penstock 2>/dev/null || echo bin/penstock)
+          python3 Freshet-lang/benchmarks/bench.py \
+            --penstock "$(pwd)/$PEN" \
+            ${KERN:+--kernels "$KERN"} \
+            --reps 5 --out "$(pwd)/results.json"
+        env:
+          KERN: ${{ github.event.inputs.kernels }}
+      - name: Annotate the losses (LLVM IR + disassembly + perf)
+        run: |
+          set -e
+          PEN=$(ls build/bin/penstock 2>/dev/null || echo bin/penstock)
+          python3 Freshet-lang/benchmarks/annotate.py \
+            --results "$(pwd)/results.json" \
+            --penstock "$(pwd)/$PEN" \
+            --perf force \
+            --out "$(pwd)/reports"
+      - name: Loss summary in the job log
+        run: |
+          sed -n '1,80p' reports/INDEX.md || echo "no losses at threshold"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freshet-lang-benchmarks
+          path: |
+            results.json
+            results.md
+            reports/
+          if-no-files-found: error

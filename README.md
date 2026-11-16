@@ -138,6 +138,41 @@ Runtime environment variables: `FRT_THREADS` (worker-pool size),
 compute-class parfor chunks to sibling hardware threads of one physical
 core, paired by `--smt-interleave`).
 
+## Freshet-lang: the standard, the stress suite, the benchmarks
+
+The language is specified and stress-tested by the standards repository
+[Freshet-lang](https://github.com/PolskaKrowa/Freshet-lang) (current standard:
+`fsht-01:01`). This repository consumes it in two places:
+
+- **`.github/workflows/freshet-conformance.yml`** — every PR builds
+  Penstock and runs the Freshet-lang conformance suite (corpus goldens,
+  negative tests, property checks, differential fuzz) against it.
+- **`.github/workflows/freshet-benchmarks.yml`** — a self-hosted,
+  perf-capable runner benchmarks Penstock against **idiomatic C++,
+  hand-tuned C++ and safe Rust** on the 12 HPC kernels of the standards
+  repository, then annotates, in detail, every kernel where another
+  language won: the final optimised LLVM IR of the losing function from
+  both implementations, source-annotated disassembly, a measured
+  instruction census, and `perf` cycle attribution for both binaries.
+  Hosted runners have no hardware performance counters, so this workflow
+  deliberately runs only on `[self-hosted, perf]` runners — it skips
+  rather than fabricating cycle numbers.
+
+The same comparison runs machine-locally with one command after cloning
+this repository:
+
+```sh
+tools/lang-bench/run.sh                 # builds penstock if needed,
+                                         # clones Freshet-lang if needed,
+                                         # runs bench.py + annotate.py
+tools/lang-bench/run.sh --perf off      # static annotation only
+tools/lang-bench/run.sh --kernels dot,matmul
+```
+
+Set `FRESHET_LANG_REPO` (or the workflow input / `--freshet-lang` flag)
+to your `owner/Freshet-lang` checkout before the first run — the
+shipped default is the placeholder `PolskaKrowa/Freshet-lang`.
+
 ## Status
 
 Version `0.1.0-INDEV`. The two integration reports document what is
