@@ -80,6 +80,10 @@
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@vscode/vsce": "^2.26.1"
+    "@vscode/vsce": "^3.9.1"
+  },
+  "allowScripts": {
+    "keytar@7.9.0": true,
+    "@vscode/vsce-sign@2.1.1": true
   }
 }
