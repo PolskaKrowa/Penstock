@@ -1,0 +1,59 @@
+// fsht-03:01 (registry 05.05.01, ch. 23 §4): streaming I/O with Result
+// integration — ownership-tracked handles, buffered writer/reader,
+// read_line, byte reads through a Span, remove.  The file cleans up
+// after itself (also exercising `remove`).
+import io;
+
+fn round_trip() -> Result<usize, IoError> {
+    let mut w: Writer = io::writer_open("io_round_test.txt")?;
+    io::writer_write(&mut w, "line one\n")?;
+    io::writer_write(&mut w, "line two\n")?;
+    io::writer_flush(&mut w)?;
+    io::writer_close(&mut w);
+    let mut r: Reader = io::reader_open("io_round_test.txt")?;
+    let l1: String = io::reader_read_line(&mut r)?;
+    print(str_of(&l1)); println();
+    let l2: String = io::reader_read_line(&mut r)?;
+    print(str_of(&l2)); println();
+    // end of file with no partial line is Err(Eof)
+    let third: Result<String, IoError> = io::reader_read_line(&mut r);
+    match (third) {
+        Ok(l) => { print(str_of(&l)); println(); }
+        Err(e) => { print("eof-ok"); println(); }
+    }
+    // byte read through a Span out-region (fresh reader)
+    let mut r2: Reader = io::reader_open("io_round_test.txt")?;
+    let mut buf: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    let sp: Span<u8> = span(buf);
+    let n: usize = io::reader_read(&mut r2, sp)?;
+    print("bytes="); print_u64(n); println();
+    print_u64(sp[0]); println();
+    return Ok(n);
+}
+
+fn main() {
+    let rt: Result<usize, IoError> = round_trip();
+    match (rt) {
+        Ok(n) => { print("rt="); print_u64(n); println(); }
+        Err(e) => { print("failed"); println(); }
+    }
+    // missing paths are Err(NotFound)
+    let nf: Result<Reader, IoError> = io::reader_open("definitely_missing_x9");
+    match (nf) {
+        Ok(r) => { print("opened?!"); println(); }
+        Err(NotFound) => { print("notfound"); println(); }
+        Err(e) => { print("other"); println(); }
+    }
+    // remove: ok(true), then Err(NotFound)
+    let rem: Result<bool, IoError> = io::remove("io_round_test.txt");
+    match (rem) {
+        Ok(b) => { print("removed"); println(); }
+        Err(e) => { print("rmerr"); println(); }
+    }
+    let rem2: Result<bool, IoError> = io::remove("io_round_test.txt");
+    match (rem2) {
+        Ok(b) => { print("removed2"); println(); }
+        Err(NotFound) => { print("rm-notfound"); println(); }
+        Err(e) => { print("rmother"); println(); }
+    }
+}

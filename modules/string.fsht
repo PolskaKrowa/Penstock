@@ -1,0 +1,23 @@
+// string — UTF-8 strings and formatting (fsht-03:01, ch. 23 §5).
+//
+//   import string;
+//
+// The chapter 10 builtins (string_new/from/append, str_of, str_cat,
+// fmt_i64/fmt, str_eq, str_to_cstr — and the fsht-03:02 additions
+// string_clone/string_clear) are compiler-known: usable without any
+// import.  This module re-exports the §1 parse functions; they are
+// likewise compiler-known, so the wrappers are documentation-anchors
+// and the builtins serve both spellings (`parse_i64` / `string::parse_i64`).
+module string;
+
+pub fn parse_i64(s: str) -> Result<i64, ParseError> {
+    return parse_i64(s);
+}
+
+pub fn parse_u64(s: str) -> Result<u64, ParseError> {
+    return parse_u64(s);
+}
+
+pub fn parse_f64(s: str) -> Result<f64, ParseError> {
+    return parse_f64(s);
+}

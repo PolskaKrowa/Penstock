@@ -1,0 +1,23 @@
+// fsht-02:02: impl signature does not match the trait — F0217.
+trait Numeric {
+    fn add(a: Self, b: Self) -> Self;
+    fn zero() -> Self;
+}
+impl Numeric for i64 {
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+    fn zero() -> Self { return 0; }
+}
+impl Numeric for f64 {
+    fn add(a: Self, b: f64) -> Self { return a + b; }   // param 2 is f64, trait says Self (f64 ok)
+    fn zero() -> Self { return 0.0; }
+}
+impl Numeric for i32 {
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+    fn zero() -> f32 { return 0.0; }                    // return mismatch
+}
+impl Numeric for i16 {
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+    fn zero() -> Self { return 0; }
+    fn bogus() -> Self { return 0; }                    // not in the trait
+}
+fn main() {}

@@ -32,6 +32,10 @@ namespace freshet {
   X(Fmt,              "F0006", "fmt",                 "formatter refused to rewrite the file", false) \
   X(Pgo,              "F0007", "pgo",                 "profile data could not be used", false) \
   X(Ir,               "F0008", "ir",                  "internal error while generating IR", false) \
+  /* fsht-03:03 (registry 10.03.02): driver diagnostic naming an unsupported
+   * --target triple — a declared-target gate (chapter 25 §6: reject values
+   * the implementation cannot build). */ \
+  X(UnsupportedTarget,"F0009", "unsupported-target", "--target triple is not a ratified/declared target of this build", false) \
   /* ---- F01xx syntax -------------------------------------------------- */ \
   X(Lex,              "F0101", "lex",                 "unexpected character", false) \
   X(Parse,            "F0102", "parse",               "syntax error", false) \
@@ -55,6 +59,13 @@ namespace freshet {
   X(LoopBreakOutside, "F0213", "loop-break-outside",  "break or continue outside a loop", false) \
   X(ArithDivZero,     "F0214", "arith-div-zero",      "division by zero", false) \
   X(ArithNegUnsigned, "F0215", "arith-neg-unsigned",  "negation of an unsigned value", false) \
+  /* fsht-02:02 (registry 06.02.01): user-defined traits, static dispatch. */ \
+  X(TraitCallAmbig,   "F0216", "trait-call-ambiguous", "trait method call does not determine its implementing type", false) \
+  X(TraitImplMismatch,"F0217", "trait-impl-mismatch",  "impl block does not match the trait declaration", false) \
+  X(NoTraitImpl,      "F0218", "no-trait-impl",        "type does not implement the required trait", false) \
+  /* fsht-02:03 (registry 06.03.01): const generics + const fn. */ \
+  X(ConstEval,        "F0219", "const-eval",           "expression is not const-evaluable", false) \
+  X(ConstAssert,      "F0220", "const-assert",         "compile-time assertion failed", false) \
   /* ---- F03xx safety -------------------------------------------------- */ \
   X(Own,              "F0301", "own",                 "ownership violation", false) \
   X(OwnSuspicious,    "F0302", "own-suspicious",      "suspicious ownership operation", false) \
@@ -65,6 +76,11 @@ namespace freshet {
   X(Thread,           "F0307", "thread",              "unsafe construct inside a parfor body", false) \
   X(RedAddInit,       "F0308", "red-add-init",        "reduction(+) not initialized to 0", false) \
   X(RedMulInit,       "F0309", "red-mul-init",        "reduction(*) not initialized to 1", false) \
+  /* fsht-03:02 (registry 03.02.09/03.02.10): the borrow discipline's two
+   * diagnostics (chapter 24 §2/§3).  F0310 = exclusivity (one writer or
+   * many readers), F0311 = a borrow/view outliving its storage. */ \
+  X(BorrowExclusivity,"F0310", "borrow-exclusivity",  "borrow exclusivity violated (one writer or many readers)", false) \
+  X(BorrowLifetime,   "F0311", "borrow-lifetime",     "a borrow or view would outlive its storage", false) \
   /* ---- F04xx performance --------------------------------------------- */ \
   X(ArithDivConst,    "F0401", "arith-div-const",     "division by a non-power-of-2 constant", false) \
   X(ArithDivRuntime,  "F0402", "arith-div-runtime",   "division by a runtime value", false) \

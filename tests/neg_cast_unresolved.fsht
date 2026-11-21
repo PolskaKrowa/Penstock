@@ -1,0 +1,6 @@
+// fsht-03:01 F0201: checked_cast cannot infer the destination type U
+// from any context (ch. 23 §3).
+fn main() {
+    let x: u64 = 5;
+    let c = checked_cast(x);
+}

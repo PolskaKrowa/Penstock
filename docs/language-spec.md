@@ -547,6 +547,11 @@ Index (generated from the registry):
 | `F0213` | `loop-break-outside` | break or continue outside a loop |
 | `F0214` | `arith-div-zero` | division by zero |
 | `F0215` | `arith-neg-unsigned` | negation of an unsigned value |
+| `F0216` | `trait-call-ambiguous` | trait method call does not determine its implementing type |
+| `F0217` | `trait-impl-mismatch` | impl block does not match the trait declaration |
+| `F0218` | `no-trait-impl` | type does not implement the required trait |
+| `F0219` | `const-eval` | expression is not const-evaluable |
+| `F0220` | `const-assert` | compile-time assertion failed |
 
 **Safety (ownership, aliasing, purity, parfor)**
 

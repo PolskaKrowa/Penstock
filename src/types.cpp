@@ -351,14 +351,14 @@ Type* containerElemType(Type* t) {
   return nullptr;
 }
 
-// is `t` free of owned containers at every nesting level?  Vec element
-// types, struct fields, array elements, enum payloads and span elements
-// must all satisfy this: nested ownership (a container that owns another
-// container, directly or through an aggregate) needs drop elaboration
-// through user shapes and stays out of the fsht-02:01 first cut.
+// is `t` free of owned containers at every nesting level?  (POD
+// predicate; the fsht-02:01 Vec-element gate was its only enforcement
+// point — lifted by fsht-03:02, which accepts owning elements and shapes
+// with the drop elaboration of 03.02.10.)
 bool isNonOwningType(Type* t) {
   if (!t) return false;
   if (isContainerType(t)) return false;
+  if (isHandleType(t)) return false;
   switch (t->k) {
     case Type::STRUCT: {
       // a generic template's fields are unresolved; templates are never
@@ -380,6 +380,45 @@ bool isNonOwningType(Type* t) {
     default:
       return true;   // scalars, str views, raw pointers, fn ptrs, void
   }
+}
+
+// fsht-03:02 (registry 03.02.10, ch. 24 §5): does a value of `t` own
+// storage needing scope-exit drops / move transfers / deep clones?
+//   * Vec<T> whose elements themselves need drops (plain Vec<T> over
+//     scalars is handled by the existing frt_vec_free path);
+//   * String (auto-drop, the ch. 24 §4 migration);
+//   * Reader/Writer (scope-exit close, idempotent);
+//   * any user struct/enum/array shape transitively containing one.
+bool typeNeedsDrop(Type* t) {
+  if (!t) return false;
+  if (isContainerType(t)) {
+    if (t->sdef->name == "String") return true;
+    Type* elem = containerElemType(t);
+    return elem && typeNeedsDrop(elem);
+  }
+  if (isHandleType(t)) return true;
+  switch (t->k) {
+    case Type::STRUCT:
+      for (auto& f : t->sdef->fields)
+        if (f.ty && typeNeedsDrop(f.ty)) return true;
+      return false;
+    case Type::ENUM:
+      for (auto& v : t->edef->variants)
+        for (auto& f : v.fields)
+          if (f.ty && typeNeedsDrop(f.ty)) return true;
+      return false;
+    case Type::ARRAY:
+      return typeNeedsDrop(t->pointee);
+    default:
+      return false;   // scalars, views, raw pointers — plain copies
+  }
+}
+
+// fsht-03:01 (registry 05.05.01): the prelude Reader/Writer handle
+// structs of chapter 23 §4 — ownership-tracked I/O resources.
+bool isHandleType(Type* t) {
+  return t && t->k == Type::STRUCT && t->sdef &&
+         (t->sdef->name == "Reader" || t->sdef->name == "Writer");
 }
 
 } // namespace freshet

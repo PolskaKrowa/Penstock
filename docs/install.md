@@ -52,9 +52,13 @@ git submodule update --init third_party/z3
 When `third_party/llvm` provides the backend, that one SDK serves the
 compiler, the verifier and the opt plugin — no second private LLVM is built
 and no release tarball is downloaded. Configuring patches Z3's and Alive2's
-`CMakeLists.txt` in place (target-collision namespacing); the patches are
-idempotent, so `git status` inside those submodules simply shows the patched
-files until you restore them.
+`CMakeLists.txt` in place (target-collision namespacing): Z3 <= 4.15.x gets
+its `opt` component renamed, while newer upstream revisions — which renamed
+that component to `z3_opt` themselves after the 4.15.3 release — are used as
+they come. The patches are idempotent, so `git status` inside those
+submodules simply shows the patched files until you restore them, and a
+layout the workaround does not recognise fails configuration with the
+supported pins instead of risking the collision.
 
 Escape hatches: `-DPENSTOCK_USE_SUBMODULES=OFF` ignores `third_party/`
 entirely, `-DPENSTOCK_SUBMODULE_<LLVM|ALIVE2|Z3>=OFF` ignores one submodule

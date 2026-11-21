@@ -203,6 +203,18 @@ size_t containerDropDepth();
 void nullContainerSource(Expr* src, Type* cty);
 void pushContainerDrop(const std::string& alloca, Type* cty);
 void emitContainerDropsAll();
+// fsht-03:02 (ch. 24 §4): statement-local OWNING temporaries — a
+// constructor result consumed by nothing (a view read, a discarded
+// value) drops at its statement's end; a temporary whose bytes were
+// copied out (into a binding, a callee's aggregate parameter, a vec
+// element) transfers ownership and never drops here.  This closes the
+// "a never-freed String can no longer leak" guarantee for temporaries.
+void registerOwningTemp(const std::string& addr, Type* ty);
+void markTempConsumed(const std::string& addr);
+void flushTempDrops();
+// fsht-03:02 (ch. 24 §5): deep-copy the elements of an already
+// shallow-cloned container (vec_clone over owning element types)
+void emitDeepCloneElems(const std::string& dst, Type* ty);
 
 // profile loading (irgen_pgo.cpp)
 void loadProfile(const std::string& path);

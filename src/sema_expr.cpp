@@ -109,13 +109,77 @@ static bool isBuiltinCall(const std::string& n) {
     "vec_reserve", "vec_truncate", "vec_resize", "vec_clear",
     "vec_free", "vec_len", "vec_capacity", "vec_is_empty",
     "vec_slice",
+    // fsht-02:03 (registry 06.03.01): compile-time assertion — the
+    // argument must const-evaluate (const fn calls included) to true,
+    // else the compile fails (F0219/F0220)
+    "const_assert",
+    // fsht-03:01 (registry 08.01.04, ch. 23 §2–§3): checked/saturating/
+    // wrapping operation variants — overflow policy written, not
+    // assumed.  Identical-operand-type rule enforced in typeBuiltin.
+    "checked_add", "checked_sub", "checked_mul", "checked_div",
+    "checked_rem",
+    "saturating_add", "saturating_sub", "saturating_mul",
+    "wrapping_add", "wrapping_sub", "wrapping_mul",
+    "int_min", "int_max",
+    "checked_cast", "saturating_cast",
+    // fsht-03:01 (registry 05.04.01, ch. 23 §1): numeric text parsing —
+    // the fmt_* counterpart, Result<T, ParseError> out
+    "parse_i64", "parse_u64", "parse_f64",
+    // fsht-03:01 (ch. 23 §5): numeric module minimum content
+    "abs", "gcd", "clamp",
+    // fsht-03:01 (ch. 23 §5): bits module — byte swap + population count
+    "bswap16", "bswap32", "bswap64", "popcount",
+    // fsht-03:01 (ch. 23 §5): time module — monotonic, unspecified epoch
+    "now_ns", "now_ms",
+    // fsht-03:01 (ch. 23 §5): random module — xorshift64* (shifts
+    // 12/25/27, multiplier 2685821657736338717), the same generator the
+    // conformance fuzz/benchmark harnesses use
+    "sm64_next",
+    // fsht-03:01 (ch. 23 §5): alloc module
+    "page_size",
+    // fsht-03:02 (registry 02.06.01 update, ch. 24 §4): the String
+    // migration's new builtins — deep copy and clear
+    "string_clone", "string_clear",
   };
   return b.count(n) > 0;
+}
+
+// fsht-03:01 (registry 08.01.04, ch. 23 §3): set a
+// checked_cast/saturating_cast call's destination type U from a context
+// type — an Option<U> context unwraps its Some payload, a plain numeric
+// context IS U.  Called from the binding/return/argument/assignment
+// sites BEFORE the init expression is typed, so typeBuiltin sees the
+// resolved U.  Unresolved U at typing time is F0201.
+void trySetCastTarget(FnSema* fs, Expr* e, Type* expected) {
+  (void)fs;
+  if (!e || !expected) return;
+  bool isCast = e->k == Expr::CALL &&
+                (e->name == "checked_cast" || e->name == "saturating_cast");
+  if (!isCast || e->castTargetTy) return;
+  Type* u = expected;
+  if (expected->k == Type::ENUM) {
+    const std::string& en = expected->edef->templateName.empty()
+                            ? expected->edef->name
+                            : expected->edef->templateName;
+    if (en == "Option") {
+      for (auto& v : expected->edef->variants)
+        if (v.name == "Some" && !v.fields.empty()) u = v.fields[0].ty;
+    } else {
+      return;   // other enums are not a U context
+    }
+  }
+  if (!u || !u->isNum()) return;
+  e->castTargetTy = u;
 }
 
 static Type* typeFromIdent(const std::string& n) {
   // generic instantiation scope: `malloc(T, n)` inside fn f<T>(...)
   if (Type* tp = tparamTypeInScope(n)) return tp;
+  // fsht-03:02 (ch. 24 §5): a TYPE NAME in expression position carries
+  // its generic instantiation ENCODING (Vec<Vec<i64>> element types) —
+  // resolve through the sema binder
+  if (n.rfind("gen:", 0) == 0 || n.find(':') != std::string::npos)
+    return bindTypeEncoding(currentProgram(), n, SrcLoc(), nullptr);
   if (n == "u8") return Type::simple(Type::U8);
   if (n == "u16") return Type::simple(Type::U16);
   if (n == "u32") return Type::simple(Type::U32);
@@ -309,6 +373,26 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
   }
   if (n == "assert") {
     need(1);
+    return Type::simple(Type::VOID);
+  }
+  // fsht-02:03 (registry 06.03.01): compile-time assertion.  The
+  // argument is interpreted by the const evaluator (const fn calls,
+  // literals, comparisons and arithmetic over both); a failure to
+  // evaluate is F0219, a false result is F0220 — the compile stops
+  // either way, so no runtime code is generated for the call.
+  if (n == "const_assert") {
+    if (!need(1)) return Type::simple(Type::VOID);
+    uint64_t v = 0;
+    if (!evalConstExpr(e->args[0], {}, &v, e->loc)) {
+      diag(Diag::Error, Code::ConstEval,
+           "const_assert argument is not const-evaluable — build it from "
+           "integer literals, arithmetic, comparisons and const fn calls",
+           e->loc);
+    } else if (v == 0) {
+      diag(Diag::Error, Code::ConstAssert,
+           "const_assert failed: the expression evaluated to false at "
+           "compile time", e->loc);
+    }
     return Type::simple(Type::VOID);
   }
   // ---------------- Phase 1c (report §4.1): span construction
@@ -641,6 +725,217 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     if (!elem) return Type::spanOf(Type::simple(Type::U8));
     return Type::spanOf(elem);
   }
+  // -------------- fsht-03:01 (registry 08.01.04, ch. 23 §2–§3) ----------
+  // The checked/saturating/wrapping variant family: identical integer
+  // operand types (precision-explicit, no mixed-width promotion, no
+  // float operands — F0201), a bare INT literal adopts the other
+  // operand's type (chapter 14's literal rule).  checked_div/rem
+  // return None exactly where the plain operators trap.
+  auto intVariantType = [&](const char* family) -> Type* {
+    Type* a = argT(0);
+    Type* b = argT(1);
+    if (a && b && a->isInt() && b->isInt() && a->k != b->k) {
+      // literal adoption (only constant INT literals retype)
+      auto adopt = [&](int i, Type* other) {
+        e->args[i]->ty = other;
+        if (i == 0) a = other; else b = other;
+      };
+      if (e->args[0]->constant && e->args[0]->k == Expr::INT) adopt(0, b);
+      else if (e->args[1]->constant && e->args[1]->k == Expr::INT) adopt(1, a);
+    }
+    if (!a || !b || !a->isInt() || !b->isInt()) {
+      diag(Diag::Error, Code::Type,
+           std::string(family) + " takes two INTEGER operands (floating-point "
+           "overflow is defined IEEE behaviour and needs no variants)",
+           e->loc);
+      return Type::simple(Type::I64);
+    }
+    if (a->k != b->k) {
+      diag(Diag::Error, Code::Type,
+           std::string(family) + " requires the IDENTICAL integer type on "
+           "both operands — the variant family is precision-explicit and "
+           "performs no mixed-width promotion (" + typeToString(a) + " vs " +
+           typeToString(b) + "); cast explicitly or widen both",
+           e->loc);
+      return Type::simple(a->bits() >= b->bits() ? a->k : b->k);
+    }
+    return a;
+  };
+  if (n == "checked_add" || n == "checked_sub" || n == "checked_mul" ||
+      n == "checked_div" || n == "checked_rem") {
+    if (!need(2)) return Type::simple(Type::I64);
+    Type* t = intVariantType(n.c_str());
+    return optOf(t);
+  }
+  if (n == "saturating_add" || n == "saturating_sub" || n == "saturating_mul" ||
+      n == "wrapping_add" || n == "wrapping_sub" || n == "wrapping_mul") {
+    if (!need(2)) return Type::simple(Type::I64);
+    return intVariantType(n.c_str());
+  }
+  if (n == "int_min" || n == "int_max") {
+    // the argument only fixes the instantiation T — its value is unused
+    if (!need(1)) return Type::simple(Type::I64);
+    Type* t = argT(0);
+    if (!t || !t->isInt()) {
+      diag(Diag::Error, Code::Type,
+           n + " takes one INTEGER value (the seed fixes T; the value is "
+           "not used)", e->loc);
+      return Type::simple(Type::I64);
+    }
+    int bits = t->bits();
+    uint64_t v;
+    if (n == "int_min") {
+      // signed min: 1 << (bits-1) in two's complement; unsigned: 0
+      v = t->isSigned() ? ((bits == 64) ? 0x8000000000000000ULL
+                                        : (1ULL << (bits - 1)))
+                        : 0ULL;
+    } else {
+      v = t->isSigned() ? ((bits == 64) ? 0x7FFFFFFFFFFFFFFFULL
+                                        : ((1ULL << (bits - 1)) - 1ULL))
+                        : ((bits == 64) ? 0xFFFFFFFFFFFFFFFFULL
+                                       : ((1ULL << bits) - 1ULL));
+    }
+    // fold: the call node becomes a typed constant literal
+    e->k = Expr::INT;
+    e->ival = v;
+    e->constant = true;
+    e->args.clear();
+    e->argGive.clear();
+    return t;
+  }
+  if (n == "checked_cast" || n == "saturating_cast") {
+    if (!need(1)) return Type::simple(Type::I64);
+    Type* at = argT(0);
+    Type* u = e->castTargetTy;
+    if (!u) {
+      diag(Diag::Error, Code::Type,
+           std::string(n) + " cannot infer the destination type U — it is "
+           "inferred from the binding's type, an Option<U>/U-typed "
+           "context, or a match arm (e.g. `let x: Option<i8> = " + n +
+           "(v);`)", e->loc);
+      return Type::simple(Type::I64);
+    }
+    if (!at || !at->isNum() || !u->isNum()) {
+      diag(Diag::Error, Code::Type,
+           std::string(n) + " converts numeric values (got " +
+           typeToString(at) + " to " + typeToString(u) + ")", e->loc);
+      return u;
+    }
+    // in-scope conversions: int->int and float->int.  int->float and
+    // float->float are exactness-invisible and use `as` (ch. 23 §3)
+    if ((at->isFloat() && u->isFloat()) || (at->isInt() && u->isFloat())) {
+      diag(Diag::Error, Code::Type,
+           std::string(n) + " covers the lossy int->int and float->int "
+           "conversions only — " + typeToString(at) + " to " +
+           typeToString(u) + " uses the plain `as` cast (its documented "
+           "rounding)", e->loc);
+      return u;
+    }
+    return n == "checked_cast" ? optOf(u) : u;
+  }
+  // -------------- fsht-03:01 (registry 05.04.01, ch. 23 §1) -------------
+  // parse_i64/u64/f64: str in, Result<T, ParseError> out
+  if (n == "parse_i64" || n == "parse_u64" || n == "parse_f64") {
+    if (!need(1)) return Type::simple(Type::I64);
+    if (argT(0) && argT(0)->k != Type::STR) {
+      diag(Diag::Error, Code::Args, n + " expects a str value", e->loc);
+    }
+    Type* t = n == "parse_i64" ? Type::simple(Type::I64)
+            : n == "parse_u64" ? Type::simple(Type::USIZE)
+                               : Type::simple(Type::F64);
+    Program* prog = currentProgram();
+    EnumDef* pe = ensurePreludeParseError(prog);
+    ensurePreludeEnumType("Result");
+    EnumDef* res = findEnumDef("Result");
+    return Type::enumOf(instantiateEnum(prog, res, {t, Type::enumOf(pe)},
+                                         e->loc));
+  }
+  // -------------- fsht-03:01 (ch. 23 §5): numeric / bits / time / random /
+  // alloc module minimum content, usable without import like §1–§3
+  if (n == "abs") {
+    if (!need(1)) return Type::simple(Type::I64);
+    Type* t = argT(0);
+    if (!t || !t->isNum())
+      diag(Diag::Error, Code::Args, "abs expects a numeric argument", e->loc);
+    return t ? t : Type::simple(Type::I64);
+  }
+  if (n == "gcd") {
+    if (!need(2)) return Type::simple(Type::I64);
+    Type* t = intVariantType("gcd");
+    return t;
+  }
+  if (n == "clamp") {
+    if (!need(3)) return Type::simple(Type::I64);
+    Type* t = argT(0);
+    for (int i = 0; i < 3; ++i) {
+      Type* ai = argT(i);
+      if (!ai || !ai->isNum()) {
+        diag(Diag::Error, Code::Args, "clamp takes three numeric values",
+             e->loc);
+        return Type::simple(Type::I64);
+      }
+    }
+    return t;
+  }
+  if (n == "bswap16" || n == "bswap32" || n == "bswap64") {
+    if (!need(1)) return Type::simple(Type::I64);
+    int want = n == "bswap16" ? 16 : (n == "bswap32" ? 32 : 64);
+    Type* t = argT(0);
+    if (!t || !t->isInt() || t->bits() != want) {
+      diag(Diag::Error, Code::Args,
+           n + " expects a " + std::to_string(want) + "-bit integer (got " +
+           typeToString(t) + ")", e->loc);
+      return Type::simple(Type::I64);
+    }
+    return t;
+  }
+  if (n == "popcount") {
+    if (!need(1)) return Type::simple(Type::I64);
+    Type* t = argT(0);
+    if (!t || !t->isInt())
+      diag(Diag::Error, Code::Args, "popcount expects an integer", e->loc);
+    return t ? t : Type::simple(Type::I64);
+  }
+  if (n == "now_ns" || n == "now_ms" || n == "page_size") {
+    need(0);
+    return Type::simple(Type::U64);
+  }
+  if (n == "sm64_next") {
+    if (!need(1)) return Type::simple(Type::U64);
+    Type* t = argT(0);
+    if (!t || t->k != Type::PTR || !t->pointee ||
+        t->pointee->k != Type::USIZE) {
+      diag(Diag::Error, Code::Args,
+           "sm64_next expects (&mut state: u64) — take the address with "
+           "&mut", e->loc);
+    }
+    needMutBinding(0);
+    return Type::simple(Type::U64);
+  }
+  // -------------- fsht-03:02 (registry 02.06.01, ch. 24 §4) -------------
+  // the String migration's new builtins
+  if (n == "string_clone") {
+    if (!need(1)) return Type::structOf(ensurePreludeString(currentProgram()));
+    if (argT(0) && !(argT(0)->k == Type::PTR &&
+                     argT(0)->pointee &&
+                     argT(0)->pointee->k == Type::STRUCT &&
+                     argT(0)->pointee->sdef == ensurePreludeString(currentProgram())))
+      diag(Diag::Error, Code::Args,
+           "string_clone expects a *String — take the address with &mut s",
+           e->loc);
+    return Type::structOf(ensurePreludeString(currentProgram()));
+  }
+  if (n == "string_clear") {
+    need(1);
+    if (argT(0) && !(argT(0)->k == Type::PTR &&
+                     argT(0)->pointee &&
+                     argT(0)->pointee->k == Type::STRUCT &&
+                     argT(0)->pointee->sdef == ensurePreludeString(currentProgram())))
+      diag(Diag::Error, Code::Args,
+           "string_clear expects a *String — take the address with &mut s",
+           e->loc);
+    return Type::simple(Type::VOID);
+  }
   // math
   static const std::set<std::string> math1 = {
     "sqrt", "sin", "cos", "tan", "exp", "log", "log2", "log10",
@@ -933,6 +1228,17 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       }
       // Phase 1d: bare enum variant (Red) with no local shadow
       if (resolveVariantGlobally(fs, e)) return e->ty;
+      // fsht-02:03: a const generic parameter in the current
+      // instantiation is a compile-time VALUE — fold the identifier into
+      // an integer literal so IRgen (and every later pass) sees a
+      // constant, never a variable slot
+      if (uint64_t* cv = constParamValueInScope(e->name)) {
+        e->k = Expr::INT;
+        e->ival = *cv;
+        e->constant = true;
+        e->ty = Type::simple(Type::USIZE);
+        return e->ty;
+      }
       // might be a type name in expr position (malloc arg handled elsewhere)
       return bad("unknown identifier: " + e->name);
     }
@@ -991,6 +1297,18 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         e->ty = typeIntrinsic(fs, e);
         if (e->ty) return e->ty;
         return bad("unknown intrinsic: " + e->name);
+      }
+      // fsht-03:01 (ch. 23 §5): a module-qualified spelling of a
+      // compiler-known builtin (`string::parse_i64`, `numeric::checked_add`)
+      // resolves through the builtin surface once the qualifier is
+      // stripped — the §1–§3 builtins are usable without any import and
+      // are re-exported by the string/numeric modules.
+      if (!e->qualModule.empty()) {
+        std::string stripped = e->name.substr(e->qualModule.size() + 2);
+        if (isBuiltinCall(stripped)) {
+          e->name = stripped;
+          e->qualModule.clear();
+        }
       }
       if (isBuiltinCall(e->name)) {
         // malloc(T, n) / soa_new(Struct, n) / stack_alloc(T, n) / vec_new(T, cap):
@@ -1053,8 +1371,48 @@ Type* typeExpr(FnSema* fs, Expr* e) {
           e->ty = fpty->pointee;
           return e->ty;
         }
-        for (auto* a : e->args) typeExpr(fs, a);
-        return bad("unknown function: " + e->name);
+        // ---- fsht-02:02 (registry 06.02.01): trait-method calls --------
+        // `Numeric::add(a, b)` / `Rect::area()` / `T::zero()` in concrete
+        // (or instantiated-generic) code.  A `Self::m` call inside an impl
+        // was already re-targeted to `Trait::m` by the parser, so the
+        // enclosing impl fn's target (implSelfTy) makes zero-argument
+        // self-calls unambiguous.
+        if (e->name.find("::") != std::string::npos) {
+          size_t dc = e->name.find("::");
+          std::string prefix = e->name.substr(0, dc);
+          std::string method = e->name.substr(dc + 2);
+          bool maybeTrait = findTraitDef(prefix) != nullptr ||
+                            findStructDef(prefix) != nullptr ||
+                            findEnumDef(prefix) != nullptr;
+          // a TPARAM prefix (T::zero() inside a generic instance body) also
+          // names a concrete type by now — resolve through the same path
+          // using the typed arguments
+          if (maybeTrait || tparamTypeInScope(prefix) ||
+              constParamValueInScope(prefix)) {
+            for (auto* a : e->args) typeExpr(fs, a);
+            std::vector<Type*> argTys;
+            for (auto* a : e->args) argTys.push_back(a->ty);
+            Type* preferSelf = nullptr;
+            if (fs && fs->fn && fs->fn->isTraitImpl &&
+                fs->fn->traitName == prefix)
+              preferSelf = fs->fn->implSelfTy;
+            if (!preferSelf && tparamTypeInScope(prefix))
+              preferSelf = tparamTypeInScope(prefix);
+            FnDecl* impl = resolveTraitMethodCall(prefix, method, argTys,
+                                                   preferSelf, e->loc);
+            if (impl) {
+              // rewrite to the direct mangled call — static dispatch by
+              // construction (irgen sees an ordinary user call)
+              e->name = impl->name;
+              e->qualModule.clear();
+              f = impl;
+            }
+          }
+        }
+        if (!f) {
+          for (auto* a : e->args) typeExpr(fs, a);
+          return bad("unknown function: " + e->name);
+        }
       }
       // Phase 2a: generic instantiation from the argument types
       if (f->isGeneric) {
@@ -1081,8 +1439,46 @@ Type* typeExpr(FnSema* fs, Expr* e) {
         // Phase 2a: instantiated struct params adopt template-named literals
         if (pt && pt->k == Type::STRUCT)
           tryAdoptStructLiteral(e->args[i], pt);
+        // fsht-03:01: checked_cast/saturating_cast infer U from the
+        // parameter's type (Option<U>/U context)
+        trySetCastTarget(fs, e->args[i], pt);
         Type* at = typeExpr(fs, e->args[i]);
-        if (at && pt && !typesCompatible(pt, at)) {
+        // fsht-03:02 (ch. 24 §1): `borrowed mut` parameters — the call
+        // site passes a mutable borrow (&mut place / &place legacy) or,
+        // for POINTER parameters, a pointer binding that HOLDS a borrow
+        // (the chapter's own fill(r, 4) example).  An aggregate passed
+        // by value is the passing-mode mismatch F0303 (it would move).
+        if (f->params[i].borrowedMut) {
+          Expr* a = e->args[i];
+          bool isBorrowForm = a && a->k == Expr::UN && a->op == "&";
+          bool pointerValue = at && at->k == Type::PTR;
+          bool aggregateForm = isBorrowForm && at && at->k == Type::PTR &&
+                               at->pointee && pt && pt->k == Type::STRUCT &&
+                               at->pointee->k == Type::STRUCT &&
+                               at->pointee->sdef == pt->sdef;
+          if (!isBorrowForm && !pointerValue) {
+            diag(Diag::Error, Code::OwnCall,
+                 "argument " + std::to_string(i + 1) + " of " + e->name +
+                 " (" + f->params[i].name + ") is declared `borrowed mut` — "
+                 "pass a mutable borrow (&mut place) or a borrow binding, "
+                 "not a by-value aggregate",
+                 e->loc);
+          } else if (isBorrowForm && a->rhs && a->rhs->k == Expr::IDENT &&
+                     a->rhs->sym && !a->rhs->sym->mut) {
+            diag(Diag::Error, Code::Args,
+                 "'" + a->rhs->name + "' must be a `let mut` binding to "
+                 "borrow it mutably", e->loc);
+          }
+          (void)aggregateForm;
+        }
+        // fsht-03:02: &mut place of an aggregate borrows it — same ABI
+        // as the by-address aggregate parameter (ch. 24 §1)
+        bool borrowAggregateOk = f->params[i].borrowedMut &&
+                                 at && at->k == Type::PTR && pt &&
+                                 pt->k == Type::STRUCT &&
+                                 at->pointee && at->pointee->k == Type::STRUCT &&
+                                 at->pointee->sdef == pt->sdef;
+        if (at && pt && !typesCompatible(pt, at) && !borrowAggregateOk) {
           if (!(e->args[i]->constant && pt->isNum() && at->isNum()))
             diag(Diag::Error, Code::Type, "arg " + std::to_string(i + 1) + " of " +
                  e->name + ": expected " + typeToString(pt) + ", got " +

@@ -1,0 +1,8 @@
+// fsht-03:02 F0311: returning a borrowed view of local storage — the
+// owner drops at fn exit and the view dangles (ch. 24 §3).
+fn leak_view() -> Span<i64> {
+    let mut v: Vec<i64> = vec_new(i64);
+    vec_push(&mut v, 1);
+    return vec_slice(v, 0, 1);
+}
+fn main() { }

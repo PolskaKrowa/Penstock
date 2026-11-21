@@ -1,8 +1,6 @@
 /-
   Penstock / Freshet — Lean 4 semantic kernel and proof harness.
 
-  "I FUCKING LOVE LEEANNNN"
-
   Optimisation-audit integration (report §5, Phase B).  This file is the
   "Freshet semantic kernel" the audit recommends as the first Lean layer:
 

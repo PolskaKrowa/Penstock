@@ -1,0 +1,7 @@
+// fsht-03:01 F0201: the variant family is precision-explicit — no
+// mixed-width promotion (ch. 23 §2).
+fn main() {
+    let a: i32 = 5;
+    let b: i64 = 9;
+    let c: Option<i64> = checked_add(a, b);
+}

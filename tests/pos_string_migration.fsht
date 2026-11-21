@@ -1,0 +1,26 @@
+// fsht-03:02 (registry 02.06.01 update, ch. 24 §4): the String
+// migration — ownership-tracked Strings (auto-drop at scope exit,
+// moves, pre-emptive string_free, string_clone / string_clear).
+fn make() -> String {
+    return string_from("hello");
+}
+fn main() {
+    // auto-drop: no string_free anywhere; drops at scope exit (both
+    // exits) and never leaks
+    let s1: String = string_from("hello ");
+    let s2: String = string_from("world");
+    string_append(&mut s1, str_of(&s2));
+    print(str_of(&s1)); println();
+    // clone: an independent deep copy
+    let c: String = string_clone(&s1);
+    string_clear(&mut c);
+    print_u64(c.len); println();
+    print(str_of(&s1)); println();
+    // moves: by-value returns transfer ownership (source invalid)
+    let m: String = make();
+    print(str_of(&m)); println();
+    // manual release still works (pre-emptive drop)
+    let f: String = string_from("bye");
+    string_free(&mut f);
+    print("freed"); println();
+}

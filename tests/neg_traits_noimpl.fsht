@@ -1,0 +1,15 @@
+// fsht-02:02: trait bound without an impl for the inferred type — F0218.
+trait Numeric {
+    fn add(a: Self, b: Self) -> Self;
+}
+impl Numeric for i64 {
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+}
+fn twice<T: Numeric>(x: T) -> T {
+    return Numeric::add(x, x);
+}
+fn main() {
+    // bool has no Numeric impl — F0218 at the instantiation
+    let r: bool = twice(true);
+    print_i64(r as i64); println();
+}

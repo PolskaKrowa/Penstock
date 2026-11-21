@@ -21,6 +21,15 @@ static const char* KEYWORDS[] = {
   // import declarations, pub visibility.  `fn` doubles as the function-
   // pointer type introducer in type position (Phase 3b, report §6.3).
   "module","import","pub",
+  // fsht-02:02 (registry 06.02.01): user-defined traits, static dispatch.
+  // `Self` is the implementing-type placeholder inside trait/impl blocks;
+  // `trait`/`impl` introduce their declarations at toplevel.
+  "trait","impl","Self",
+  // fsht-02:03 (registry 06.03.01): const generics + const fn.
+  // `const` introduces `const fn` declarations and `const N: usize`
+  // generic parameters; array lengths and const arguments accept const
+  // expressions.
+  "const",
 };
 
 static bool isIdentStart(char c) { return isalpha((unsigned char)c) || c == '_'; }

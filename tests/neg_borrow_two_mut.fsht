@@ -1,0 +1,7 @@
+// fsht-03:02 F0310: two live mutable borrows of the same place in one
+// call (ch. 24 §2).
+fn f(borrowed mut a: *i64, borrowed mut b: *i64) { }
+fn main() {
+    let mut x: i64 = 5;
+    f(&mut x, &mut x);
+}

@@ -1,0 +1,18 @@
+// collections — vectors, queues, maps, sets (fsht-03:01, ch. 23 §5):
+// the chapter 20 vec_* surface; queues/maps/sets are registry-tracked
+// deferrals (the skeleton ships with vectors only).  The vec builtins
+// are compiler-known; generic thin wrappers anchor the module's
+// re-export.
+module collections;
+
+pub fn len<T>(v: Vec<T>) -> u64 {
+    return vec_len(v);
+}
+
+pub fn is_empty<T>(v: Vec<T>) -> bool {
+    return vec_is_empty(v);
+}
+
+pub fn capacity<T>(v: Vec<T>) -> u64 {
+    return vec_capacity(v);
+}

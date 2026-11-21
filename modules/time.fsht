@@ -1,0 +1,13 @@
+// time — duration, timestamps and timers (fsht-03:01, ch. 23 §5):
+// the monotonic now_ns/now_ms (unspecified epoch), compiler-known
+// builtins re-exported here.  Calendar arithmetic is a registry-tracked
+// deferral.
+module time;
+
+pub fn now_ns() -> u64 {
+    return now_ns();
+}
+
+pub fn now_ms() -> u64 {
+    return now_ms();
+}

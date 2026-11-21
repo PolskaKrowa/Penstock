@@ -141,8 +141,13 @@ static const char* USAGE =
     "  --llvm-profdata=<e> override the llvm-profdata executable path\n"
     "  --emit-final-ir[=<f>] write the final OPTIMISED IR (<out>.final.ll)\n"
     "                    the backend produced, for inspection.  §13.1\n"
-    "  --target=<triple>  cross-target the whole pipeline (triple + data\n"
-    "                    layout are queried from the backend).  §12\n"
+    "  --target=<triple>  cross-target the WHOLE pipeline — the triple\n"
+    "                      and data layout AND the runtime (the runtime\n"
+    "                      .ll is compiled with the requested triple; its\n"
+    "                      cache key carries it — fsht-03:03).  Declared\n"
+    "                      matrix: x86_64 / aarch64 linux, x86_64 windows,\n"
+    "                      wasm32-wasi, wasm32-unknown-unknown; others are\n"
+    "                      rejected with F0009.  §12 + fsht-03:03\n"
     "  --portable          portable baseline build: generic x86-64, no\n"
     "                    -march=native.  §12\n"
     "\n"
@@ -340,6 +345,27 @@ static void appendTargetArgs(std::vector<std::string>& args) {
   }
 }
 
+// fsht-03:03 (registry 10.03.02, ch. 25 §1): link lines are
+// PLATFORM-CONDITIONAL — -lpthread is requested by the LINUX platform
+// layer only; -lm by the libc platforms.  wasm targets link with no
+// thread/math library (the linker's own defaults), the freestanding
+// fallback likewise.  No unconditional POSIX assumption exists.
+static bool targetIsLinux() {
+  const std::string& t = g_targetTriple;
+  return t.empty() ||
+         t.find("linux") != std::string::npos ||
+         t.find("gnu") != std::string::npos;
+}
+static bool targetIsWasm() {
+  return g_targetTriple.rfind("wasm32", 0) == 0 ||
+         g_targetTriple.rfind("wasm64", 0) == 0;
+}
+static void appendPlatformLinkLibs(std::vector<std::string>& args) {
+  if (targetIsWasm()) return;            // no -lm/-lpthread on wasm
+  args.push_back("-lm");
+  if (targetIsLinux()) args.push_back("-lpthread");   // linux layer only
+}
+
 static void appendVeclibArgs(std::vector<std::string>& args) {
   if (g_opts.veclib == "libmvec") {
     args.push_back("-fveclib=libmvec");
@@ -378,6 +404,11 @@ static bool writeFile(const std::string& p, const std::string& s) {
   return true;
 }
 
+static std::string dirNameOf(const std::string& p) {
+  size_t s = p.find_last_of('/');
+  return (s == std::string::npos) ? "." : p.substr(0, s);
+}
+
 static std::string exeDir() {
   static std::string d;
   if (d.empty()) {
@@ -408,15 +439,30 @@ static std::string runtimeLl(const std::string& clangBin,
   // key was LLVM-major only, which baked -O0's optnone/noinline into
   // every cached runtime and blocked the final -O3 pipeline from
   // optimising or inlining the runtime's hot paths.
+  // fsht-03:03 (registry 10.03.02, ch. 25 §1): the runtime cache key
+  // includes the LLVM major, the optimisation level AND the TARGET
+  // TRIPLE — the runtime object code linked into a program MUST have
+  // been compiled for the program's exact target, so the requested
+  // triple reaches the runtime compile (-target) and a triple switch
+  // can never reuse a cache built for another target.
+  std::string tripleKey = g_targetTriple;
+  for (auto& c : tripleKey)
+    if (c == '/' || c == '-' || c == ' ') c = '_';
   std::string cache = cacheDir + "/frt_rt" +
       (llvmMajor.empty() ? "" : "_" + llvmMajor) +
-      "_o" + std::to_string(g_opts.runtimeOpt) + ".ll";
+      "_o" + std::to_string(g_opts.runtimeOpt) +
+      (tripleKey.empty() ? "" : "_t" + tripleKey) + ".ll";
   struct stat cst;
   if (stat(cache.c_str(), &cst) == 0 && cst.st_mtime >= srcMtime)
     return readFile(cache);
-  const std::vector<std::string> cmd = {
+  std::vector<std::string> cmd = {
       clangBin, "-S", "-emit-llvm", "-O" + std::to_string(g_opts.runtimeOpt),
-      "-g0", "-x", "c", rtSrc, "-o", cache};
+      "-g0", "-x", "c", "-I" + dirNameOf(rtSrc), rtSrc, "-o", cache};
+  // the platform layer selection needs the triple's predefined macros
+  if (!g_targetTriple.empty()) {
+    cmd.push_back("-target");
+    cmd.push_back(g_targetTriple);
+  }
   if (runCmd(cmd, ChildStderr::Discard) != 0 || readFile(cache).empty()) {
     fprintf(stderr, "penstock: cannot compile runtime library\n");
     return "";
@@ -1172,6 +1218,48 @@ int main(int argc, char** argv) {
   }
   g_backend = "LLVM " + (llvmVer.empty() ? "<unknown>" : llvmVer) + " (" + llvmRoot + ")";
 
+  // ---------------------------------------- 0.4 fsht-03:03 target matrix
+  // registry 10.03.02 (ch. 25 §2/§6): the ratified five-target matrix.
+  // Which targets the implementation DECLARES is implementer choice —
+  // Penstock declares exactly these — and it MUST reject --target
+  // values it cannot build with a driver diagnostic naming the
+  // unsupported triple (F0009).  The tested-before-declared gate lives
+  // in the standards repository's target-matrix workflow; a target
+  // whose row is not green is not supported whatever the compiler
+  // accepts.
+  if (!g_opts.targetTriple.empty()) {
+    const std::string& t = g_opts.targetTriple;
+    auto starts = [&](const char* p) { return t.rfind(p, 0) == 0; };
+    bool linuxX64 = (starts("x86_64") || starts("amd64")) &&
+                    (t.find("linux") != std::string::npos ||
+                     t.find("gnu") != std::string::npos);
+    bool linuxArm = starts("aarch64") &&
+                    (t.find("linux") != std::string::npos ||
+                     t.find("gnu") != std::string::npos);
+    bool winX64 = (starts("x86_64") || starts("amd64") || starts("x86-64")) &&
+                  (t.find("windows") != std::string::npos ||
+                   t.find("win32") != std::string::npos ||
+                   t.find("mingw") != std::string::npos ||
+                   t.find("msvc") != std::string::npos);
+    bool wasi = t == "wasm32-wasi" ||
+               (starts("wasm32-") &&
+                t.find("wasi") != std::string::npos);
+    bool wasmStandalone = starts("wasm32-unknown-unknown") ||
+                           t == "wasm32";
+    bool ok = linuxX64 || linuxArm || winX64 || wasi || wasmStandalone;
+    if (!ok) {
+      diag(Diag::Error, Code::UnsupportedTarget,
+           "--target " + t + " is not a target this build declares — the "
+           "ratified matrix (ch. 25 §2) is: x86_64/aarch64 linux, "
+           "x86_64 windows, wasm32-wasi, wasm32-unknown-unknown.  A "
+           "target whose row is not green is not supported (see the "
+           "standards repository's target-matrix workflow)",
+           "", 0, 0);
+      printDiags();
+      return 1;
+    }
+  }
+
   // --------------------------------------------- 0.5 §12 target config
   // Resolve the canonical triple + data layout by compiling an empty C
   // file with the backend clang and scraping the module header — the
@@ -1321,6 +1409,9 @@ int main(int argc, char** argv) {
   runStrictChecks(prog);
   runParforChecks(prog);
   runOwnershipAnalysis(prog);
+  // fsht-03:02: the borrow discipline (F0310/F0311) — after the ownership
+  // state machine, over the same typed AST
+  runBorrowAnalysis(prog);
 
   // ------------------------------------ 4.5 R4 loop optimisation passes
   // Post-sema, post-checks, pre-irgen AST transforms.  Enabled at -O2+;
@@ -1583,11 +1674,12 @@ int main(int argc, char** argv) {
     if (rc) { fprintf(stderr, "penstock: clang failed on object emit\n"); return 1; }
     if (libTarget) {
       if (g_opts.projectTarget == "static-lib") unlink(libOut.c_str());
-      const std::vector<std::string> lcmd =
+      std::vector<std::string> lcmd =
           g_opts.projectTarget == "static-lib"
               ? std::vector<std::string>{"ar", "rcs", libOut, out}
-              : std::vector<std::string>{clang, "-shared", "-o", libOut,
-                                         out, "-lm", "-lpthread"};
+              : std::vector<std::string>{clang, "-shared", "-o", libOut, out};
+      if (g_opts.projectTarget != "static-lib")
+        appendPlatformLinkLibs(lcmd);   // fsht-03:03
       if (runCmd(lcmd, ChildStderr::MergeToStdout) == 0) {
         fprintf(stderr, "penstock: wrote %s\n", libOut.c_str());
         return 0;
@@ -1619,8 +1711,7 @@ int main(int argc, char** argv) {
       if (lib.empty()) continue;
       cmd.push_back(lib[0] == '-' ? lib : "-l" + lib);
     }
-    cmd.push_back("-lm");
-    cmd.push_back("-lpthread");
+    appendPlatformLinkLibs(cmd);   // fsht-03:03: platform-conditional
     appendOptRemarkArgs(cmd, out);
     const int rc = runCmd(cmd, ChildStderr::MergeToStdout);
     if (rc) {
@@ -1697,7 +1788,8 @@ int main(int argc, char** argv) {
             cmd2.push_back("-fveclib=libmvec");
             cmd2.push_back("-fno-math-errno");
           }
-          cmd2.insert(cmd2.end(), {final2, "-o", out, "-lm", "-lpthread"});
+          cmd2.insert(cmd2.end(), {final2, "-o", out});
+          appendPlatformLinkLibs(cmd2);   // fsht-03:03
           if (runCmd(cmd2, ChildStderr::MergeToStdout) == 0) {
             fprintf(stderr, "evo: tuning baked into %s (reproduce with: "
                             "FRT_THREADS=%d FRT_AFFINITY=%d FRT_CHUNK=%ld "

@@ -1,0 +1,8 @@
+// fsht-02:03: non-const expression in a const-argument slot — F0219.
+struct Vector<T, const N: usize> { data: [T; N] }
+fn input() -> usize { return 4; }
+fn main() {
+    // runtime function in a const position
+    let v: Vector<f64, input()> = Vector { data: [1.0] };
+    print_i64(sizeof(Vector<f64, input()>) as i64); println();
+}

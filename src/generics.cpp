@@ -151,48 +151,133 @@ StructDef* ensurePreludeVec(Program* prog) {
   return sd;
 }
 
-// instantiate Vec<elem> with the owned-element gate (fsht-02:01 first
-// cut: elements must be non-owning — Vec<String>/Vec<Vec<T>> and
-// containers inside structs/enums/arrays are deferred with 02.09.02)
+// instantiate Vec<elem> (fsht-03:02, registry 02.09.02 lifting, ch. 24
+// §5): owning element types (Vec<String>, Vec<Vec<T>>) are ACCEPTED —
+// drops walk the shape innermost-first, moves transfer whole-shape,
+// vec_clone deep-copies element-wise (irgen_stmt.cpp shape machinery).
+// The template-vs-concrete and void gates stay.
 StructDef* instantiateVecType(Program* prog, Type* elem, SrcLoc loc) {
   if (!elem || elem->k == Type::VOID) {
     diag(Diag::Error, Code::Type,
          "Vec<T> needs a concrete element type", loc);
     return ensurePreludeVec(prog);
   }
-  // a generic template is not a usable element (Vec<Vec<...>> shapes are
-  // rejected below anyway; this guards a bare template slipping through
-  // an un-instantiated name)
+  // a generic template is not a usable element (a bare template name
+  // slipping through an un-instantiated annotation)
   if (elem->k == Type::STRUCT && elem->sdef && elem->sdef->isGeneric) {
     diag(Diag::Error, Code::Type,
          "Vec<T> element '" + elem->sdef->name +
          "' is a generic template, not a concrete type", loc);
     return ensurePreludeVec(prog);
   }
-  if (!isNonOwningType(elem)) {
-    diag(Diag::Error, Code::Type,
-         "Vec<" + typeToString(elem) + ">: owning element types are not "
-         "supported yet (fsht-02:01 first cut — registry 02.09.02 tracks "
-         "nested ownership); use non-owning elements",
-         loc);
-    return ensurePreludeVec(prog);
-  }
   ensurePreludeVec(prog);
   return instantiateStruct(prog, findStructDef("Vec"), {elem}, loc);
+}
+
+// ---------------- fsht-03:01 (registry 05.04.01/05.05.01) prelude types
+// chapter 23 §1: the parse Result's error payload
+//     enum ParseError { Invalid, OutOfRange }
+// chapter 23 §4: the streaming-I/O error taxonomy and the handle structs
+//     enum IoError { NotFound, Permission, Eof, Busy, Other(i64) }
+//     Reader { handle: i64 }    Writer { handle: i64 }
+// All non-generic prelude decls (module "" — always visible, like the
+// String struct and the Option/Result templates).
+static void pushEnum(Program* prog, EnumDef* ed) {
+  registerEnum(ed);
+  computeEnumLayout(ed);
+  if (prog) {
+    ed->id = (int)prog->enums.size();
+    prog->enums.push_back(ed);
+  }
+}
+
+EnumDef* ensurePreludeParseError(Program* prog) {
+  if (EnumDef* ed = findEnumDef("ParseError")) return ed;
+  EnumDef* ed = new EnumDef();
+  ed->name = "ParseError";
+  ed->templateName = "ParseError";
+  auto addVar = [&](const std::string& vn) {
+    EnumVariant v;
+    v.name = vn;
+    v.idx = (int)ed->variants.size();
+    ed->variants.push_back(v);
+  };
+  addVar("Invalid");
+  addVar("OutOfRange");
+  pushEnum(prog, ed);
+  return ed;
+}
+
+EnumDef* ensurePreludeIoError(Program* prog) {
+  if (EnumDef* ed = findEnumDef("IoError")) return ed;
+  EnumDef* ed = new EnumDef();
+  ed->name = "IoError";
+  ed->templateName = "IoError";
+  auto addVar = [&](const std::string& vn, Type* payload) {
+    EnumVariant v;
+    v.name = vn;
+    if (payload) {
+      Param pm;
+      pm.name = "__0";
+      pm.ty = payload;
+      pm.tyName = "i64";
+      v.fields.push_back(pm);
+    }
+    v.idx = (int)ed->variants.size();
+    ed->variants.push_back(v);
+  };
+  addVar("NotFound", nullptr);
+  addVar("Permission", nullptr);
+  addVar("Eof", nullptr);
+  addVar("Busy", nullptr);
+  addVar("Other", Type::simple(Type::I64));
+  pushEnum(prog, ed);
+  return ed;
+}
+
+static StructDef* makeHandleStruct(Program* prog, const std::string& name) {
+  StructDef* sd = new StructDef();
+  sd->name = name;
+  Field f;
+  f.name = "handle";
+  f.ty = Type::simple(Type::I64);
+  f.idx = 0;
+  sd->fields.push_back(f);
+  registerStruct(sd);
+  computeStructLayout(sd);
+  if (prog) {
+    sd->id = (int)prog->structs.size();
+    prog->structs.push_back(sd);
+  }
+  return sd;
+}
+
+StructDef* ensurePreludeReader(Program* prog) {
+  if (StructDef* sd = findStructDef("Reader")) return sd;
+  return makeHandleStruct(prog, "Reader");
+}
+
+StructDef* ensurePreludeWriter(Program* prog) {
+  if (StructDef* sd = findStructDef("Writer")) return sd;
+  return makeHandleStruct(prog, "Writer");
 }
 
 // ---------------------------------------------------------------- binder
 // Resolve the parser's textual type encoding (see parser.cpp) to a Type*.
 // `tmap` substitutes generic template parameters inside a template body
-// ("T" -> concrete). `prog` receives instantiated concrete types so later
-// phases (layout, irgen) see them.
+// ("T" -> concrete). `cenv` supplies const-generic parameter values
+// (fsht-02:03) for array-length and const-argument evaluation.  `prog`
+// receives instantiated concrete types so later phases (layout, irgen)
+// see them.
 static Type* bindEncType(Program* prog, const std::string& enc, SrcLoc loc,
-                         const std::map<std::string, Type*>* tmap);
+                         const std::map<std::string, Type*>* tmap,
+                         const std::map<std::string, uint64_t>* cenv = nullptr);
 
 // parse one encoding starting at `pos`; returns the resolved type and
 // advances `pos` past what it consumed
 static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
-                        SrcLoc loc, const std::map<std::string, Type*>* tmap) {
+                        SrcLoc loc, const std::map<std::string, Type*>* tmap,
+                        const std::map<std::string, uint64_t>* cenv = nullptr) {
   auto rest = [&](size_t from) { return enc.substr(from); };
   (void)rest;
   // Phase 3a helper: visibility gate for `mod::Name` qualified access
@@ -230,7 +315,19 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       if (e.compare(p, 5, "span:") == 0) return (*this)(e, p + 5);
       if (e.compare(p, 4, "arr:") == 0) {
         size_t i = p + 4;
-        while (i < e.size() && isdigit((unsigned char)e[i])) ++i;
+        if (i < e.size() && isdigit((unsigned char)e[i])) {
+          while (i < e.size() && isdigit((unsigned char)e[i])) ++i;
+        } else {
+          // fsht-02:03: const-expression length — scan to the ':' that
+          // separates it from the element encoding (const exprs never
+          // contain ':'; '(' ')' and ',' group subexpressions)
+          size_t depth = 0;
+          while (i < e.size() && (depth > 0 || e[i] != ':')) {
+            if (e[i] == '(') ++depth;
+            else if (e[i] == ')') --depth;
+            ++i;
+          }
+        }
         if (i < e.size() && e[i] == ':') return (*this)(e, i + 1);
         return i;
       }
@@ -272,7 +369,7 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       if (e < enc.size() && enc[e] == ';') {
         std::string penc = enc.substr(i, e - i);
         size_t sub = 0;
-        params.push_back(bindEncOne(prog, penc, sub, loc, tmap));
+        params.push_back(bindEncOne(prog, penc, sub, loc, tmap, cenv));
         i = e + 1;
         continue;
       }
@@ -280,12 +377,12 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
         if (e > i) {                      // last parameter before the ret
           std::string penc = enc.substr(i, e - i);
           size_t sub = 0;
-          params.push_back(bindEncOne(prog, penc, sub, loc, tmap));
+          params.push_back(bindEncOne(prog, penc, sub, loc, tmap, cenv));
         }
         std::string renc = enc.substr(e + 1);
         size_t sub = 0;
         Type* rt = renc.empty() ? Type::simple(Type::VOID)
-                                : bindEncOne(prog, renc, sub, loc, tmap);
+                                : bindEncOne(prog, renc, sub, loc, tmap, cenv);
         pos = enc.size();
         return Type::fnptrOf(params, rt);
       }
@@ -329,7 +426,7 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
   if (enc.compare(pos, 2, "*:") == 0) {
     pos += 2;
     size_t sub = pos;
-    Type* inner = bindEncOne(prog, enc, sub, loc, tmap);
+    Type* inner = bindEncOne(prog, enc, sub, loc, tmap, cenv);
     pos = sub;
     return Type::ptr(inner);
   }
@@ -337,17 +434,28 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
     size_t nStart = pos + 4;
     size_t colon = enc.find(':', nStart);
     if (colon == std::string::npos) return Type::simple(Type::VOID);
-    uint64_t n = strtoull(enc.substr(nStart, colon - nStart).c_str(), nullptr, 10);
+    uint64_t n = 0;
+    std::string lenEnc = enc.substr(nStart, colon - nStart);
+    bool lenIsDigits = !lenEnc.empty() &&
+      lenEnc.find_first_not_of("0123456789") == std::string::npos;
+    if (lenIsDigits) {
+      n = strtoull(lenEnc.c_str(), nullptr, 10);
+    } else {
+      // fsht-02:03: const-expression length — evaluate under the active
+      // const-parameter environment (integer literals need none)
+      if (!evalConstEnc(lenEnc, cenv, loc, &n))
+        return Type::simple(Type::VOID);
+    }
     pos = colon + 1;
     size_t sub = pos;
-    Type* elem = bindEncOne(prog, enc, sub, loc, tmap);
+    Type* elem = bindEncOne(prog, enc, sub, loc, tmap, cenv);
     pos = sub;
     return Type::arrayOf(elem, n);
   }
   if (enc.compare(pos, 5, "span:") == 0) {
     pos += 5;
     size_t sub = pos;
-    Type* elem = bindEncOne(prog, enc, sub, loc, tmap);
+    Type* elem = bindEncOne(prog, enc, sub, loc, tmap, cenv);
     pos = sub;
     return Type::spanOf(elem);
   }
@@ -378,16 +486,11 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
     // the placeholder Type was built by the parser, but the encoding
     // alone cannot recover it, so it surfaces as an unresolved argument
     // (nullptr) below.
-    std::vector<Type*> args;
-    for (auto& ae : argEncs) {
-      if (ae == "~") { args.push_back(nullptr); continue; }
-      size_t sub = 0;
-      args.push_back(bindEncOne(prog, ae, sub, loc, tmap));
-      if (sub != ae.size()) {
-        // trailing garbage after the argument encoding — ignored
-        // (bindEncOne reports what it consumed)
-      }
-    }
+    //
+    // fsht-02:03: const-parameter slots carry const-expression encodings
+    // (digits, names, "(A * B)", "fn(args)"); which slots are const is
+    // known only from the template (tparamIsConst), so arguments are
+    // bound per-slot AFTER the template is identified below.
     pos = enc.size();
     // Phase 3a: module-qualified template name? (gen:mod::Item(...))
     std::string qualMod;
@@ -422,16 +525,68 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
         }
       }
     }
+    // helper: bind the collected argument encodings for template `t`
+    // whose parameter kinds are known.  Type slots bind through the
+    // tmap (recursively); const slots evaluate through the cenv.
+    auto bindArgs = [&](const std::vector<std::string>& tparams,
+                        const std::vector<bool>& isConst,
+                        const std::string& kind) ->
+        std::pair<std::vector<Type*>, std::vector<uint64_t>> {
+      std::vector<Type*> targs;
+      std::vector<uint64_t> cargs;
+      for (size_t ai = 0; ai < argEncs.size(); ++ai) {
+        bool constSlot = ai < isConst.size() ? isConst[ai] : false;
+        const std::string& ae = argEncs[ai];
+        if (ae == "~" && !constSlot) { targs.push_back(nullptr); continue; }
+        // a slot is const only when the template says so; a bare name in
+        // a const slot is a const-parameter reference, in a type slot a
+        // type name (the parser cannot distinguish — the template can)
+        if (constSlot) {
+          uint64_t v = 0;
+          if (!evalConstEnc(ae, cenv, loc, &v)) {
+            diag(Diag::Error, Code::Generic,
+                 "argument " + std::to_string(ai + 1) + " of " + name +
+                 " is a const parameter slot and must be a const "
+                 "expression (integer, const parameter or const fn)", loc);
+            return {{}, {}};
+          }
+          cargs.push_back(v);
+          continue;
+        }
+        // type slot: digits-only encodings are also valid (literals in
+        // type position are only meaningful for const slots; reject)
+        bool digitsOnly = !ae.empty() &&
+          ae.find_first_not_of("0123456789") == std::string::npos;
+        if (digitsOnly) {
+          diag(Diag::Error, Code::Generic,
+               "argument " + std::to_string(ai + 1) + " of " + name +
+               " is a literal but parameter " +
+               (ai < tparams.size() ? tparams[ai] : "?") +
+               " is a type parameter — pass a type", loc);
+          targs.push_back(nullptr);
+          continue;
+        }
+        size_t sub = 0;
+        targs.push_back(bindEncOne(prog, ae, sub, loc, tmap, cenv));
+        if (sub != ae.size()) {
+          // trailing garbage after the argument encoding — ignored
+          // (bindEncOne reports what it consumed)
+        }
+      }
+      (void)kind;
+      return {targs, cargs};
+    };
     if (tmpl && tmpl->isGeneric) {
-      if (args.size() != tmpl->tparams.size()) {
+      if (argEncs.size() != tmpl->tparams.size()) {
         diag(Diag::Error, Code::Generic,
              "generic struct " + name + " expects " +
-             std::to_string(tmpl->tparams.size()) + " type arguments, got " +
-             std::to_string(args.size()),
+             std::to_string(tmpl->tparams.size()) + " arguments, got " +
+             std::to_string(argEncs.size()),
              loc);
         return Type::simple(Type::VOID);
       }
-      for (Type* a : args)
+      auto [targs, cargs] = bindArgs(tmpl->tparams, tmpl->tparamIsConst, "struct");
+      for (Type* a : targs)
         if (!a) {
           diag(Diag::Error, Code::Generic,
                "unresolved type argument in " + name + "<...>",
@@ -440,9 +595,9 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
         }
       // fsht-02:01: Vec instantiations go through the element gate
       // (owning elements rejected for the first cut).
-      if (name == "Vec" && args.size() == 1)
-        return Type::structOf(instantiateVecType(prog, args[0], loc));
-      return Type::structOf(instantiateStruct(prog, tmpl, args, loc));
+      if (name == "Vec" && targs.size() == 1)
+        return Type::structOf(instantiateVecType(prog, targs[0], loc));
+      return Type::structOf(instantiateStruct(prog, tmpl, targs, loc, cargs));
     }
     // enum template? (incl. the Option/Result prelude)
     ensurePreludeEnum(lookupName);
@@ -463,22 +618,23 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
       }
     }
     if (et && et->isGeneric) {
-      if (args.size() != et->tparams.size()) {
+      if (argEncs.size() != et->tparams.size()) {
         diag(Diag::Error, Code::Generic,
              "generic enum " + name + " expects " +
-             std::to_string(et->tparams.size()) + " type arguments, got " +
-             std::to_string(args.size()),
+             std::to_string(et->tparams.size()) + " arguments, got " +
+             std::to_string(argEncs.size()),
              loc);
         return Type::simple(Type::VOID);
       }
-      for (Type* a : args)
+      auto [targs, cargs] = bindArgs(et->tparams, et->tparamIsConst, "enum");
+      for (Type* a : targs)
         if (!a) {
           diag(Diag::Error, Code::Generic,
                "unresolved type argument in " + name + "<...>",
                loc);
           return Type::simple(Type::VOID);
         }
-      return Type::enumOf(instantiateEnum(prog, et, args, loc));
+      return Type::enumOf(instantiateEnum(prog, et, targs, loc, cargs));
     }
     if (tmpl || et) {
       diag(Diag::Error, Code::Generic,
@@ -511,6 +667,13 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
   if (name == "str") return Type::simple(Type::STR);
   // prelude String (owned growable buffer) registers on first use
   if (name == "String") ensurePreludeString(prog);
+  // fsht-03:01 (ch. 23 §1/§4): the parse/streaming prelude types
+  // register lazily the same way — an annotation like
+  // Result<i64, ParseError> may be the FIRST spelling of the name
+  if (name == "ParseError") ensurePreludeParseError(prog);
+  if (name == "IoError") ensurePreludeIoError(prog);
+  if (name == "Reader") ensurePreludeReader(prog);
+  if (name == "Writer") ensurePreludeWriter(prog);
   // fsht-02:01: bare `Vec` (no <T>) is the generic template — not a
   // usable value type; point the diagnostic at the missing argument.
   if (name == "Vec") {
@@ -532,10 +695,11 @@ static Type* bindEncOne(Program* prog, const std::string& enc, size_t& pos,
 }
 
 static Type* bindEncType(Program* prog, const std::string& enc, SrcLoc loc,
-                         const std::map<std::string, Type*>* tmap) {
+                         const std::map<std::string, Type*>* tmap,
+                         const std::map<std::string, uint64_t>* cenv) {
   if (enc.empty()) return nullptr;   // caller keeps the parsed placeholder
   size_t pos = 0;
-  return bindEncOne(prog, enc, pos, loc, tmap);
+  return bindEncOne(prog, enc, pos, loc, tmap, cenv);
 }
 
 // ---------------------------------------------------------------- cloning
@@ -603,7 +767,8 @@ static Stmt* cloneStmt(Stmt* s) {
 
 // ---------------------------------------------------------------- structs
 StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
-                             const std::vector<Type*>& args, SrcLoc loc) {
+                             const std::vector<Type*>& args, SrcLoc loc,
+                             const std::vector<uint64_t>& constArgs) {
   for (Type* a : args)
     if (!a) {
       diag(Diag::Error, Code::Generic,
@@ -611,12 +776,36 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
            loc);
       return tmpl;
     }
+  // fsht-02:03: mangle type AND const arguments into the instance name
+  // (Vector<f64, 4> -> Vector$f64$4) so distinct const values are distinct
+  // interned types.  TYPE args and CONST args travel in separate vectors
+  // (type slots in args, const slots in constArgs) — index them by their
+  // own counters over the template's parameter positions.
+  size_t typeIdx = 0, constIdx = 0;
   std::string mangled = tmpl->name;
-  for (Type* a : args) mangled += "$" + mangleType(a);
+  for (size_t i = 0; i < tmpl->tparams.size(); ++i) {
+    bool isConst = i < tmpl->tparamIsConst.size() && tmpl->tparamIsConst[i];
+    if (isConst) {
+      uint64_t v = constIdx < constArgs.size() ? constArgs[constIdx++] : 0;
+      mangled += "$" + std::to_string(v);
+    } else {
+      mangled += "$" + mangleType(typeIdx < args.size() ? args[typeIdx++]
+                                                       : nullptr);
+    }
+  }
   if (StructDef* existing = findStructDef(mangled)) return existing;
   std::map<std::string, Type*> tmap;
-  for (size_t i = 0; i < tmpl->tparams.size() && i < args.size(); ++i)
-    tmap[tmpl->tparams[i]] = args[i];
+  std::map<std::string, uint64_t> cenv;
+  typeIdx = 0;
+  constIdx = 0;
+  for (size_t i = 0; i < tmpl->tparams.size(); ++i) {
+    bool isConst = i < tmpl->tparamIsConst.size() && tmpl->tparamIsConst[i];
+    if (isConst) {
+      if (constIdx < constArgs.size()) cenv[tmpl->tparams[i]] = constArgs[constIdx++];
+    } else {
+      if (typeIdx < args.size()) tmap[tmpl->tparams[i]] = args[typeIdx++];
+    }
+  }
   StructDef* sd = new StructDef();
   sd->name = mangled;
   sd->alignOverride = tmpl->alignOverride;
@@ -630,6 +819,7 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
   sd->module = tmpl->module;
   sd->isPub = tmpl->isPub;
   sd->targs = args;   // recorded for call-site inference
+  sd->constTargs = constArgs;   // fsht-02:03: const values, same order
   // bind fields under the template's module context
   bool ctxPushed = false;
   if (moduleLookupIsStrict() && !tmpl->module.empty()) {
@@ -644,7 +834,7 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
     // skips generic templates), so index positionally here
     nf.idx = (int)sd->fields.size();
     if (!f.tyName.empty()) {
-      nf.ty = bindEncType(prog, f.tyName, f.loc2, &tmap);
+      nf.ty = bindEncType(prog, f.tyName, f.loc2, &tmap, &cenv);
       if (!nf.ty) nf.ty = f.ty;
     } else {
       nf.ty = f.ty;
@@ -663,13 +853,34 @@ StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
 
 // ---------------------------------------------------------------- enums
 EnumDef* instantiateEnum(Program* prog, EnumDef* tmpl,
-                         const std::vector<Type*>& args, SrcLoc loc) {
+                         const std::vector<Type*>& args, SrcLoc loc,
+                         const std::vector<uint64_t>& constArgs) {
+  // type/const counters (see instantiateStruct)
+  size_t typeIdx = 0, constIdx = 0;
   std::string mangled = tmpl->name;
-  for (Type* a : args) mangled += "$" + mangleType(a);
+  for (size_t i = 0; i < tmpl->tparams.size(); ++i) {
+    bool isConst = i < tmpl->tparamIsConst.size() && tmpl->tparamIsConst[i];
+    if (isConst) {
+      uint64_t v = constIdx < constArgs.size() ? constArgs[constIdx++] : 0;
+      mangled += "$" + std::to_string(v);
+    } else {
+      mangled += "$" + mangleType(typeIdx < args.size() ? args[typeIdx++]
+                                                       : nullptr);
+    }
+  }
   if (EnumDef* existing = findEnumDef(mangled)) return existing;
   std::map<std::string, Type*> tmap;
-  for (size_t i = 0; i < tmpl->tparams.size() && i < args.size(); ++i)
-    tmap[tmpl->tparams[i]] = args[i];
+  std::map<std::string, uint64_t> cenv;
+  typeIdx = 0;
+  constIdx = 0;
+  for (size_t i = 0; i < tmpl->tparams.size(); ++i) {
+    bool isConst = i < tmpl->tparamIsConst.size() && tmpl->tparamIsConst[i];
+    if (isConst) {
+      if (constIdx < constArgs.size()) cenv[tmpl->tparams[i]] = constArgs[constIdx++];
+    } else {
+      if (typeIdx < args.size()) tmap[tmpl->tparams[i]] = args[typeIdx++];
+    }
+  }
   EnumDef* ed = new EnumDef();
   ed->name = mangled;
   ed->templateName = tmpl->templateName.empty() ? tmpl->name : tmpl->templateName;
@@ -687,7 +898,7 @@ EnumDef* instantiateEnum(Program* prog, EnumDef* tmpl,
       np.name = f.name;
       np.loc = f.loc;
       if (!f.tyName.empty()) {
-        np.ty = bindEncType(prog, f.tyName, f.loc, &tmap);
+        np.ty = bindEncType(prog, f.tyName, f.loc, &tmap, &cenv);
         if (!np.ty) np.ty = f.ty;
       } else {
         np.ty = f.ty;
@@ -706,21 +917,19 @@ EnumDef* instantiateEnum(Program* prog, EnumDef* tmpl,
 }
 
 // ---------------------------------------------------------------- functions
-// Constraint validation (report §4.2: "The exact syntax and constraint
-// system can be simpler than Rust traits").
+// Constraint validation (report §4.2).  fsht-02:02: the constraint may
+// be a `+`-separated list mixing builtins and user traits — the shared
+// implementation lives in traits.cpp so instantiation and call sites
+// cannot drift.
 static bool typeSatisfiesConstraint(Type* t, const std::string& cons) {
-  if (cons.empty()) return true;
-  if (cons == "Numeric") return t && t->isNum();
-  if (cons == "Int") return t && t->isInt();
-  if (cons == "Float") return t && t->isFloat();
-  if (cons == "Signed") return t && t->isSigned();
-  // unknown constraints were rejected at declaration (F0203)
-  return true;
+  return typeSatisfiesConstraints(t, cons);
 }
 
 // infer the concrete type of each template parameter from one argument.
-// supported parameter shapes: T, *T, Span<T>, and generic containers
-// (Pair<T, U> — the argument's recorded targs drive the inference)
+// supported parameter shapes: T, *T, Span<T>, generic containers
+// (Pair<T, U> — the argument's recorded targs drive the inference) and,
+// fsht-02:03, fixed arrays `[T; N]` (the element drives T; the LENGTH
+// drives any const parameter, handled by instantiateGenericFn's cenv pass)
 static bool inferTParam(Type* arg, const std::string& paramEnc,
                         std::string tparam, Type** out) {
   if (paramEnc == tparam) { *out = arg; return arg != nullptr; }
@@ -731,6 +940,17 @@ static bool inferTParam(Type* arg, const std::string& paramEnc,
   if (paramEnc == "span:" + tparam && arg && arg->k == Type::SPAN) {
     *out = arg->pointee;
     return *out != nullptr;
+  }
+  // arr:<lenEnc>:<elemEnc> — recurse on the element encoding
+  if (paramEnc.rfind("arr:", 0) == 0 && arg && arg->k == Type::ARRAY) {
+    // split "<lenEnc>:<elemEnc>" — the length may itself be a const
+    // expression containing no ':' (see the binder), so the FIRST ':'
+    // terminates it
+    size_t colon = paramEnc.find(':', 4);
+    if (colon != std::string::npos) {
+      std::string elemEnc = paramEnc.substr(colon + 1);
+      return inferTParam(arg->pointee, elemEnc, tparam, out);
+    }
   }
   // gen:Name(ENC;ENC...) — match the argument's instantiation arguments
   if (paramEnc.rfind("gen:", 0) == 0 && arg && arg->k == Type::STRUCT &&
@@ -784,11 +1004,44 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
       }
     }
   }
-  // 2. validate constraints
+  // 1b. fsht-02:03: infer CONST parameters from array-shaped params —
+  //     `fn sum<T, const N: usize>(v: [T; N])`: an ARRAY argument's
+  //     length feeds the bare const name in the parameter's length slot
+  std::map<std::string, uint64_t> cenv;
+  for (size_t i = 0; i < tmpl->params.size(); ++i) {
+    const std::string& penc = tmpl->params[i].tyName;
+    if (penc.compare(0, 4, "arr:") != 0 || !argTypes[i] ||
+        argTypes[i]->k != Type::ARRAY)
+      continue;
+    size_t colon = penc.find(':', 4);
+    if (colon == std::string::npos) continue;
+    std::string lenEnc = penc.substr(4, colon - 4);
+    // bare const-parameter name only (general exprs in param lengths
+    // cannot be inferred from the call — first cut)
+    for (auto& tp : tmpl->tparams) {
+      if (lenEnc == tp && !cenv.count(tp) &&
+          !tmap.count(tp))
+        cenv[tp] = argTypes[i]->arrLen;
+    }
+  }
+  // 2. validate constraints (types must infer; consts must infer)
   for (size_t i = 0; i < tmpl->tparams.size(); ++i) {
     const std::string& tp = tmpl->tparams[i];
     const std::string& cons = i < tmpl->tconstraints.size()
                               ? tmpl->tconstraints[i] : "";
+    bool isConst = i < tmpl->tparamIsConst.size() && tmpl->tparamIsConst[i];
+    if (isConst) {
+      if (!cenv.count(tp)) {
+        diag(Diag::Error, Code::Generic,
+             "cannot infer const parameter " + tp + " of " + tmpl->name +
+             " from the call arguments — pass an array whose length is "
+             "[T; " + tp + "]-shaped, or instantiate through a type that "
+             "fixes it",
+             loc);
+        return nullptr;
+      }
+      continue;
+    }
     if (!tmap.count(tp)) {
       diag(Diag::Error, Code::Generic,
            "cannot infer type parameter " + tp + " of " + tmpl->name +
@@ -797,17 +1050,46 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
       return nullptr;
     }
     if (!typeSatisfiesConstraint(tmap[tp], cons)) {
-      diag(Diag::Error, Code::Generic,
-           "type argument " + typeToString(tmap[tp]) + " for " + tp +
-           " does not satisfy constraint " + cons + " (fn " + tmpl->name + ")",
-           loc);
+      // fsht-02:02: split the message by part — a missing user-trait impl
+      // is F0218, everything else is the generic constraint failure
+      std::string missing;
+      size_t p = 0;
+      while (true) {
+        size_t q = cons.find('+', p);
+        std::string part = cons.substr(p, q == std::string::npos
+                                        ? std::string::npos : q - p);
+        if (findTraitDef(part) && !findImplFor(part, tmap[tp])) {
+          // a user trait by this name exists (even if it shares a builtin
+          // constraint's name) and the type has no impl — the precise
+          // diagnostic is F0218
+          missing = part;
+          break;
+        }
+        if (q == std::string::npos) break;
+        p = q + 1;
+      }
+      if (!missing.empty())
+        diag(Diag::Error, Code::NoTraitImpl,
+             "type argument " + typeToString(tmap[tp]) + " for " + tp +
+             " does not implement the trait " + missing +
+             " (fn " + tmpl->name + ") — add an `impl " + missing + " for " +
+             typeToString(tmap[tp]) + "` block",
+             loc);
+      else
+        diag(Diag::Error, Code::Generic,
+             "type argument " + typeToString(tmap[tp]) + " for " + tp +
+             " does not satisfy constraint " + cons + " (fn " + tmpl->name + ")",
+             loc);
       return nullptr;
     }
   }
-  // 3. mangled instance name; intern
+  // 3. mangled instance name; intern (const values join the mangling:
+  // sum$f64$4)
   std::string mangled = tmpl->name;
-  for (auto& tp : tmpl->tparams)
+  for (auto& tp : tmpl->tparams) {
     if (tmap.count(tp)) mangled += "$" + mangleType(tmap[tp]);
+    else if (cenv.count(tp)) mangled += "$" + std::to_string(cenv[tp]);
+  }
   if (FnDecl* existing = lookupFn(mangled)) return existing;
   // 4. clone the declaration with substituted types (Phase 3a: bound
   // under the TEMPLATE's module context)
@@ -831,6 +1113,7 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
   inst->userInline = tmpl->userInline;
   inst->userNoinline = tmpl->userNoinline;
   inst->aliasPairs = tmpl->aliasPairs;
+  inst->isConst = tmpl->isConst;   // fsht-02:03: instances stay const fn
   for (auto& pm : tmpl->params) {
     Param np;
     np.name = pm.name;
@@ -838,7 +1121,7 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
     np.owned = pm.owned;
     np.borrowed = pm.borrowed;
     if (!pm.tyName.empty()) {
-      np.ty = bindEncType(prog, pm.tyName, pm.loc, &tmap);
+      np.ty = bindEncType(prog, pm.tyName, pm.loc, &tmap, &cenv);
       if (!np.ty) np.ty = pm.ty;
     } else {
       np.ty = pm.ty;
@@ -846,11 +1129,16 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
     inst->params.push_back(np);
   }
   if (!tmpl->retTyName.empty()) {
-    inst->ret = bindEncType(prog, tmpl->retTyName, tmpl->loc, &tmap);
+    inst->ret = bindEncType(prog, tmpl->retTyName, tmpl->loc, &tmap, &cenv);
     if (!inst->ret) inst->ret = tmpl->ret;
   }
   inst->body = cloneStmt(tmpl->body);
   inst->instTMap = tmap;
+  inst->instCMap = cenv;   // fsht-02:03: const values for the body binder
+  // fsht-02:02: rewrite Trait::method / T::method calls the tmap already
+  // determines into direct mangled impl calls; the rest is picked up by
+  // the instance body sema (typed arguments) through the same resolver
+  rewriteTraitCallsInBody(inst->body, tmpl, tmap, prog);
   inst->id = (int)prog->fns.size();
   prog->fns.push_back(inst);
   // intern NOW: concurrent call sites resolve to this one instance
@@ -860,10 +1148,13 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
   return inst;
 }
 
-// exposed for sema: resolve the parser's encoding (with optional tmap)
+// exposed for sema: resolve the parser's encoding (with optional tmap;
+// fsht-02:03 adds the const-parameter environment for array lengths and
+// const arguments)
 Type* bindTypeEncoding(Program* prog, const std::string& enc, SrcLoc loc,
-                       const std::map<std::string, Type*>* tmap) {
-  return bindEncType(prog, enc, loc, tmap);
+                       const std::map<std::string, Type*>* tmap,
+                       const std::map<std::string, uint64_t>* cenv) {
+  return bindEncType(prog, enc, loc, tmap, cenv);
 }
 
 } // namespace freshet

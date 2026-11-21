@@ -262,6 +262,39 @@ void builtinEffects(const std::string& n, bool strictfp, Effects& e) {
       n == "soa_field_ptr" || n == "soa_new_sizes" ||
       n == "freshet.prefetch_r" || n == "freshet.prefetch_w")
     return;
+  // fsht-03:01 (registry 08.01.04, ch. 23 §2–§3): the numeric variant
+  // family, conversions, bits and abs/clamp lower to llvm.* intrinsics
+  // and icmp/select chains — memory-free at every width
+  if (n == "checked_add" || n == "checked_sub" || n == "checked_mul" ||
+      n == "checked_div" || n == "checked_rem" ||
+      n == "saturating_add" || n == "saturating_sub" || n == "saturating_mul" ||
+      n == "wrapping_add" || n == "wrapping_sub" || n == "wrapping_mul" ||
+      n == "int_min" || n == "int_max" ||
+      n == "checked_cast" || n == "saturating_cast" ||
+      n == "bswap16" || n == "bswap32" || n == "bswap64" ||
+      n == "popcount" || n == "abs" || n == "clamp")
+    return;
+  // gcd calls the runtime helper — pure computation over its operands
+  if (n == "gcd") return;
+  // parse_i64/u64/f64: reads the str view's bytes (an argument root —
+  // classified through the call-site walker like vec reads)
+  if (n == "parse_i64" || n == "parse_u64" || n == "parse_f64") return;
+  // now_ns/now_ms/page_size read runtime/clock state
+  if (n == "now_ns" || n == "now_ms" || n == "page_size") {
+    e.readsOther = true;
+    return;
+  }
+  // sm64_next reads+writes through its &mut state root — argmem,
+  // classified through the call-site walker
+  if (n == "sm64_next") {
+    e.readsArg = true;
+    e.writesArg = true;
+    return;
+  }
+  // fsht-03:02 (ch. 24 §4): the String migration's new builtins —
+  // clone allocates a fresh buffer; clear writes through the root
+  if (n == "string_clone") { e.allocates = true; return; }
+  if (n == "string_clear") { e.writesArg = true; return; }
   e.unknownCall = true;                 // unmodelled name: be conservative
 }
 

@@ -1,5 +1,5 @@
 <div align=center>
-  <img width="2172" height="724" alt="penstock logo" src="https://github.com/user-attachments/assets/3b050cf4-52e7-4791-9158-ae6997844938" />
+  <img width="730" height="411" alt="fsht image" src="https://github.com/user-attachments/assets/930e9c07-4517-476c-a494-bd82b2694e46" />
 </div>
 
 # Freshet / Penstock
@@ -139,8 +139,8 @@ core, paired by `--smt-interleave`).
 ## Freshet-lang: the standard, the stress suite, the benchmarks
 
 The language is specified and stress-tested by the standards repository
-[Freshet-lang](https://github.com/PolskaKrowa/Freshet-lang) (current standard:
-`fsht-01:01`). This repository consumes it in two places:
+[Freshet-lang](https://github.com/OWNER/Freshet-lang) (current standard:
+`fsht-02:03`). This repository consumes it in two places:
 
 - **`.github/workflows/freshet-conformance.yml`** — every PR builds
   Penstock and runs the Freshet-lang conformance suite (corpus goldens,
@@ -169,7 +169,7 @@ tools/lang-bench/run.sh --kernels dot,matmul
 
 Set `FRESHET_LANG_REPO` (or the workflow input / `--freshet-lang` flag)
 to your `owner/Freshet-lang` checkout before the first run — the
-shipped default is the placeholder `PolskaKrowa/Freshet-lang`.
+shipped default is the placeholder `OWNER/Freshet-lang`.
 
 ## Status
 
@@ -178,3 +178,76 @@ implemented and what is deliberately deferred (variadic `extern fn`, numeric
 text parsing, LSP completions/inlay hints):
 [docs/report-integration.md](docs/report-integration.md) and
 [docs/optimization-integration.md](docs/optimization-integration.md).
+
+### fsht-02:01 — dynamic collections (ratified 2026-11-19)
+
+The first increment of the fsht-02:01 roadmap
+(registry `fsht-02:01-02.09.01` / `fsht-02:01-02.09.02`) is in the tree:
+`Vec<T>` — a prelude generic struct `{ data: *T, len: u64, cap: u64 }`
+monomorphised per element type — with the full container surface
+(`vec_new` / `vec_from_span` / `vec_from_array` / `vec_clone`,
+`&mut` mutators, checked indexing `v[i]`, `Option<T>` access, and
+borrowed `Span<T>` views via `v[lo..hi]` / `vec_slice`), plus the
+ownership model the registry demands: by-value transfers move (the
+source binding is invalidated — F0301 on later use), every owned
+binding drops at scope exit in reverse declaration order (after the
+scope's `defer`s, flushed on `break`/`continue`/return), manual
+`vec_free` pre-empts the drop, and rebinding while owning is an error.
+Conformance: `tests/pos_vec_*.fsht` and `tests/neg_vec_*.fsht` in the
+regression suite; the spec chapter is
+`spec/20-dynamic-collections.md` in the Freshet-lang repository
+(normative since fsht-02:01).
+
+Deferred with the registry entries: containers nested in user
+aggregates, owning element types (`Vec<String>`), custom allocators,
+and the `String` migration onto the drop model (its `str_of` views
+routinely escape; that waits for the fsht-03:02 lifetime analysis,
+which is also what will lift the restriction on returning views of
+local containers). The `Slice`/`SliceMut` naming question was closed
+at ratification: container views are `Span<T>`, no separate slice
+types exist in the standard.
+
+### fsht-02:02/03 — traits and const generics (ratified 2026-11-19)
+
+The next two roadmap increments are in the tree (registry
+`fsht-02:02-06.02.01` / `fsht-02:03-06.03.01`):
+
+**User-defined traits, static dispatch** — `trait Numeric { fn
+add(a: Self, b: Self) -> Self; ... }` declarations (pure signature
+sets, `Self` the implementing-type placeholder) and `impl Trait for
+Type` blocks whose members become ordinary functions under mangled
+names (`Numeric$i64$add`) — so effects, checks, ownership, IRgen and
+LLVM all see plain direct calls: no vtables, no trait objects, the
+HPC philosophy preserved. Calls resolve three ways:
+`Trait::method(args)` inside generic fns (rewritten per instantiation
+against the bound tparam), by first-argument type in concrete code
+(F0216 when undetermined), `Type::method` qualified calls, and
+`Self::method` inside impls. Bounds compose with `+`
+(`T: Numeric + Scalable`); a missing impl is F0218, a signature
+mismatch after Self substitution is F0217.
+
+**Const generics + const fn** — `const N: usize` parameters on
+structs/enums/fns (`struct Vector<T, const N: usize> { data: [T; N] }`,
+`Matrix<T, const R: usize, const C: usize> { data: [T; R * C] }`);
+const arguments accept literals, const expressions and const fn calls
+(`Vector<f64, square(3)>`), distinct values are distinct interned
+types; array lengths accept const expressions; const parameters
+are inferred from array-typed call arguments and fold to literals
+inside instance bodies (constant-trip loops unroll). `const fn`
+runs at compile time (literals, arithmetic, comparisons, casts, let,
+if, while, for-in, assignment, calls to other const fns,
+sizeof/alignof values; budgeted at 16384 steps / 32 recursion levels)
+while staying an ordinary runtime function; `const_assert(expr)`
+asserts at compile time (F0219 non-const, F0220 false).
+
+Conformance: `tests/pos_traits.fsht`, `tests/pos_constgen.fsht`,
+`tests/neg_traits_*.fsht`, `tests/neg_constgen_*.fsht` in the
+regression suite; the spec chapters are `spec/21-traits.md` and
+`spec/22-const-generics.md` in the Freshet-lang repository (normative
+since fsht-02:02/fsht-02:03). New diagnostics F0216–F0220 are
+documented in `docs/errors/`.
+
+Deferred with the registry entries: blanket impls over template
+parameters, generic traits, associated types, dynamic dispatch;
+const parameters beyond usize, const inference from container-typed
+arguments, `sizeof(T)` inside const fn bodies.

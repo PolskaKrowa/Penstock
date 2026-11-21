@@ -1,0 +1,34 @@
+// fsht-03:01 (registry 08.01.04, ch. 23 §2): the checked/saturating/
+// wrapping variant family + int_min/int_max bounds.
+fn main() {
+    let seed: i64 = 0;
+    let mx: i64 = int_max(seed);
+    let mn: i64 = int_min(seed);
+    // checked_* overflow -> None
+    let a: Option<i64> = checked_add(mx, 1);
+    match (a) {
+        Some(v) => { print_i64(v); }
+        None => { print("None"); }
+    }
+    println();
+    // checked_div: None exactly where the plain operator traps
+    let dz: Option<i64> = checked_div(mx, 0);
+    match (dz) {
+        Some(v) => { print_i64(v); }
+        None => { print("None"); }
+    }
+    println();
+    // saturating_* clamps to the type bounds
+    print_i64(saturating_add(mx, 1)); println();
+    print_i64(saturating_sub(mn, 1)); println();
+    print_i64(saturating_mul(mn, 2)); println();
+    // wrapping_* == the plain (wrapping) operators, explicit
+    print_i64(wrapping_add(mx, 1)); println();
+    // narrow widths keep their exact source semantics (i8)
+    let s8: i8 = 3;
+    let m8: i8 = int_max(s8);
+    print_i64(saturating_add(m8, 1) as i64); println();
+    // unsigned saturation: u8
+    let mu: u8 = 250;
+    print_u64(saturating_add(mu, 10) as u64); println();
+}

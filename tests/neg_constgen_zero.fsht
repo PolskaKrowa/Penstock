@@ -1,0 +1,7 @@
+// fsht-02:03: const-evaluated array length is zero — F0219.
+struct Vector<T, const N: usize> { data: [T; N] }
+const fn zeroed() -> usize { return 0; }
+fn main() {
+    let v: Vector<f64, zeroed()> = Vector { data: [1.0] };
+    print_i64(sizeof(Vector<f64, zeroed()>) as i64); println();
+}

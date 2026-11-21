@@ -197,6 +197,11 @@ struct Param {
   std::string name; Type* ty = nullptr; std::string tyName;
   bool owned = false;          // `owned` mode: caller must give(); callee frees
   bool borrowed = false;       // `borrowed` mode: no free/give, no mutation
+  // fsht-03:02 (registry 03.02.09): `borrowed mut` — the callee gets
+  // exclusive write access; the call site must pass a mutable borrow
+  // (`&mut place`, or the legacy `&place` spelling at the mutation
+  // builtins).  A bare pointer value or a shared borrow is F0303.
+  bool borrowedMut = false;
   SrcLoc loc;
 };
 
@@ -211,6 +216,14 @@ struct StructDef {
   // Phase 2a: generic struct template support (monomorphised in sema)
   bool isGeneric = false;
   std::vector<std::string> tparams;   // <T, U, ...>
+  // fsht-02:03 (registry 06.03.01): parallel to tparams — true when the
+  // parameter is `const N: usize` (a compile-time value) rather than a
+  // type.  The list is sized lazily by the parser; missing entries mean
+  // a type parameter.
+  std::vector<bool> tparamIsConst;
+  // concrete const arguments (values for the const positions of the
+  // originating template's tparams, recorded on instances)
+  std::vector<uint64_t> constTargs;
   // concrete type arguments (parallel to the originating template's
   // tparams; empty for non-instantiated structs) — drives inference at
   // generic call sites
@@ -251,6 +264,10 @@ struct EnumDef {
   bool isPub = false;
   bool isGeneric = false;
   std::vector<std::string> tparams;
+  // fsht-02:03: const parameters of a generic enum template (parallel
+  // to tparams, see StructDef::tparamIsConst)
+  std::vector<bool> tparamIsConst;
+  std::vector<uint64_t> constTargs;
   // source spelling for qualified access (`Option.None` after
   // instantiation): the template's name, not the mangled instance name
   std::string templateName;
@@ -268,6 +285,113 @@ std::vector<StructDef*> allStructDefs();
 // prelude types (generics.cpp): String struct + Option/Result enums
 StructDef* ensurePreludeString(Program* prog);
 
+// ---------------------------------------------------------------- traits
+// fsht-02:02 (registry 06.02.01) — user-defined traits with static
+// dispatch through monomorphisation.  A trait declaration is a pure
+// SIGNATURE set: no fields, no bodies, no code of its own.  `Self` in a
+// method signature is the placeholder for the implementing type — the
+// parser keeps the raw binder encoding "Self" and the impl machinery
+// substitutes it textually (see traits.cpp).
+struct FnDecl;   // impl members (full definition below)
+struct Stmt;
+struct Expr;     // const-eval expression trees
+//
+// The first cut is deliberately narrow, matching the registry's
+// static-dispatch-first requirement:
+//   * impls target CONCRETE types only (scalars, structs, enum types,
+//     instantiated generic structs like Vec<i64>) — blanket impls over
+//     template parameters are deferred with the registry entry
+//   * dynamic dispatch (trait objects / vtables) is a later opt-in and
+//     never the default
+struct TraitDef {
+  struct Method {
+    std::string name;
+    std::vector<Param> params;    // tyName encodings; "Self" placeholder
+    std::string retEnc;           // "" = void
+    SrcLoc loc;
+  };
+  std::string name;
+  std::vector<Method> methods;
+  SrcLoc loc;
+  // Phase 3a conventions: owning module + pub visibility
+  std::string module;
+  bool isPub = false;
+};
+
+// One `impl Trait for Type { ... }` block.  The member functions are
+// ordinary FnDecls (added to Program::fns); their FINAL names are the
+// mangled `Trait$<type>$method` forms assigned by sema before fn-map
+// registration, so every downstream pass (effects, checks, irgen, LLVM)
+// sees plain direct calls — static dispatch by construction, no vtables.
+struct ImplDef {
+  std::string traitName;
+  std::string selfEnc;         // binder encoding of the target type
+  Type* selfTy = nullptr;      // resolved during sema
+  std::vector<FnDecl*> fns;    // impl member fns (mangled in sema)
+  SrcLoc loc;
+  std::string module;
+  bool isPub = false;
+};
+
+// traits.cpp
+TraitDef* findTraitDef(const std::string& name);
+void registerTrait(TraitDef* td);
+std::vector<TraitDef*> allTraitDefs();
+// impl table (traits.cpp)
+void registerImpl(ImplDef* im);
+std::vector<ImplDef*>& allImpls();
+// declared trait method lookup (nullptr when the trait lacks the method)
+TraitDef::Method* findTraitMethodIn(const std::string& trait,
+                                    const std::string& method);
+// textual `Self` -> target substitution over a binder encoding
+std::string substSelfInEnc(const std::string& enc, const std::string& selfEnc);
+// mangled impl function name: Trait$<mangled type>$method
+std::string traitMethodMangle(const std::string& trait, Type* selfTy,
+                              const std::string& method);
+// find the impl of `trait` for exactly `selfTy` (nullptr when absent)
+struct ImplDef* findImplFor(const std::string& trait, Type* selfTy);
+// constraint satisfaction over `+`-separated parts: builtins (Numeric, Int,
+// Float, Signed) or user traits (impl present for the type)
+bool typeSatisfiesConstraints(Type* t, const std::string& cons);
+// first malformed part of a constraint list ("" when well-formed)
+std::string firstUnknownConstraintPart(const std::string& cons);
+// resolve a `Prefix::method(...)` trait-method call.  `argTys` are the
+// call's argument types (may contain nullptrs while untyped); preferSelf
+// is the implementing type when the caller knows it (impl bodies, unique
+// bound tparam).  Returns the impl FnDecl or nullptr after emitting the
+// appropriate diagnostic (F0216/F0218) — callers fall through to other
+// resolution paths when the prefix is not a trait/type at all.
+FnDecl* resolveTraitMethodCall(const std::string& prefix,
+                               const std::string& method,
+                               const std::vector<Type*>& argTys,
+                               Type* preferSelf, SrcLoc loc);
+// rewrite `Trait::method` / `T::method` calls inside a freshly cloned
+// generic instance body, where tmap supplies the concrete types.  Calls
+// that cannot be resolved HERE are left for the instance body sema,
+// which sees typed arguments and retries through the same resolver.
+void rewriteTraitCallsInBody(Stmt* body, FnDecl* tmpl,
+                             const std::map<std::string, Type*>& tmap,
+                             Program* prog);
+
+// ---------------------------------------------------------------- const eval
+// fsht-02:03 (registry 06.03.01) — compile-time evaluation for const
+// generics.  `const fn` bodies are interpreted over the u64 domain
+// (usize values) with a step/depth budget; anything the interpreter
+// cannot prove constant leaves the compile with F0219.
+// Evaluate a const-expression ENCODING (see parser.cpp):
+//   "5"              literal
+//   "N"              const parameter name (looked up in cenv)
+//   "(A + B)"        binary op over encodings (fully parenthesised)
+//   "sq(3,4)"        call to a const fn with encoded arguments
+bool evalConstEnc(const std::string& enc, const std::map<std::string, uint64_t>* cenv,
+                  SrcLoc loc, uint64_t* out);
+// interpret a `const fn` with concrete arguments (depth-capped)
+bool evalConstFnCall(FnDecl* f, const std::vector<uint64_t>& args, uint64_t* out,
+                     int depth = 0);
+// evaluate a source expression tree under a constant environment
+bool evalConstExpr(Expr* e, const std::map<std::string, uint64_t>& env,
+                   uint64_t* out, SrcLoc loc);
+
 // fsht-02:01 (registry 02.09.01/02.09.02) — dynamic collections.
 // Vec<T> is a builtin GENERIC template struct (monomorphised per element
 // type exactly like user generic structs) laid out as the triple
@@ -282,15 +406,34 @@ StructDef* ensurePreludeVec(Program* prog);
 StructDef* instantiateVecType(Program* prog, Type* elem, SrcLoc loc);
 // prelude enum templates (Option/Result) for sema callers
 EnumDef* ensurePreludeEnumType(const std::string& name);
+// fsht-03:01 (registry 05.04.01/05.05.01): the parse/error prelude types.
+// ParseError { Invalid, OutOfRange } backs parse_i64/u64/f64's Result
+// payloads; IoError { NotFound, Permission, Eof, Busy, Other(i64) }
+// backs the streaming-I/O Results.  Reader/Writer are the { handle: i64 }
+// prelude structs of chapter 23 §4 — ownership-tracked handles (auto
+// close at scope exit under chapter 24's container model).
+EnumDef* ensurePreludeParseError(Program* prog);
+EnumDef* ensurePreludeIoError(Program* prog);
+StructDef* ensurePreludeReader(Program* prog);
+StructDef* ensurePreludeWriter(Program* prog);
+bool isHandleType(Type* t);               // prelude Reader or Writer
 // container predicates (types.cpp): a struct type that is the prelude
 // String or any Vec<T> instantiation
 bool isContainerType(Type* t);
 // true when `t` may legally appear as a Vec element type / inside a
 // non-owning aggregate: scalars, str views, POD structs, arrays, enums,
-// spans over non-owning elements.  Containers (String, Vec<T>) are
-// owned and rejected — nested ownership is deferred (registry 02.09.02
-// follow-up).
+// spans.  Containers (String, Vec<T>) are OWNED — legal as elements and
+// inside user shapes since fsht-03:02 (registry 02.09.02 lifting, the
+// drop elaboration of 03.02.10), but a type containing them needs shape
+// drops / moves / deep clones (typeNeedsDrop, below).
 bool isNonOwningType(Type* t);
+// fsht-03:02 (registry 03.02.10, ch. 24 §5): does a value of this type
+// own storage that must drop at scope exit / transfer on move / deep-
+// copy on clone?  true for Vec<T> over owning elements, String, Reader/
+// Writer handles, and any user struct/array/enum shape transitively
+// containing one.  Pure scalars, str/Span views and POD shapes are
+// plain copies (false).
+bool typeNeedsDrop(Type* t);
 // Vec<T> -> T; nullptr for String
 Type* containerElemType(Type* t);
 
@@ -364,6 +507,10 @@ void registerStruct(StructDef* sd);
 uint64_t typeSizeOf(Type* t);
 uint64_t typeAlignOf(Type* t);
 Type* typeExpr(FnSema* fs, Expr* e);
+// fsht-03:01 (registry 08.01.04): set checked_cast/saturating_cast's
+// destination U from a context type (Option<U> unwraps to U); called at
+// the binding/return/argument/assignment sites before init typing.
+void trySetCastTarget(FnSema* fs, Expr* e, Type* expected);
 struct FnSema* semaForFn(FnDecl* f);
 std::vector<FnSema*>& allFnSemas();
 
@@ -398,6 +545,15 @@ struct Expr {
   GlobalVar* globalRef = nullptr;         // resolved global
   FnDecl* callee = nullptr;               // resolved user call
   int fieldIdx = -1;                      // resolved FIELD
+  // fsht-03:02 (registry 03.02.09): `&mut place` — the exclusive
+  // mutable-borrow spelling of the UN '&' node (`&place` stays the shared
+  // spelling / the legacy argument form at the mutation builtins).
+  bool borrowMut = false;
+  // fsht-03:01 (registry 08.01.04): resolved destination type U of a
+  // `checked_cast<T, U>(x)` / `saturating_cast<T, U>(x)` call — inferred
+  // from the binding/context (sema_expr trySetCastTarget); nullptr while
+  // unresolved (F0201 at typing time).
+  Type* castTargetTy = nullptr;
   // Phase 1d: enum variant construction (IDENT `A` / CALL `A(...)` or
   // qualified `Enum.Variant`), resolved during sema
   EnumDef* enumRef = nullptr;
@@ -591,10 +747,29 @@ struct FnDecl {
   // Phase 2a: generic function template (monomorphised per call site)
   bool isGeneric = false;
   std::vector<std::string> tparams;
-  std::vector<std::string> tconstraints;   // parallel to tparams ("" = none)
+  std::vector<std::string> tconstraints;   // parallel to tparams ("" = none;
+                                          // may be "TraitA+TraitB" — all parts
+                                          // must hold; fsht-02:02)
+  // fsht-02:03: parallel to tparams — true for `const N: usize` params
+  std::vector<bool> tparamIsConst;
   // instantiated bodies rebind their type strings through this map
   // (empty for ordinary functions and templates)
   std::map<std::string, Type*> instTMap;
+  // fsht-02:03: const-parameter values for instances (parallel to instTMap)
+  std::map<std::string, uint64_t> instCMap;
+  // fsht-02:02: this fn is a member of an `impl Trait for Type` block.
+  // The parser stores the raw spelling; sema resolves the target type,
+  // renames the fn to the mangled `Trait$<type>$method` form and records
+  // both here for trait-call resolution inside impl bodies.
+  bool isTraitImpl = false;
+  std::string traitName;       // originating trait
+  std::string implSelfEnc;     // parser-time encoding of the target type
+  Type* implSelfTy = nullptr;  // sema-resolved target type
+  // fsht-02:02: this fn is a `const fn` — its body is interpretable at
+  // compile time for const-generic arguments and const_assert (registry
+  // 06.03.01).  Const fns are ALSO ordinary runtime fns: they are sema'd,
+  // emitted and callable normally.
+  bool isConst = false;
   // --- inline hints (Stage A1): explicit user control over the LLVM inliner.
   // Defaults: `inline_default` policy (LLVM decides by cost).  `@inline`
   // adds a strong `alwaysinline` hint; `@noinline` adds `noinline`.
@@ -644,6 +819,9 @@ struct Program {
   std::vector<StructDef*> structs;
   std::vector<EnumDef*> enums;
   std::vector<GlobalVar*> globals;
+  // fsht-02:02: trait declarations and impl blocks (parsed order)
+  std::vector<TraitDef*> traits;
+  std::vector<ImplDef*> impls;
   std::vector<std::string> linkLibs;   // #link
   std::string file;
   // ---- Phase 3a: module identity ----------------------------------
@@ -922,20 +1100,30 @@ void tryResolveVariantExpr(FnSema* fs, Expr* e, Type* expected);
 void tryAdoptStructLiteral(Expr* e, Type* expected);
 // generic-instance scope: the current function's T -> concrete map
 Type* tparamTypeInScope(const std::string& name);
+// fsht-02:03: const-parameter value of the current instantiation
+uint64_t* constParamValueInScope(const std::string& name);
 // generics (Phase 2a): monomorphisation helpers (generics.cpp)
+// fsht-02:03: constArgs carries const-generic values (parallel to the
+// template's const parameter positions; empty for pure-type templates)
 StructDef* instantiateStruct(Program* prog, StructDef* tmpl,
-                             const std::vector<Type*>& args, SrcLoc loc);
+                             const std::vector<Type*>& args, SrcLoc loc,
+                             const std::vector<uint64_t>& constArgs = {});
 EnumDef* instantiateEnum(Program* prog, EnumDef* tmpl,
-                         const std::vector<Type*>& args, SrcLoc loc);
+                         const std::vector<Type*>& args, SrcLoc loc,
+                         const std::vector<uint64_t>& constArgs = {});
 FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
                              const std::vector<Type*>& argTypes, SrcLoc loc);
 Type* bindTypeEncoding(Program* prog, const std::string& enc, SrcLoc loc,
-                       const std::map<std::string, Type*>* tmap);
+                       const std::map<std::string, Type*>* tmap,
+                       const std::map<std::string, uint64_t>* cenv = nullptr);
 // checks (strict)
 void runStrictChecks(Program* p);
 void runParforChecks(Program* p);
 // ownership
 void runOwnershipAnalysis(Program* p);
+// fsht-03:02 (registry 03.02.09/03.02.10): the borrow discipline —
+// F0310 exclusivity + F0311 escape (ownership.cpp)
+void runBorrowAnalysis(Program* p);
 // Stage B5: consult after runStrictChecks().  Returns true iff the given
 // @alias pair on `fn` was violated by at least one caller in this
 // compilation unit (F0306).  IRgen suppresses the `noalias` LLVM

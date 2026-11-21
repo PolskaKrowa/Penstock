@@ -221,7 +221,7 @@ static void processFile(PpState& st, const std::string& path,
   }
   st.activeFile.insert(path);
 
-  char buf[64];
+  char buf[1024];
   snprintf(buf, sizeof buf, "#line 1 \"%s\"\n", path.c_str());
   out += buf;
 

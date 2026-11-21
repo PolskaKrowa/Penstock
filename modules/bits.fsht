@@ -1,0 +1,20 @@
+// bits — bit manipulation, endian conversion (fsht-03:01, ch. 23 §5):
+// bswap16/32/64 and popcount, compiler-known builtins re-exported here
+// (usable without import).
+module bits;
+
+pub fn bswap16(x: u16) -> u16 {
+    return bswap16(x);
+}
+
+pub fn bswap32(x: u32) -> u32 {
+    return bswap32(x);
+}
+
+pub fn bswap64(x: u64) -> u64 {
+    return bswap64(x);
+}
+
+pub fn popcount(x: u64) -> u64 {
+    return popcount(x);
+}

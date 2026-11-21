@@ -1,0 +1,11 @@
+// fsht-02:02: zero-argument trait method with multiple impls — F0216.
+trait Seed {
+    fn zero() -> Self;
+}
+impl Seed for i64 { fn zero() -> Self { return 0; } }
+impl Seed for f64 { fn zero() -> Self { return 0.0; } }
+fn main() {
+    // which zero()? neither argument nor context determines the type
+    let z: i64 = Seed::zero();
+    print_i64(z); println();
+}

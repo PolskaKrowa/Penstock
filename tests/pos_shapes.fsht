@@ -1,0 +1,26 @@
+// fsht-03:02 (registry 03.02.10, ch. 24 §5): drop elaboration through
+// user shapes — owning containers inside structs/arrays, owning element
+// types, deep vec_clone.
+struct Pair { name: String, v: u64 }
+fn main() {
+    // Vec<String>: owning elements are accepted now
+    let mut vs: Vec<String> = vec_new(String);
+    vec_push(&mut vs, string_from("a"));
+    vec_push(&mut vs, string_from("b"));
+    print_u64(vs.len); println();
+    // vec_clone deep-copies element-wise
+    let cv: Vec<String> = vec_clone(vs);
+    print_u64(cv.len); println();
+    // nested containers: Vec<Vec<i64>>
+    let mut vv: Vec<Vec<i64>> = vec_new(Vec<i64>);
+    vec_push(&mut vv, vec_new(i64));
+    vec_push(&mut vv, vec_new(i64));
+    print_u64(vv.len); println();
+    // struct with an owning field: drops walk the shape
+    let box1: Pair = Pair { name: string_from("x"), v: 5 };
+    print_u64(box1.v); println();
+    print(str_of(&box1.name)); println();
+    // array of owning elements
+    let arr: [String; 2] = [string_from("p"), string_from("q")];
+    print_u64(arr[1].len); println();
+}

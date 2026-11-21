@@ -1,0 +1,7 @@
+// fsht-03:02 F0301: use-after-string_free — the pre-emptive release
+// invalidates the binding (ch. 24 §4).
+fn main() {
+    let mut s: String = string_from("hi");
+    string_free(&mut s);
+    print(str_of(&s));
+}

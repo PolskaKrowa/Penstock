@@ -444,9 +444,12 @@ if(PENSTOCK_BUILD_EMBEDDED_SUPEROPT)
     endif()
   endif()
   # LLVMConfig exports an imported executable target named `opt`; Z3 4.15.x
-  # also names one of its object-library components `opt`. Those names are
-  # globally unique in CMake, so keep the Z3 component namespaced
-  # (idempotent; see cmake/ThirdPartySubmodules.cmake).
+  # also names one of its object-library components `opt` (newer upstream Z3
+  # renamed that component to `z3_opt`). Target names are globally unique in
+  # CMake, so the legacy name must be namespaced before Z3 creates its
+  # targets: the patcher renames it, recognises upstream's `z3_opt`, and
+  # refuses layouts it does not know (idempotent; see
+  # cmake/ThirdPartySubmodules.cmake).
   penstock_patch_z3_for_embedded_build("${penstock_z3_SOURCE_DIR}")
   add_subdirectory("${penstock_z3_SOURCE_DIR}" "${penstock_z3_BINARY_DIR}" EXCLUDE_FROM_ALL)
   if(NOT TARGET libz3)

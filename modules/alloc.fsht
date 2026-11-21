@@ -1,0 +1,8 @@
+// alloc — allocators, buffers, vectors (fsht-03:01, ch. 23 §5): the
+// page_size primitive; custom allocators remain a registry-tracked
+// deferral (fsht-02:01 carried it forward).
+module alloc;
+
+pub fn page_size() -> u64 {
+    return page_size();
+}

@@ -1,0 +1,7 @@
+// fsht-03:02 F0311: returning &mut local — the drop at exit dangles
+// the borrow (ch. 24 §3).
+fn bad() -> *i64 {
+    let mut x: i64 = 1;
+    return &mut x;
+}
+fn main() { }

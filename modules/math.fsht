@@ -1,0 +1,6 @@
+// math — standard mathematical functions (fsht-03:01, ch. 23 §5): the
+// chapter 13 intrinsic surface (sqrt/sin/cos/tan/exp/log/log2/log10/
+// pow/fabs/fmin/fmax/floor/ceil/round, imin/imax).  All compiler-known
+// builtins, usable without any import; this module anchors the
+// decomposition's math surface.
+module math;

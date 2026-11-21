@@ -1,0 +1,9 @@
+// fsht-03:02 F0307: a mutable borrow inside a dispatched parfor body
+// (ch. 24 §2 — shared reads through views are the parallel shape).
+fn main() {
+    let mut x: i64 = 0;
+    parfor (i in 0..10) {
+        let m: *i64 = &mut x;
+        print_i64(x);
+    }
+}

@@ -149,7 +149,9 @@ set(FRONTEND_SOURCES
   src/bce.cpp # goose port: bounds-check elimination (goose src/bce.h)
   src/dstk.cpp # goose port: data-stack memory model (goose codegen_stacks.h)
   src/fp_reduction.cpp # goose port: bit-identical blocked FP reductions (optimize_loops.h)
-  src/basecase.cpp) # goose port: recursive base-case inlining (optimize_basecase.h)
+  src/basecase.cpp # goose port: recursive base-case inlining (optimize_basecase.h)
+  src/traits.cpp # fsht-02:02 (registry 06.02.01): user-defined traits, static dispatch
+  src/consteval.cpp) # fsht-02:03 (registry 06.03.01): const generics + const fn evaluation
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/PenstockTargets.cmake")
 

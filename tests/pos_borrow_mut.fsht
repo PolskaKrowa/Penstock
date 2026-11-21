@@ -1,0 +1,32 @@
+// fsht-03:02 (registry 03.02.09, ch. 24 §1/§2): &mut borrow
+// expressions + `borrowed mut` parameters; views as shared borrows with
+// the in-place-write carve-out.
+fn fill(borrowed mut p: *i64, n: usize) {
+    for (i in 0..n) { p[i] = (i as i64) * 2; }
+}
+fn sum(borrowed v: Vec<i64>) -> i64 {
+    let mut t: i64 = 0;
+    for (i in 0..v.len) { t += v[i]; }
+    return t;
+}
+fn main() {
+    // the chapter's own example: re-read via the owner is fine
+    let mut buf: [i64; 4] = [0, 0, 0, 0];
+    let r: *i64 = &mut buf[0];
+    fill(r, 4);
+    print_i64(buf[3]); println();
+    // a view may be read, then the container grows AFTER the view's
+    // last use (the borrow expired)
+    let mut v: Vec<i64> = vec_new(i64);
+    vec_push(&mut v, 1);
+    vec_push(&mut v, 2);
+    let s: Span<i64> = vec_slice(v, 0, 2);
+    print_i64(s[1]); println();
+    vec_push(&mut v, 3);
+    // in-place element writes do NOT invalidate views (ch. 24 §2)
+    let s2: Span<i64> = vec_slice(v, 0, 3);
+    v[0] = 9;
+    print_i64(s2[0]); println();
+    // shared reads of a borrowed container
+    print_i64(sum(v)); println();
+}

@@ -1,0 +1,9 @@
+// fsht-03:02 F0310: a growth mutator against a live view of the same
+// storage — reallocation would dangle it (ch. 24 §2).
+fn main() {
+    let mut v: Vec<i64> = vec_new(i64);
+    vec_push(&mut v, 1);
+    let s: Span<i64> = vec_slice(v, 0, 1);
+    vec_push(&mut v, 2);
+    print_i64(s[0]);
+}

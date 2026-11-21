@@ -1,0 +1,105 @@
+// io — files, streams, buffered readers/writers (fsht-03:01,
+// registry 05.05.01; chapter 23 §4).
+//
+//   import io;
+//
+// Reader/Writer are the ownership-tracked handle prelude structs:
+// scope-exit close is automatic and idempotent, reader_close/
+// writer_close pre-empt it (the binding is invalidated — F0301 on
+// later use), and a by-value handle is a move.  Everything composes
+// with `?` and match exactly like any Result (chapter 11).  Readers
+// and writers buffer (64 KiB default block); `reader_read` performs at
+// most one underlying fill per call and `Ok(0)` signals end of file.
+//
+// Error taxonomy (the IoError prelude enum): NotFound, Permission,
+// Eof, Busy, Other(errno).  The runtime returns raw i64 codes; the
+// io_err mapping below turns them into the enum values.
+module io;
+
+// ---------------- runtime bindings (private) ----------------
+// codes: 0 ok, 1 NotFound, 2 Permission, 3 Eof, 4 Busy, 5+ Other
+extern fn frt_reader_open(path: str, out: *Reader) -> i64;
+extern fn frt_reader_stdin(out: *Reader);
+extern fn frt_reader_read(r: *Reader, buf: *u8, cap: u64) -> i64;
+extern fn frt_reader_read_line(r: *Reader, out: *String) -> i64;
+extern fn frt_writer_open(path: str, out: *Writer) -> i64;
+extern fn frt_writer_write(w: *Writer, data: str) -> i64;
+extern fn frt_writer_flush(w: *Writer) -> i64;
+extern fn frt_reader_close(r: *Reader);
+extern fn frt_writer_close(w: *Writer);
+extern fn frt_remove(path: str) -> i64;
+
+fn io_err(code: i64) -> IoError {
+    if (code == 1) { return NotFound; }
+    if (code == 2) { return Permission; }
+    if (code == 3) { return Eof; }
+    if (code == 4) { return Busy; }
+    return Other(code);
+}
+
+// ---------------- readers (ch. 23 §4) ----------------
+pub fn reader_open(path: str) -> Result<Reader, IoError> {
+    let mut r: Reader = Reader { handle: -1 };
+    let e: i64 = frt_reader_open(path, &mut r);
+    if (e == 0) { return Ok(r); }
+    return Err(io_err(e));
+}
+
+pub fn reader_stdin() -> Reader {
+    let mut r: Reader = Reader { handle: -1 };
+    frt_reader_stdin(&mut r);
+    return r;
+}
+
+// fills `buf` up to buf.len; Ok(bytes_read) with Ok(0) = end of file.
+// The buffer span is an out-region: the callee writes through it.
+pub fn reader_read(borrowed mut r: Reader, buf: Span<u8>) -> Result<usize, IoError> {
+    let n: i64 = frt_reader_read(&mut r, buf.ptr, buf.len);
+    if (n >= 0) { return Ok(n as usize); }
+    return Err(io_err(0 - n));
+}
+
+// the next line without its terminator as an owned String (auto-dropped
+// per chapter 24); end of file with no partial line is Err(Eof)
+pub fn reader_read_line(borrowed mut r: Reader) -> Result<String, IoError> {
+    let mut line: String = string_new();
+    let e: i64 = frt_reader_read_line(&mut r, &mut line);
+    if (e == 0) { return Ok(line); }
+    return Err(io_err(e));
+}
+
+pub fn reader_close(borrowed mut r: Reader) {
+    frt_reader_close(&mut r);
+}
+
+// ---------------- writers (ch. 23 §4) ----------------
+pub fn writer_open(path: str) -> Result<Writer, IoError> {
+    let mut w: Writer = Writer { handle: -1 };
+    let e: i64 = frt_writer_open(path, &mut w);
+    if (e == 0) { return Ok(w); }
+    return Err(io_err(e));
+}
+
+pub fn writer_write(borrowed mut w: Writer, data: str) -> Result<usize, IoError> {
+    let n: i64 = frt_writer_write(&mut w, data);
+    if (n >= 0) { return Ok(n as usize); }
+    return Err(io_err(0 - n));
+}
+
+pub fn writer_flush(borrowed mut w: Writer) -> Result<usize, IoError> {
+    let n: i64 = frt_writer_flush(&mut w);
+    if (n >= 0) { return Ok(n as usize); }
+    return Err(io_err(0 - n));
+}
+
+pub fn writer_close(borrowed mut w: Writer) {
+    frt_writer_close(&mut w);
+}
+
+// ---------------- remove (ch. 23 §4) ----------------
+pub fn remove(path: str) -> Result<bool, IoError> {
+    let e: i64 = frt_remove(path);
+    if (e == 1) { return Ok(true); }
+    if (e == 0) { return Err(NotFound); }
+    return Err(io_err(0 - e));
+}

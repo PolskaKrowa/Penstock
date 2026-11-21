@@ -537,52 +537,13 @@ static void checkLoop(FnDecl* fn, FnSema* fs, Stmt* s) {
 void runStrictChecks(Program* p) {
   reportStructLayouts(p);
 
-  // fsht-02:01 (registry 02.09.02): owned containers must stay at value
-  // level.  A Vec<T> inside another aggregate (user struct field, fixed
-  // array element, enum payload, Span element) would need drop
-  // elaboration through that shape — the fsht-02:01 first cut tracks the
-  // binding itself only, so nested shapes are rejected outright.
-  for (auto* sd : allStructDefs()) {
-    if (sd->isGeneric) continue;   // templates bind at instantiation
-    for (auto& f : sd->fields) {
-      if (f.ty && isContainerType(f.ty))
-        diag(Diag::Error, Code::Type,
-             "struct " + sd->name + ": field '" + f.name +
-             "' has owned container type " + typeToString(f.ty) +
-             " — containers nested in aggregates need drop elaboration "
-             "(fsht-02:01 first cut; registry 02.09.02 tracks it); hold the "
-             "container in a let binding instead",
-             sd->loc, "kind=container-nesting");
-    }
-  }
-  for (auto* ed : allEnumDefs()) {
-    if (ed->isGeneric) continue;
-    for (auto& v : ed->variants)
-      for (auto& f : v.fields) {
-        if (f.ty && isContainerType(f.ty))
-          diag(Diag::Error, Code::Type,
-               "enum " + ed->name + ": variant '" + v.name +
-               "' payload has owned container type " + typeToString(f.ty) +
-               " (fsht-02:01 first cut; registry 02.09.02)",
-               ed->loc, "kind=container-nesting");
-      }
-  }
-  {
-    // array element types: [Vec<T>; N] — the element check runs over every
-    // declared binding / param / return the analysis has already typed
-    std::function<void(Type*)> checkArray = [&](Type* t) {
-      if (!t) return;
-      if (t->k == Type::ARRAY && t->pointee && isContainerType(t->pointee)) {
-        diag(Diag::Error, Code::Type,
-             "array of owned containers " + typeToString(t) +
-             " — containers nested in aggregates need drop elaboration "
-             "(fsht-02:01 first cut; registry 02.09.02)",
-             {}, "kind=container-nesting");
-      }
-    };
-    for (auto* fs : allFnSemas())
-      for (auto& sym : fs->allSyms) checkArray(sym.ty);
-  }
+  // fsht-03:02 (registry 02.09.02 lifting / 03.02.10, ch. 24 §5): the
+  // fsht-02:01 "containers stay at value level" restriction is LIFTED —
+  // Vec<T>/String fields, owning element types and containers inside
+  // user shapes are accepted; drop elaboration walks the shape
+  // innermost-first (irgen_stmt.cpp), moves transfer whole-shape and
+  // vec_clone deep-copies element-wise.  Remaining gates keep a light
+  // advisory presence: none.
 
   for (auto* fs : allFnSemas()) {
     FnDecl* fn = fs->fn;

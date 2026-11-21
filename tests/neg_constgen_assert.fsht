@@ -1,0 +1,6 @@
+// fsht-02:03: failed compile-time assertion — F0220.
+const fn square(x: usize) -> usize { return x * x; }
+fn main() {
+    const_assert(square(5) == 24);
+    print("unreachable"); println();
+}

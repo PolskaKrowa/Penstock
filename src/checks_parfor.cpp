@@ -106,6 +106,25 @@ static bool exprImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
   return impure;
 }
 
+// fsht-03:02 (ch. 24 §2): `&mut` inside a dispatched parfor body is
+// F0307 — the container rule generalised.  Shared reads through views
+// remain the supported parallel shape.
+static bool borrowMutImpureInParfor(FnSema* fs, Expr* e, Stmt* pf) {
+  bool impure = false;
+  forEachExprAdapter(e, [&](Expr* x) {
+    if (x->k == Expr::UN && x->op == "&" && x->borrowMut) {
+      diag(Diag::Error, Code::Thread,
+           "mutable borrow (&mut) inside parfor — the body may run "
+           "concurrently on multiple lanes; shared reads through views "
+           "are the supported parallel shape (ch. 24 §2)",
+           x->loc, "kind=borrow-mut");
+      impure = true;
+    }
+  });
+  (void)fs; (void)pf;
+  return impure;
+}
+
 // ---------------------------------------------------------------- nested R2
 // Returns true if inner parfor bounds are independent of outer var
 // (rectangular — eligible for collapse).
@@ -269,6 +288,9 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
         else if (s->k == Stmt::RETURN) ex = s->retVal;
         else { exprImpureInParfor(fs, s->rhs, pf); ex = s->lhs; }
         exprImpureInParfor(fs, ex, pf);
+        // fsht-03:02: &mut inside a dispatched body (ch. 24 §2 → F0307)
+        borrowMutImpureInParfor(fs, ex, pf);
+        if (s->k == Stmt::ASSIGN) borrowMutImpureInParfor(fs, s->rhs, pf);
         break;
       }
       case Stmt::IF: walkImpure(s->thenB); walkImpure(s->elseB); break;

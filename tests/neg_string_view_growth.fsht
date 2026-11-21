@@ -1,0 +1,8 @@
+// fsht-03:02 F0310: string_append growth against a live str view
+// (ch. 24 §4: str_of views are shared borrows of the String).
+fn main() {
+    let mut s: String = string_from("hi");
+    let view: str = str_of(&s);
+    string_append(&mut s, "there");
+    print(view);
+}

@@ -72,27 +72,41 @@ struct DeferEntry {
 };
 static std::vector<DeferEntry> g_defers;
 
-// ---------------- fsht-02:01 container drop stack (registry 02.09.02)
-// Scope-exit destruction for owned Vec<T> bindings, mirroring the defer
-// stack's lifecycle exactly: entries push at the LET (and for by-value
-// container params, which own their copy from fn entry), every scope
+// ---------------- fsht-02:01 container drop stack (registry 02.09.02) -----
+// Scope-exit destruction for owned bindings, mirroring the defer stack's
+// lifecycle exactly: entries push at the LET (and for by-value container/
+// owning parameters, which own their copy from fn entry), every scope
 // exit flushes its own entries in reverse declaration order, break /
 // continue flush the loop body's entries, and returns flush everything
-// (emitDeferredAll).  The runtime frees only a non-null data pointer and
-// nulls it after every transfer/free, so a moved-from or manually freed
-// binding's drop is a no-op — drops are idempotent and cannot double-free.
-// The prelude String deliberately stays on its fsht-01:01 manual model
-// (string_free) in this increment: str views routinely escape via
-// str_of(), so auto-drop awaits the lifetime analysis of fsht-03:02.
+// (emitDeferredAll).
+//
+// fsht-03:02 (registry 02.06.01 update / 03.02.10, ch. 24 §4–§5): the
+// drop became SHAPE-AWARE.  A drop walks the value's shape:
+//   * String                -> frt_string_free (the migration: auto-drop)
+//   * Reader / Writer       -> frt_reader_close / frt_writer_close
+//                              (ownership-tracked handles, idempotent)
+//   * Vec<T> plain          -> frt_vec_free
+//   * Vec<T> owning elems   -> element drops (innermost-first), then
+//                              frt_vec_free
+//   * struct/array/enum     -> owning fields/elements/variant payloads
+// The runtime frees only a non-null data pointer and nulls it after
+// every transfer/free, so a moved-from or manually freed binding's drop
+// is a no-op — drops are idempotent and cannot double-free.
 struct DropEntry {
-  std::string alloca;   // the container binding's slot
+  std::string alloca;   // the binding's slot
+  Type* ty = nullptr;  // the binding's (shape) type
 };
 static std::vector<DropEntry> g_drops;
 
 size_t containerDropDepth() { return g_drops.size(); }
 
+// forward decls (the shape walkers live after emitDeferredAll)
+static void emitShapeDrop(const std::string& addr, Type* ty);
+static void emitShapeMoveInvalidate(const std::string& addr, Type* ty);
+static void emitShapeInit(const std::string& addr, Type* ty);
+
 static void emitDropEntry(const DropEntry& d) {
-  G->out << "  call void @frt_vec_free(ptr " << d.alloca << ")\n";
+  emitShapeDrop(d.alloca, d.ty);
 }
 
 // flush every pending drop (reverse order) — return paths and fn end
@@ -106,28 +120,72 @@ static void emitLoopDrops(size_t base) {
   for (size_t i = g_drops.size(); i > base; --i) emitDropEntry(g_drops[i - 1]);
 }
 
-// fsht-02:01: a by-value transfer of a Vec<T> (let-move, assignment,
-// call argument, return) leaves the source binding inert — store null
-// over its data field (field 0).  `e` may be the give()-wrapped form.
+// does this binding type need a scope-exit drop entry at all?
+static bool typeWantsDrop(Type* t) {
+  if (!t) return false;
+  return isContainerType(t) || typeNeedsDrop(t);
+}
+
+// fsht-02:01 (+03:02 shapes): a by-value transfer (let-move, assignment,
+// call argument, return) leaves the source binding inert — the transfer
+// NULLS the owning roots of the source shape (ch. 24 §4/§5: whole-shape
+// moves, no partial invalidation).  `e` may be the give()-wrapped form.
 void nullContainerSource(Expr* src, Type* cty) {
-  if (!src || !cty || !containerElemType(cty)) return;   // Vec only
+  if (!src || !cty || !typeWantsDrop(cty)) return;
   Expr* r = src;
+  // unwrap give(...)
   if (r->k == Expr::CALL && r->name == "give" && !r->args.empty())
     r = r->args[0];
+  // fsht-03:02: unwrap variant construction — `return Ok(v);` moves the
+  // binding's value INTO the returned enum's payload; the local binding
+  // must be invalidated or its scope-exit drop would close/free what the
+  // caller now owns (the io wrappers' Ok(handle) returns)
+  Type* inner = cty;
+  while (r && r->k == Expr::CALL && r->enumRef && r->variantIdx >= 0 &&
+         !r->args.empty() && r->args[0]) {
+    EnumVariant* v = nullptr;
+    for (auto& vv : r->enumRef->variants)
+      if (vv.idx == r->variantIdx) { v = &vv; break; }
+    if (!v || v->fields.empty()) { r = nullptr; break; }
+    inner = v->fields[0].ty;
+    r = r->args[0];
+  }
   if (!r || r->k != Expr::IDENT || !r->sym) return;   // temporaries own nothing
   std::string addr = G->varAllocas[r->name];
   if (addr.empty()) return;
-  std::string fp = G->t();
-  G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(cty)
-         << ", ptr " << addr << ", i32 0, i32 0\n";
-  G->out << "  store ptr null, ptr " << fp
-         << "  ; fsht-02:01 move — source binding invalidated\n";
+  emitShapeMoveInvalidate(addr, inner ? inner : cty);
 }
 
-// push a scope-exit drop for a container binding slot (Vec<T> only)
+// push a scope-exit drop for an owned binding slot
 void pushContainerDrop(const std::string& alloca, Type* cty) {
-  if (!cty || !containerElemType(cty)) return;
-  g_drops.push_back({alloca});
+  if (!typeWantsDrop(cty)) return;
+  g_drops.push_back({alloca, cty});
+}
+
+// ---------------- fsht-03:02 statement-local owning temporaries --------
+struct TempDrop {
+  std::string addr;
+  Type* ty = nullptr;
+  bool consumed = false;   // bytes copied out — ownership transferred
+};
+static std::vector<TempDrop> g_tempDrops;
+
+void registerOwningTemp(const std::string& addr, Type* ty) {
+  if (!typeWantsDrop(ty)) return;
+  g_tempDrops.push_back({addr, ty, false});
+}
+
+void markTempConsumed(const std::string& addr) {
+  for (auto& t : g_tempDrops)
+    if (t.addr == addr) { t.consumed = true; return; }
+}
+
+// statement end: un-consumed owning temporaries drop here (idempotent,
+// safe under the nulled-root discipline); consumed ones transferred.
+void flushTempDrops() {
+  for (auto& t : g_tempDrops)
+    if (!t.consumed) emitShapeDrop(t.addr, t.ty);
+  g_tempDrops.clear();
 }
 
 // irgen_parfor.cpp pushes LoopCtx entries whose deferBase must match the
@@ -149,6 +207,7 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   g_defers.clear();
   g_drops.clear();
   varAllocas.clear();
+  g_tempDrops.clear();
 
   // PGO function counter
   int fnSite = f->profIdx;
@@ -293,6 +352,11 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
       out << "  " << a << " = alloca " << ty << ", align " << align << "\n";
     }
     varAllocas[sym.name] = a;
+    // fsht-03:02: OWNING bindings zero-initialise their slot at entry —
+    // a drop reached on a path that skipped the binding's LET (a match
+    // arm that did not run, an early ? exit) then sees null roots and is
+    // an idempotent no-op instead of freeing garbage
+    if (typeWantsDrop(sym.ty)) emitShapeInit(a, sym.ty);
   }
   // store params into allocas
   for (auto& pm : f->params) {
@@ -305,8 +369,11 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
           << ", i1 false)\n";
       // fsht-02:01: a by-value Vec<T> parameter moves its ownership in
       // (the caller nulls its side after the call) — the callee's copy is
-      // dropped at fn exit like any container binding
-      pushContainerDrop(varAllocas[pm.name], pt);
+      // dropped at fn exit like any container binding.  fsht-03:02:
+      // `borrowed` / `borrowed mut` parameters never drop — the caller
+      // owns the storage and keeps it (ch. 24 §1).
+      if (!pm.borrowed && !pm.borrowedMut)
+        pushContainerDrop(varAllocas[pm.name], pt);
     } else {
       // scalars, pointers, SOA descriptors (a ptr value) and pair
       // aggregates all store directly
@@ -402,6 +469,334 @@ void emitDeferredAll() {
   emitContainerDropsAll();
 }
 
+// ================================================== fsht-03:02 shapes
+// registry 03.02.10 (ch. 24 §5): drop elaboration through user shapes,
+// the String migration's auto-drop (§4) and the Reader/Writer handle
+// lifecycle (ch. 23 §4).  The walkers emit IR for one value AT `addr`.
+// Element loops are emitted as full preheader loops (labels are local
+// and self-contained, so the walkers work anywhere a statement ends).
+
+// one element of `ty` at (data + i*esz) — helper shared by drop/clone
+static std::string emitElemAddr(const std::string& data, const std::string& i,
+                                Type* elem) {
+  std::string ea = G->t();
+  G->out << "  " << ea << " = getelementptr inbounds " << G->llvmType(elem)
+         << ", ptr " << data << ", i64 " << i << "\n";
+  return ea;
+}
+
+// `for i in 0..len(vec): body(i)` — preheader loop over the vec's buffer
+static void emitVecElemLoop(Type* vecTy, const std::string& addr,
+                            const std::function<void(const std::string& idx,
+                                                     const std::string& data)>& body) {
+  std::string lenp = G->t(), len = G->t();
+  G->out << "  " << lenp << " = getelementptr inbounds "
+         << G->llvmType(vecTy) << ", ptr " << addr << ", i32 0, i32 1\n";
+  G->out << "  " << len << " = load i64, ptr " << lenp << "\n";
+  std::string datp = G->t(), data = G->t();
+  G->out << "  " << datp << " = getelementptr inbounds "
+         << G->llvmType(vecTy) << ", ptr " << addr << ", i32 0, i32 0\n";
+  G->out << "  " << data << " = load ptr, ptr " << datp << "\n";
+  int pre = G->bb++, loop = G->bb++, end = G->bb++;
+  G->out << "  br label %" << G->l(pre) << "\n";
+  G->out << G->l(pre) << ":\n";
+  G->out << "  br label %" << G->l(loop) << "\n";
+  G->out << G->l(loop) << ":\n";
+  // the increment is computed at the LOOP TOP so every register is
+  // allocated in emission order (LLVM textual numbering is monotonic);
+  // the phi's back-edge operand is then defined before the body
+  int guarded = G->bb++, join = G->bb++;
+  std::string i = G->t(), inext = G->t();
+  // the back-edge comes from the JOIN block (the guard's merge), which
+  // is where the loop-condition branch lives
+  G->out << "  " << i << " = phi i64 [0, %" << G->l(pre) << "], ["
+         << inext << ", %" << G->l(join) << "]\n";
+  G->out << "  " << inext << " = add i64 " << i << ", 1\n";
+  // guard: skip when data is null (moved-from / freed container)
+  std::string dataOk = G->t();
+  G->out << "  " << dataOk << " = icmp ne ptr " << data << ", null\n";
+  G->out << "  br i1 " << dataOk << ", label %" << G->l(guarded)
+         << ", label %" << G->l(join) << "\n";
+  G->out << G->l(guarded) << ":\n";
+  body(i, data);
+  G->out << "  br label %" << G->l(join) << "\n";
+  G->out << G->l(join) << ":\n";
+  std::string more = G->t();
+  G->out << "  " << more << " = icmp slt i64 " << inext << ", " << len
+         << "\n";
+  G->out << "  br i1 " << more << ", label %" << G->l(loop) << ", label %"
+         << G->l(end) << "\n";
+  G->out << G->l(end) << ":\n";
+}
+
+// destroy the owning shape at `addr` (idempotent through nulled roots)
+static void emitShapeDrop(const std::string& addr, Type* ty) {
+  if (!ty || !typeWantsDrop(ty)) return;
+  // String: the migration's auto-drop (ch. 24 §4)
+  if (ty->k == Type::STRUCT && ty->sdef && ty->sdef->name == "String") {
+    G->out << "  call void @frt_string_free(ptr " << addr
+           << ")  ; fsht-03:02 String auto-drop\n";
+    return;
+  }
+  // Reader / Writer handles: scope-exit close, idempotent (ch. 23 §4)
+  if (isHandleType(ty)) {
+    G->out << "  call void @frt_"
+           << (ty->sdef->name == "Reader" ? "reader" : "writer")
+           << "_close(ptr " << addr
+           << ")  ; fsht-03:01 handle scope-exit close\n";
+    return;
+  }
+  // Vec<T>: owning elements drop innermost-first, then the buffer
+  if (isContainerType(ty)) {
+    Type* elem = containerElemType(ty);
+    if (elem && typeNeedsDrop(elem))
+      emitVecElemLoop(ty, addr, [&](const std::string& i,
+                                    const std::string& data) {
+        emitShapeDrop(emitElemAddr(data, i, elem), elem);
+      });
+    G->out << "  call void @frt_vec_free(ptr " << addr << ")\n";
+    return;
+  }
+  // user struct: drop each owning field (inline value at its offset)
+  if (ty->k == Type::STRUCT && ty->sdef) {
+    for (auto& f : ty->sdef->fields) {
+      if (!f.ty || !typeNeedsDrop(f.ty)) continue;
+      std::string fa = G->t();
+      G->out << "  " << fa << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i32 0, i32 "
+             << f.idx << "\n";
+      emitShapeDrop(fa, f.ty);
+    }
+    return;
+  }
+  // fixed array of owning elements: unrolled element drops
+  if (ty->k == Type::ARRAY && typeNeedsDrop(ty->pointee)) {
+    for (uint64_t i = 0; i < ty->arrLen; ++i) {
+      std::string ea = G->t();
+      G->out << "  " << ea << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i64 0, i64 " << i
+             << "\n";
+      emitShapeDrop(ea, ty->pointee);
+    }
+    return;
+  }
+  // enum with owning payloads: conditional drop of the LIVE variant only
+  if (ty->k == Type::ENUM && ty->edef) {
+    EnumDef* ed = ty->edef;
+    bool anyOwning = false;
+    for (auto& v : ed->variants)
+      for (auto& f : v.fields)
+        if (typeNeedsDrop(f.ty)) anyOwning = true;
+    if (!anyOwning) return;
+    std::string tagp = G->t(), tag = G->t();
+    G->out << "  " << tagp << " = getelementptr inbounds "
+           << G->llvmType(ty) << ", ptr " << addr << ", i32 0, i32 0\n";
+    G->out << "  " << tag << " = load i64, ptr " << tagp << "\n";
+    int next = G->bb++;
+    G->out << "  br label %" << G->l(next) << "\n";
+    G->out << G->l(next) << ":\n";
+    for (auto& v : ed->variants) {
+      bool variantOwning = false;
+      for (auto& f : v.fields)
+        if (typeNeedsDrop(f.ty)) variantOwning = true;
+      if (!variantOwning) continue;
+      int vBb = G->bb++;
+      int after = G->bb++;
+      std::string isv = G->t();
+      G->out << "  " << isv << " = icmp eq i64 " << tag << ", " << v.idx
+             << "\n";
+      G->out << "  br i1 " << isv << ", label %" << G->l(vBb) << ", label %"
+             << G->l(after) << "\n";
+      G->out << G->l(vBb) << ":\n";
+      for (size_t fi = 0; fi < v.fields.size(); ++fi) {
+        Type* ft = v.fields[fi].ty;
+        if (!typeNeedsDrop(ft)) continue;
+        std::string pay = G->t();
+        G->out << "  " << pay << " = getelementptr i8, ptr " << addr
+               << ", i64 " << (8 + v.offsets[fi]) << "\n";
+        emitShapeDrop(pay, ft);
+      }
+      G->out << "  br label %" << G->l(after) << "\n";
+      G->out << G->l(after) << ":\n";
+    }
+    return;
+  }
+}
+
+// null the owning roots of the shape at `addr` (a move's source side);
+// whole-shape transfer — the container root moves atomically
+static void emitShapeMoveInvalidate(const std::string& addr, Type* ty) {
+  if (!ty || !typeWantsDrop(ty)) return;
+  if (ty->k == Type::STRUCT && ty->sdef && ty->sdef->name == "String") {
+    std::string fp = G->t();
+    G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(ty)
+           << ", ptr " << addr << ", i32 0, i32 0\n";
+    G->out << "  store ptr null, ptr " << fp
+           << "  ; move — source String invalidated\n";
+    return;
+  }
+  if (isHandleType(ty)) {
+    std::string hp = G->t();
+    G->out << "  " << hp << " = getelementptr inbounds " << G->llvmType(ty)
+           << ", ptr " << addr << ", i32 0, i32 0\n";
+    G->out << "  store i64 -1, ptr " << hp
+           << "  ; move — source handle closed (-1)\n";
+    return;
+  }
+  if (isContainerType(ty)) {
+    std::string fp = G->t();
+    G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(ty)
+           << ", ptr " << addr << ", i32 0, i32 0\n";
+    G->out << "  store ptr null, ptr " << fp
+           << "  ; move — source binding invalidated\n";
+    return;
+  }
+  if (ty->k == Type::STRUCT && ty->sdef) {
+    for (auto& f : ty->sdef->fields) {
+      if (!f.ty || !typeNeedsDrop(f.ty)) continue;
+      std::string fa = G->t();
+      G->out << "  " << fa << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i32 0, i32 "
+             << f.idx << "\n";
+      emitShapeMoveInvalidate(fa, f.ty);
+    }
+    return;
+  }
+  if (ty->k == Type::ARRAY && typeNeedsDrop(ty->pointee)) {
+    for (uint64_t i = 0; i < ty->arrLen; ++i) {
+      std::string ea = G->t();
+      G->out << "  " << ea << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i64 0, i64 " << i
+             << "\n";
+      emitShapeMoveInvalidate(ea, ty->pointee);
+    }
+    return;
+  }
+}
+
+// zero-initialise an owning binding slot: null roots everywhere (a
+// handle field takes -1 = closed), so a drop on a skipped path is safe
+static void emitShapeInit(const std::string& addr, Type* ty) {
+  if (!ty || !typeWantsDrop(ty)) return;
+  if (isHandleType(ty)) {
+    G->out << "  store i64 -1, ptr " << addr << "  ; handle slot init\n";
+    return;
+  }
+  if (isContainerType(ty) ||
+      (ty->k == Type::STRUCT && ty->sdef && ty->sdef->name == "String")) {
+    // null the data field (field 0); len/cap are inert without it
+    std::string fp = G->t();
+    G->out << "  " << fp << " = getelementptr inbounds " << G->llvmType(ty)
+           << ", ptr " << addr << ", i32 0, i32 0\n";
+    G->out << "  store ptr null, ptr " << fp << "\n";
+    return;
+  }
+  if (ty->k == Type::STRUCT && ty->sdef) {
+    for (auto& f : ty->sdef->fields) {
+      if (!f.ty || !typeNeedsDrop(f.ty)) continue;
+      std::string fa = G->t();
+      G->out << "  " << fa << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i32 0, i32 "
+             << f.idx << "\n";
+      emitShapeInit(fa, f.ty);
+    }
+    return;
+  }
+  if (ty->k == Type::ARRAY && typeNeedsDrop(ty->pointee)) {
+    for (uint64_t i = 0; i < ty->arrLen; ++i) {
+      std::string ea = G->t();
+      G->out << "  " << ea << " = getelementptr inbounds "
+             << G->llvmType(ty) << ", ptr " << addr << ", i64 0, i64 " << i
+             << "\n";
+      emitShapeInit(ea, ty->pointee);
+    }
+    return;
+  }
+  if (ty->k == Type::ENUM && ty->edef) {
+    // tag 0 with zeroed payload: no owning variant fires
+    G->out << "  store i64 0, ptr " << addr << "  ; enum slot init\n";
+  }
+}
+
+// deep-copy the elements of an ALREADY-SHALLOW-CLONED container at `dst`
+// (in place — the elements still point at the source's inner storage).
+// String elements: string_clone (aliasing-safe); nested Vecs: the
+// aliased vec clone + recursion.
+void emitDeepCloneElems(const std::string& dst, Type* ty);
+
+// full-shape deep copy dst <- src (dst and src are distinct slots)
+void emitShapeCloneInto(const std::string& dst, const std::string& srcIn,
+                        Type* ty) {
+  if (!ty || !typeNeedsDrop(ty)) return;
+  if (ty->k == Type::STRUCT && ty->sdef && ty->sdef->name == "String") {
+    G->out << "  call void @frt_string_clone(ptr " << dst << ", ptr "
+           << srcIn << ")\n";
+    return;
+  }
+  if (isContainerType(ty)) {
+    Type* elem = containerElemType(ty);
+    // aliased-safe: the runtime reads src's (data,len) BEFORE writing dst
+    G->out << "  call void @frt_vec_clone_aliased(ptr " << dst << ", ptr "
+           << srcIn << ", i64 " << (int64_t)typeSizeOf(elem) << ")\n";
+    if (elem && typeNeedsDrop(elem)) emitDeepCloneElems(dst, ty);
+    return;
+  }
+  if (ty->k == Type::STRUCT && ty->sdef) {
+    for (auto& f : ty->sdef->fields) {
+      if (!f.ty || !typeNeedsDrop(f.ty)) continue;
+      std::string d = G->t(), s = G->t();
+      G->out << "  " << d << " = getelementptr inbounds " << G->llvmType(ty)
+             << ", ptr " << dst << ", i32 0, i32 " << f.idx << "\n";
+      G->out << "  " << s << " = getelementptr inbounds " << G->llvmType(ty)
+             << ", ptr " << srcIn << ", i32 0, i32 " << f.idx << "\n";
+      emitShapeCloneInto(d, s, f.ty);
+    }
+    return;
+  }
+  if (ty->k == Type::ARRAY && typeNeedsDrop(ty->pointee)) {
+    for (uint64_t i = 0; i < ty->arrLen; ++i) {
+      std::string d = G->t(), s = G->t();
+      G->out << "  " << d << " = getelementptr inbounds " << G->llvmType(ty)
+             << ", ptr " << dst << ", i64 0, i64 " << i << "\n";
+      G->out << "  " << s << " = getelementptr inbounds " << G->llvmType(ty)
+             << ", ptr " << srcIn << ", i64 0, i64 " << i << "\n";
+      emitShapeCloneInto(d, s, ty->pointee);
+    }
+    return;
+  }
+}
+
+// in-place deep clone of a shallow-cloned container's elements
+void emitDeepCloneElems(const std::string& dst, Type* ty) {
+  if (!ty || !isContainerType(ty)) return;
+  Type* elem = containerElemType(ty);
+  if (!elem || !typeNeedsDrop(elem)) return;
+  emitVecElemLoop(ty, dst, [&](const std::string& i,
+                               const std::string& data) {
+    std::string ea = emitElemAddr(data, i, elem);
+    if (elem->k == Type::STRUCT && elem->sdef &&
+        elem->sdef->name == "String") {
+      G->out << "  call void @frt_string_clone(ptr " << ea << ", ptr " << ea
+             << ")\n";
+    } else if (isContainerType(elem)) {
+      // nested Vec: aliased in-place clone of this level, then recurse
+      G->out << "  call void @frt_vec_clone_aliased(ptr " << ea << ", ptr "
+             << ea << ", i64 "
+             << (int64_t)typeSizeOf(containerElemType(elem)) << ")\n";
+      emitDeepCloneElems(ea, elem);
+    } else if (elem->k == Type::STRUCT && elem->sdef) {
+      for (auto& f : elem->sdef->fields) {
+        if (!f.ty || !typeNeedsDrop(f.ty)) continue;
+        std::string fa = G->t();
+        G->out << "  " << fa << " = getelementptr inbounds "
+               << G->llvmType(elem) << ", ptr " << ea << ", i32 0, i32 "
+               << f.idx << "\n";
+        emitShapeCloneInto(fa, fa, f.ty);
+      }
+    }
+  });
+}
+
 // run the defers registered inside the current loop body (indices >=
 // base) before a break/continue branches out
 static void emitLoopDefers(size_t base) {
@@ -430,13 +825,15 @@ void genStmt(Stmt* s) {
           // aggregate by address: copy the value's storage into the var
           G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << a << ", ptr "
                  << v << ", i64 " << typeSizeOf(dt) << ", i1 false)\n";
-          // fsht-02:01 (registry 02.09.02): container bindings own their
-          // heap buffer — register the scope-exit drop, and an IDENT-
-          // rooted initialiser is a MOVE (the source binding is nulled,
-          // the ownership analysis rejects later uses of it)
-          if (isContainerType(dt)) {
+          // fsht-02:01 (registry 02.09.02) + fsht-03:02 (shapes): owned
+          // bindings register the scope-exit drop; an IDENT-rooted
+          // initialiser is a MOVE (source binding nulled).  A TEMPORARY
+          // initialiser's bytes just moved into the binding — the temp
+          // transfers ownership (never drops; no alias double-free).
+          if (typeWantsDrop(dt)) {
             pushContainerDrop(a, dt);
             nullContainerSource(s->init, dt);
+            markTempConsumed(v);
           }
         } else if (dt && dt->k == Type::SOA) {
           G->out << "  store ptr " << v << ", ptr " << a << "\n";
@@ -467,6 +864,9 @@ void genStmt(Stmt* s) {
                  << ", ptr " << a << "\n";
         }
       }
+      // fsht-03:02: owning temporaries created by this statement's
+      // initialiser and consumed by nothing drop here
+      flushTempDrops();
       break;
     }
     case Stmt::ASSIGN: {
@@ -551,9 +951,11 @@ void genStmt(Stmt* s) {
           std::string v = G->t();
           G->out << "  " << v << " = load " << G->llvmType(rt) << ", ptr "
                  << src << "\n";
-          // fsht-02:01: returning a container moves it out — null the
-          // source binding so the pending scope-exit drop is a no-op
+          // fsht-02:01 (+03:02 shapes): returning an owned value moves it
+          // out — null the source binding (a temp source transferred)
           nullContainerSource(s->retVal, rt);
+          markTempConsumed(src);
+          flushTempDrops();
           emitDeferredAll();
           G->out << "  ret " << G->llvmType(rt) << " " << v
                  << G->dbg(s->loc.line, s->loc.col) << "\n";
@@ -625,6 +1027,9 @@ void genStmt(Stmt* s) {
     }
     case Stmt::EXPR: {
       genExpr(s->expr);
+      // fsht-03:02: owning temporaries of this expression statement drop
+      // here (a String constructed for a view read, a discarded result)
+      flushTempDrops();
       break;
     }
     case Stmt::BLOCK: {
@@ -728,6 +1133,7 @@ void genStmt(Stmt* s) {
       G->out << G->l(hdr) << ":\n";
       G->curLabelTerminated = false;
       std::string c = genExpr(s->cond);
+      flushTempDrops();   // fsht-03:02: condition temporaries die here
       G->out << "  br i1 " << c << ", label %" << G->l(body) << ", label %"
              << G->l(exit) << G->dbg(s->loc.line) << "\n";
       G->terminate();
@@ -865,6 +1271,10 @@ void genStmt(Stmt* s) {
     // Phase 1d (report §4.3/§4.4): match — tag dispatch on the enum value
     case Stmt::MATCH: {
       std::string sv = genExpr(s->matchOn);   // enum value = address
+      // fsht-03:02: payload extraction copies out of the scrutinee — a
+      // temporary scrutinee transfers ownership (arms bind payloads)
+      markTempConsumed(sv);
+      flushTempDrops();
       Type* st = s->matchOn->ty;
       EnumDef* ed = st->edef;
       std::string tagp = G->t();
@@ -921,6 +1331,14 @@ void genStmt(Stmt* s) {
               G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << dst
                      << ", ptr " << fp << ", i64 " << typeSizeOf(ft)
                      << ", i1 false)\n";
+              // fsht-03:02 (ch. 24 §4/§5): a payload binding owning
+              // storage (String out of a Result) drops at THE ARM's own
+              // exit (below, after the body) — never the fn's, so an
+              // arm that did not run never drops garbage.  The payload
+              // MOVES out of the scrutinee (invalidate its source copy)
+              // — otherwise the scrutinee binding's own drop would
+              // double-free it.
+              if (typeWantsDrop(ft)) emitShapeMoveInvalidate(fp, ft);
             } else if (ft->isPair()) {
               std::string val = G->t();
               G->out << "  " << val << " = load { ptr, i64 }, ptr " << fp
@@ -931,12 +1349,26 @@ void genStmt(Stmt* s) {
               std::string val = G->t();
               G->out << "  " << val << " = load " << G->llvmType(ft)
                      << ", ptr " << fp << "\n";
+              // the payload slot uses the i8 C ABI while bool BINDINGS
+              // are i1 slots — narrow at the boundary
+              if (ft->k == Type::BOOL) {
+                std::string w = G->t();
+                G->out << "  " << w << " = trunc i8 " << val << " to i1\n";
+                val = w;
+              }
               G->out << "  store " << G->scalarCodegenTy(ft) << " " << val
                      << ", ptr " << dst << "\n";
             }
           }
         }
         genStmt(arm.body);
+        // the arm's owning payload binding drops with the ARM's exit
+        if (!arm.wildcard && arm.variantIdx >= 0 && !G->curLabelTerminated) {
+          EnumVariant& dv = ed->variants[arm.variantIdx];
+          for (size_t b = 0; b < arm.bindings.size() && b < dv.fields.size(); ++b)
+            if (dv.fields[b].ty && typeWantsDrop(dv.fields[b].ty))
+              emitShapeDrop(G->varAllocas[arm.bindings[b]], dv.fields[b].ty);
+        }
         if (!G->curLabelTerminated) {
           G->out << "  br label %" << G->l(joinBB) << "\n";
           G->terminate();

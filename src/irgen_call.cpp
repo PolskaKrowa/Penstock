@@ -7,8 +7,58 @@ namespace freshet {
 
 extern IrGen* G;
 
+// fsht-03:01 (registry 08.01.04, ch. 23 §2–§3): build an Option<T>
+// aggregate (tag + payload) from an i1 found-flag and the element's
+// scalar REGISTER value — the variant-family analogue of the vec
+// fallible-access builders (which read the element through an out slot).
+static std::string genOptionFromReg(Expr* e, Type* elem,
+                                    const std::string& found,
+                                    const std::string& val) {
+  Type* ot = e->ty;
+  if (!ot || ot->k != Type::ENUM || !ot->edef) {
+    // defensive: sema should always have produced Option<T> here
+    return val;
+  }
+  EnumDef* ed = ot->edef;
+  int someIdx = 0, noneIdx = 1;
+  for (auto& v : ed->variants) {
+    if (v.name == "Some") someIdx = v.idx;
+    if (v.name == "None") noneIdx = v.idx;
+  }
+  std::string slot = G->t();
+  G->out << "  " << slot << " = alloca " << G->llvmType(ot) << ", align "
+         << ed->align << "\n";
+  std::string tag = G->t();
+  G->out << "  " << tag << " = select i1 " << found << ", i64 " << someIdx
+         << ", i64 " << noneIdx << "\n";
+  G->out << "  store i64 " << tag << ", ptr " << slot << "\n";
+  const EnumVariant& sv = ed->variants[someIdx];
+  if (!sv.fields.empty()) {
+    Type* ft = sv.fields[0].ty;
+    std::string pay = G->t();
+    G->out << "  " << pay << " = getelementptr i8, ptr " << slot
+           << ", i64 " << (8 + sv.offsets[0]) << "\n";
+    // bool VALUES are i1 registers while the slot uses the i8 C ABI
+    std::string v = val;
+    if (ft && ft->k == Type::BOOL) {
+      std::string w = G->t();
+      G->out << "  " << w << " = zext i1 " << val << " to i8\n";
+      v = w;
+    }
+    G->out << "  store " << G->llvmType(ft) << " " << v << ", ptr " << pay
+           << "\n";
+  }
+  return slot;
+}
+
 static std::string genArg(Expr* a, Type* paramTy) {
   std::string v = genExpr(a);
+  // fsht-03:02: an owning TEMPORARY passed by-address to an aggregate
+  // parameter is consumed (the callee memcpy's it out and drops its
+  // copy) — mark it so the statement-end flush never double-drops
+  if (paramTy && (paramTy->k == Type::STRUCT || paramTy->k == Type::ENUM ||
+                  paramTy->k == Type::ARRAY))
+    markTempConsumed(v);
   // bool parameters use the i8 C ABI at the call boundary while bool
   // VALUES are i1 registers (comparisons, literals) — widen here
   if (paramTy && paramTy->k == Type::BOOL && a->ty &&
@@ -465,6 +515,9 @@ std::string genCall(Expr* e) {
              << ")\n";
     }
     (void)sd;
+    // fsht-03:02: the temporary owns its fresh buffer — drops at the
+    // statement's end unless a binding/callee consumed it
+    registerOwningTemp(out, e->ty);
     return out;
   }
   if (n == "string_append" || n == "string_free" || n == "str_of") {
@@ -501,6 +554,554 @@ std::string genCall(Expr* e) {
     G->out << "  " << v2 << " = insertvalue { ptr, i64 } " << v1 << ", i64 "
            << len << ", 1\n";
     return v2;
+  }
+  // fsht-03:02 (ch. 24 §4): the String migration's new builtins
+  if (n == "string_clone") {
+    std::string out = G->t();
+    G->out << "  " << out << " = alloca %struct.String, align 8\n";
+    std::string sp = genExpr(e->args[0]);
+    G->out << "  call void @frt_string_clone(ptr " << out << ", ptr " << sp
+           << ")\n";
+    registerOwningTemp(out, e->ty);
+    return out;
+  }
+  if (n == "string_clear") {
+    std::string sp = genExpr(e->args[0]);
+    G->out << "  call void @frt_string_clear(ptr " << sp << ")\n";
+    return "";
+  }
+
+  // ------------- fsht-03:01 (registry 08.01.04, ch. 23 §2–§3) -------------
+  // The checked / saturating / wrapping variant family over integer
+  // scalar T at the exact source width.  Both operands share T (sema
+  // enforced; literal adoption retyped them), so one llvmType fits.
+  auto isVariantFamily = [&](const char* prefix) {
+    return e->args.size() == 2 && e->args[0]->ty && e->args[0]->ty->isInt() &&
+           e->args[1]->ty && e->args[1]->ty->isInt() &&
+           e->args[0]->ty->k == e->args[1]->ty->k &&
+           n.rfind(prefix, 0) == 0;
+  };
+  if (isVariantFamily("checked_") || isVariantFamily("saturating_") ||
+      isVariantFamily("wrapping_")) {
+    Type* t = e->args[0]->ty;
+    std::string tk = G->llvmType(t);
+    bool sgn = t->isSigned();
+    std::string a = genExpr(e->args[0]);
+    std::string b = genExpr(e->args[1]);
+    if (e->args[0]->ty->bits() != t->bits())  // defensive: unify at T
+      a = genCastInline(e->args[0], t, a);
+    if (e->args[1]->ty->bits() != t->bits())
+      b = genCastInline(e->args[1], t, b);
+    // ---- wrapping_*: exactly the plain operators (explicit, not different)
+    if (n == "wrapping_add" || n == "wrapping_sub" || n == "wrapping_mul") {
+      std::string r = G->t();
+      std::string op = n == "wrapping_add" ? "add"
+                     : n == "wrapping_sub" ? "sub" : "mul";
+      G->out << "  " << r << " = " << op << " " << tk << " " << a << ", " << b
+             << "  ; " << n << " == the plain (wrapping) operator\n";
+      return r;
+    }
+    // ---- saturating_*: overflow-intrinsic + clamp select
+    if (n == "saturating_add" || n == "saturating_sub" ||
+        n == "saturating_mul") {
+      // bound constants for T
+      char minbuf[40], maxbuf[40];
+      uint64_t umax;
+      if (sgn) {
+        int64_t mn = t->bits() == 64
+            ? INT64_MIN : (int64_t(-1) << (t->bits() - 1));
+        int64_t mx = t->bits() == 64
+            ? INT64_MAX : (int64_t)((1ULL << (t->bits() - 1)) - 1ULL);
+        snprintf(minbuf, sizeof minbuf, "%lld", (long long)mn);
+        snprintf(maxbuf, sizeof maxbuf, "%lld", (long long)mx);
+      } else {
+        umax = t->bits() == 64
+            ? UINT64_MAX : ((1ULL << t->bits()) - 1ULL);
+        snprintf(minbuf, sizeof minbuf, "0");
+        snprintf(maxbuf, sizeof maxbuf, "%llu", (unsigned long long)umax);
+      }
+      std::string intrinsic = n == "saturating_add"
+          ? (sgn ? "llvm.sadd.with.overflow" : "llvm.uadd.with.overflow")
+        : n == "saturating_sub"
+          ? (sgn ? "llvm.ssub.with.overflow" : "llvm.usub.with.overflow")
+          : (sgn ? "llvm.smul.with.overflow" : "llvm.umul.with.overflow");
+      std::string pair = G->t();
+      G->out << "  " << pair << " = call { " << tk << ", i1 } @"
+             << intrinsic << "." << tk << "(" << tk << " " << a << ", " << tk
+             << " " << b << ")\n";
+      std::string v = G->t();
+      G->out << "  " << v << " = extractvalue { " << tk << ", i1 } " << pair
+             << ", 0\n";
+      std::string ov = G->t();
+      G->out << "  " << ov << " = extractvalue { " << tk << ", i1 } " << pair
+             << ", 1\n";
+      // which bound an overflow saturates to:
+      //   signed add: b > 0 -> MAX else MIN      (a + b overflow)
+      //   signed sub: b < 0 -> MAX else MIN      (a - b overflow)
+      //   signed mul: (a<0) xor (b<0) -> MIN else MAX
+      //   unsigned add/mul: MAX;  unsigned sub (borrow): 0
+      std::string sat;
+      if (n == "saturating_add" && sgn) {
+        std::string bpos = G->t();
+        G->out << "  " << bpos << " = icmp sgt " << tk << " " << b << ", 0\n";
+        sat = G->t();
+        G->out << "  " << sat << " = select i1 " << bpos << ", " << tk << " "
+               << maxbuf << ", " << tk << " " << minbuf << "\n";
+      } else if (n == "saturating_sub" && sgn) {
+        std::string bneg = G->t();
+        G->out << "  " << bneg << " = icmp slt " << tk << " " << b << ", 0\n";
+        sat = G->t();
+        G->out << "  " << sat << " = select i1 " << bneg << ", " << tk << " "
+               << maxbuf << ", " << tk << " " << minbuf << "\n";
+      } else if (n == "saturating_mul" && sgn) {
+        std::string aneg = G->t(), bneg = G->t(), neg = G->t();
+        G->out << "  " << aneg << " = icmp slt " << tk << " " << a << ", 0\n";
+        G->out << "  " << bneg << " = icmp slt " << tk << " " << b << ", 0\n";
+        G->out << "  " << neg << " = xor i1 " << aneg << ", " << bneg << "\n";
+        sat = G->t();
+        G->out << "  " << sat << " = select i1 " << neg << ", " << tk << " "
+               << minbuf << ", " << tk << " " << maxbuf << "\n";
+      } else if (n == "saturating_sub" && !sgn) {
+        sat = G->t();
+        G->out << "  " << sat << " = add " << tk << " 0, 0\n";
+      } else {
+        sat = G->t();
+        G->out << "  " << sat << " = add " << tk << " 0, " << maxbuf << "\n";
+      }
+      std::string r = G->t();
+      G->out << "  " << r << " = select i1 " << ov << ", " << tk << " " << sat
+             << ", " << tk << " " << v << "\n";
+      return r;
+    }
+    // ---- checked_add/sub/mul: overflow flag -> Option<T>
+    if (n == "checked_add" || n == "checked_sub" || n == "checked_mul") {
+      std::string intrinsic = n == "checked_add"
+          ? (sgn ? "llvm.sadd.with.overflow" : "llvm.uadd.with.overflow")
+        : n == "checked_sub"
+          ? (sgn ? "llvm.ssub.with.overflow" : "llvm.usub.with.overflow")
+          : (sgn ? "llvm.smul.with.overflow" : "llvm.umul.with.overflow");
+      std::string pair = G->t();
+      G->out << "  " << pair << " = call { " << tk << ", i1 } @"
+             << intrinsic << "." << tk << "(" << tk << " " << a << ", " << tk
+             << " " << b << ")\n";
+      std::string v = G->t();
+      G->out << "  " << v << " = extractvalue { " << tk << ", i1 } " << pair
+             << ", 0\n";
+      std::string ov = G->t();
+      G->out << "  " << ov << " = extractvalue { " << tk << ", i1 } " << pair
+             << ", 1\n";
+      std::string ok = G->t();
+      G->out << "  " << ok << " = xor i1 " << ov << ", true\n";
+      return genOptionFromReg(e, t, ok, v);
+    }
+    // ---- checked_div/rem: None exactly where the plain operators trap
+    //      (divisor 0; signed: INT_MIN / -1).  Guarded operands keep the
+    //      sdiv/srem itself from trapping before the Option is built.
+    if (n == "checked_div" || n == "checked_rem") {
+      std::string isz = G->t();
+      G->out << "  " << isz << " = icmp eq " << tk << " " << b << ", 0\n";
+      std::string bad = isz;
+      if (sgn) {
+        // INT_MIN / -1 overflow (division of the minimum by -1)
+        char minbuf[40];
+        int64_t mn = t->bits() == 64
+            ? INT64_MIN : (int64_t(-1) << (t->bits() - 1));
+        snprintf(minbuf, sizeof minbuf, "%lld", (long long)mn);
+        std::string ismin = G->t(), isneg1 = G->t(), sm = G->t();
+        G->out << "  " << ismin << " = icmp eq " << tk << " " << a << ", "
+               << minbuf << "\n";
+        G->out << "  " << isneg1 << " = icmp eq " << tk << " " << b << ", -1\n";
+        G->out << "  " << sm << " = and i1 " << ismin << ", " << isneg1 << "\n";
+        bad = G->t();
+        G->out << "  " << bad << " = or i1 " << isz << ", " << sm << "\n";
+      }
+      // safe operands: divisor -> 1 when zero; dividend -> 0 on the
+      // INT_MIN/-1 shape (value is discarded on the None path)
+      std::string bs = G->t();
+      G->out << "  " << bs << " = select i1 " << isz << ", " << tk
+             << " 1, " << tk << " " << b << "\n";
+      std::string as = a;
+      if (sgn) {
+        std::string s0 = G->t();
+        G->out << "  " << s0 << " = select i1 " << bad << ", " << tk
+               << " 0, " << tk << " " << a << "\n";
+        as = s0;
+      }
+      std::string v = G->t();
+      std::string op = n == "checked_div"
+          ? (sgn ? "sdiv" : "udiv") : (sgn ? "srem" : "urem");
+      G->out << "  " << v << " = " << op << " " << tk << " " << as << ", "
+             << bs << "\n";
+      std::string ok = G->t();
+      G->out << "  " << ok << " = xor i1 " << bad << ", true\n";
+      return genOptionFromReg(e, t, ok, v);
+    }
+  }
+  // ------------- fsht-03:01 (ch. 23 §3): checked_cast / saturating_cast ----
+  if ((n == "checked_cast" || n == "saturating_cast") && e->castTargetTy) {
+    Type* at = e->args[0]->ty;
+    Type* u = e->castTargetTy;
+    std::string x = genExpr(e->args[0]);
+    bool fromFloat = at && at->isFloat();
+    // widen f32 sources to double once (all comparisons/rounding on f64)
+    if (fromFloat && at->k == Type::F32) {
+      std::string w = G->t();
+      G->out << "  " << w << " = fpext float " << x << " to double\n";
+      x = w;
+      at = Type::simple(Type::F64);
+    }
+    int ub = u->bits();
+    std::string uk = G->llvmType(u);
+    bool usgn = u->isSigned();
+    // U's exact bound constants as TEXT-safe LLVM integers (a u64 max is
+    // spelled -1: textual IR integers parse as signed bit patterns).
+    auto intBoundStr = [&](bool hi) -> std::string {
+      if (usgn) {
+        if (hi)
+          return ub == 64 ? std::string("9223372036854775807")
+                          : std::to_string((long long)((1ULL << (ub - 1)) - 1ULL));
+        return ub == 64 ? std::string("-9223372036854775808")
+                       : std::to_string((long long)(int64_t(-1) << (ub - 1)));
+      }
+      if (hi) return ub == 64 ? std::string("-1")   // 0xFFFF..FFFF bits
+                              : std::to_string((1ULL << ub) - 1ULL);
+      return "0";
+    };
+    if (fromFloat) {
+      // ---- float -> int ----
+      // ub <= 32: exact endpoints.  ub == 64: the power-of-two ABOVE the
+      // range (2^63 / 2^64) is exactly representable and is the exclusive
+      // upper edge for the range test; the largest double strictly below
+      // it (2^63-1024 / 2^64-2048) is the SAFE fptosi clamp so the
+      // conversion is never fed an out-of-range value, and an exact-edge
+      // select restores the true int_max afterwards.
+      double loD = usgn ? (ub == 64 ? -9223372036854775808.0
+                                    : -(double)(1ULL << (ub - 1)))
+                        : 0.0;
+      double hiExact = usgn
+          ? (ub == 64 ? 9223372036854775807.0 /* not representable */
+                      : (double)((1ULL << (ub - 1)) - 1ULL))
+          : (ub == 64 ? 18446744073709551615.0 /* not representable */
+                      : (double)((1ULL << ub) - 1ULL));
+      bool pow2Edge = ub == 64;
+      double hiD = pow2Edge
+          ? (usgn ? 9223372036854775808.0 : 18446744073709551616.0)
+          : hiExact;
+      double hiClamp = pow2Edge
+          ? (usgn ? 9223372036854774784.0 : 18446744073709549568.0)
+          : hiExact;
+      std::string isnan = G->t();
+      G->out << "  " << isnan << " = fcmp uno double " << x << ", " << x
+             << "\n";
+      std::string geLo = G->t();
+      G->out << "  " << geLo << " = fcmp oge double " << x << ", "
+             << G->doubleToHex(loD) << "\n";
+      std::string ltHi = G->t();
+      G->out << "  " << ltHi << " = " << (pow2Edge ? "fcmp olt" : "fcmp ole")
+             << " double " << x << ", " << G->doubleToHex(hiD) << "\n";
+      if (n == "checked_cast") {
+        // Some iff !isnan && lo <= x < hi (in-range); the conversion is
+        // poison on the None path but never selected into the payload.
+        std::string inRange = G->t();
+        G->out << "  " << inRange << " = and i1 " << geLo << ", " << ltHi
+               << "\n";
+        std::string nn = G->t();
+        G->out << "  " << nn << " = xor i1 " << isnan << ", true\n";
+        std::string ok = G->t();
+        G->out << "  " << ok << " = and i1 " << inRange << ", " << nn << "\n";
+        std::string v = G->t();
+        G->out << "  " << v << " = " << (usgn ? "fptosi" : "fptoui")
+               << " double " << x << " to " << uk
+               << "  ; poison if out of range — unselected on None\n";
+        return genOptionFromReg(e, u, ok, v);
+      }
+      // saturating: clamp to the SAFE bounds, convert, restore the exact
+      // top edge, then NaN -> 0
+      std::string cl = G->t();
+      G->out << "  " << cl << " = select i1 " << geLo << ", double " << x
+             << ", double " << G->doubleToHex(loD) << "\n";
+      std::string ch = G->t();
+      G->out << "  " << ch << " = select i1 " << ltHi << ", double " << cl
+             << ", double " << G->doubleToHex(hiClamp) << "\n";
+      std::string v = G->t();
+      G->out << "  " << v << " = " << (usgn ? "fptosi" : "fptoui")
+             << " double " << ch << " to " << uk << "\n";
+      std::string isHi = G->t();
+      G->out << "  " << isHi << " = xor i1 " << ltHi << ", true\n";
+      std::string r1 = G->t();
+      G->out << "  " << r1 << " = select i1 " << isHi << ", " << uk << " "
+             << intBoundStr(true) << ", " << uk << " " << v << "\n";
+      std::string r = G->t();
+      G->out << "  " << r << " = select i1 " << isnan << ", " << uk
+             << " 0, " << uk << " " << r1 << "\n";
+      return r;
+    }
+    // ---- int -> int ----
+    Type* st = at;
+    int sb = st->bits();
+    bool ssgn = st->isSigned();
+    std::string sk = G->llvmType(st);
+    bool sameSignClass = (usgn && ssgn) || (!usgn && !ssgn);
+    bool widening = (ub > sb) || (ub == sb && sameSignClass);
+    bool trivial = widening && !(!usgn && ssgn);
+    if (n == "saturating_cast") {
+      if (trivial) {
+        if (ub == sb) return x;   // same width: the cast is the identity
+        std::string r = G->t();
+        G->out << "  " << r << " = " << (usgn ? "sext" : "zext") << " " << sk
+               << " " << x << " to " << uk << "\n";
+        return r;
+      }
+      if (!usgn && ssgn && ub >= sb) {
+        // signed -> wider/equal unsigned: negatives clamp to 0
+        std::string neg = G->t();
+        G->out << "  " << neg << " = icmp slt " << sk << " " << x << ", 0\n";
+        std::string z = G->t();
+        G->out << "  " << z << " = zext " << sk << " " << x << " to " << uk
+               << "\n";
+        std::string r = G->t();
+        G->out << "  " << r << " = select i1 " << neg << ", " << uk
+               << " 0, " << uk << " " << z << "\n";
+        return r;
+      }
+      // narrowing (or same-width mixed-sign): clamp in the SOURCE's
+      // signedness against U's bounds (they fit the source width), then
+      // truncate; constants are TEXT-safe at both widths.
+      std::string hiC = intBoundStr(true);
+      std::string loC = intBoundStr(false);
+      std::string tooHi = G->t();
+      G->out << "  " << tooHi << " = " << (ssgn ? "icmp sgt" : "icmp ugt")
+             << " " << sk << " " << x << ", " << hiC << "\n";
+      std::string tooLo = G->t();
+      G->out << "  " << tooLo << " = " << (ssgn ? "icmp slt" : "icmp ult")
+             << " " << sk << " " << x << ", " << loC << "\n";
+      std::string v = (ub == sb) ? x : G->t();
+      if (ub != sb)
+        G->out << "  " << v << " = trunc " << sk << " " << x << " to " << uk
+               << "\n";
+      std::string sat2 = G->t();
+      G->out << "  " << sat2 << " = select i1 " << tooHi << ", " << uk
+             << " " << hiC << ", " << uk << " " << v << "\n";
+      std::string r = G->t();
+      G->out << "  " << r << " = select i1 " << tooLo << ", " << uk
+             << " " << loC << ", " << uk << " " << sat2 << "\n";
+      return r;
+    }
+    // checked_cast int->int
+    if (trivial) {
+      if (ub == sb) return genOptionFromReg(e, u, "true", x);
+      std::string v = G->t();
+      G->out << "  " << v << " = " << (usgn ? "sext" : "zext") << " " << sk
+             << " " << x << " to " << uk << "\n";
+      return genOptionFromReg(e, u, "true", v);
+    }
+    if (!usgn && ssgn && ub >= sb) {
+      // signed -> unsigned (wider or equal): Some iff x >= 0
+      std::string neg = G->t();
+      G->out << "  " << neg << " = icmp slt " << sk << " " << x << ", 0\n";
+      std::string ok = G->t();
+      G->out << "  " << ok << " = xor i1 " << neg << ", true\n";
+      std::string v = G->t();
+      G->out << "  " << v << " = zext " << sk << " " << x << " to " << uk
+             << "\n";
+      return genOptionFromReg(e, u, ok, v);
+    }
+    if (usgn && !ssgn && ub == sb) {
+      // unsigned -> same-width signed: Some iff the value fits U's range
+      std::string hiC = intBoundStr(true);
+      std::string ok = G->t();
+      G->out << "  " << ok << " = icmp ule " << sk << " " << x << ", " << hiC
+             << "\n";
+      return genOptionFromReg(e, u, ok, x);
+    }
+    {
+      // narrowing / same-width mixed-sign: trunc + extend-back equality
+      std::string v = (ub == sb) ? x : G->t();
+      if (ub != sb)
+        G->out << "  " << v << " = trunc " << sk << " " << x << " to " << uk
+               << "\n";
+      std::string back = G->t();
+      G->out << "  " << back << " = " << (usgn ? "sext" : "zext") << " " << uk
+             << " " << v << " to " << sk << "\n";
+      std::string ok = G->t();
+      G->out << "  " << ok << " = icmp eq " << sk << " " << x << ", " << back
+             << "\n";
+      return genOptionFromReg(e, u, ok, v);
+    }
+  }
+
+  // ------------- fsht-03:01 (registry 05.04.01, ch. 23 §1): parse_* --------
+  if (n == "parse_i64" || n == "parse_u64" || n == "parse_f64") {
+    std::string v = genExpr(e->args[0]);   // { ptr, i64 } str view
+    std::string pa = G->t(), la = G->t();
+    G->out << "  " << pa << " = extractvalue { ptr, i64 } " << v << ", 0\n";
+    G->out << "  " << la << " = extractvalue { ptr, i64 } " << v << ", 1\n";
+    bool isF = n == "parse_f64";
+    std::string resT = isF ? "double" : "i64";
+    std::string r = G->t();
+    G->out << "  " << r << " = call { " << resT << ", i32 } @frt_" << n
+           << "(ptr " << pa << ", i64 " << la << ")\n";
+    std::string val = G->t();
+    G->out << "  " << val << " = extractvalue { " << resT << ", i32 } " << r
+           << ", 0\n";
+    std::string err = G->t();
+    G->out << "  " << err << " = extractvalue { " << resT << ", i32 } " << r
+           << ", 1\n";
+    // build Result<T, ParseError> from the err code:
+    //   0 = Ok(value);  1 = Err(Invalid);  2 = Err(OutOfRange)
+    Type* ot = e->ty;
+    EnumDef* ed = ot->edef;
+    int okIdx = 0, errIdx = 1;
+    for (auto& var : ed->variants) {
+      if (var.name == "Ok") okIdx = var.idx;
+      if (var.name == "Err") errIdx = var.idx;
+    }
+    std::string slot = G->t();
+    G->out << "  " << slot << " = alloca " << G->llvmType(ot) << ", align "
+           << ed->align << "\n";
+    std::string isok = G->t();
+    G->out << "  " << isok << " = icmp eq i32 " << err << ", 0\n";
+    std::string tag = G->t();
+    G->out << "  " << tag << " = select i1 " << isok << ", i64 " << okIdx
+           << ", i64 " << errIdx << "\n";
+    G->out << "  store i64 " << tag << ", ptr " << slot << "\n";
+    // payload area: Ok(T) vs Err(ParseError{tag}) — both start at the same
+    // offset (single payload region); one select over the i64 bits
+    const EnumVariant& ov = ed->variants[okIdx];
+    if (!ov.fields.empty()) {
+      std::string pay = G->t();
+      G->out << "  " << pay << " = getelementptr i8, ptr " << slot
+             << ", i64 " << (8 + ov.offsets[0]) << "\n";
+      std::string pe = G->t();
+      G->out << "  " << pe << " = sub i32 " << err << ", 1\n";
+      std::string pe64 = G->t();
+      G->out << "  " << pe64 << " = sext i32 " << pe << " to i64\n";
+      if (isF) {
+        // allocate in emission order: bitcast first, then the select
+        std::string dv = G->t();
+        G->out << "  " << dv << " = bitcast double " << val << " to i64\n";
+        std::string sv = G->t();
+        G->out << "  " << sv << " = select i1 " << isok << ", i64 " << dv
+               << ", i64 " << pe64 << "\n";
+        G->out << "  store i64 " << sv << ", ptr " << pay << "\n";
+      } else {
+        std::string sv = G->t();
+        G->out << "  " << sv << " = select i1 " << isok << ", i64 " << val
+               << ", i64 " << pe64 << "\n";
+        G->out << "  store i64 " << sv << ", ptr " << pay << "\n";
+      }
+    }
+    registerOwningTemp(slot, e->ty);   // fsht-03:02 temp drop (Result<String,E>)
+    return slot;
+  }
+  // ------------- fsht-03:01 (ch. 23 §5): numeric/bits/time/random/alloc --
+  if (n == "bswap16" || n == "bswap32" || n == "bswap64") {
+    Type* t = e->args[0]->ty;
+    std::string x = genExpr(e->args[0]);
+    std::string w = t->bits() == 64 ? "i64" : t->bits() == 32 ? "i32" : "i16";
+    std::string r = G->t();
+    G->out << "  " << r << " = call " << w << " @llvm.bswap." << w << "(" << w
+           << " " << x << ")\n";
+    // the source type is already the exact width (sema enforced)
+    if (std::string(w) != G->llvmType(t)) {
+      std::string nr = G->t();
+      G->out << "  " << nr << " = trunc " << w << " " << r << " to "
+             << G->llvmType(t) << "\n";
+      return nr;
+    }
+    return r;
+  }
+  if (n == "popcount") {
+    Type* t = e->args[0]->ty;
+    std::string x = genExpr(e->args[0]);
+    std::string w = G->llvmType(t);
+    std::string r = G->t();
+    G->out << "  " << r << " = call " << w << " @llvm.ctpop." << w << "(" << w
+           << " " << x << ")\n";
+    return r;
+  }
+  if (n == "abs") {
+    Type* t = e->args[0]->ty;
+    std::string x = genExpr(e->args[0]);
+    if (t->isFloat()) {
+      std::string r = G->t();
+      G->out << "  " << r << " = call " << G->llvmType(t) << " @llvm.fabs."
+             << (t->k == Type::F32 ? "f32" : "f64") << "(" << G->llvmType(t)
+             << " " << x << ")\n";
+      return r;
+    }
+    std::string w = G->llvmType(t);
+    std::string r = G->t();
+    G->out << "  " << r << " = call " << w << " @llvm.abs." << w << "(" << w
+           << " " << x << ", i1 false)\n";
+    return r;
+  }
+  if (n == "gcd") {
+    Type* t = e->args[0]->ty;
+    std::string a = genExpr(e->args[0]);
+    std::string b = genExpr(e->args[1]);
+    std::string op = t->isSigned() ? "sext" : "zext";
+    std::string a64 = a, b64 = b;
+    if (t->bits() < 64) {
+      std::string wa = G->t(), wb = G->t();
+      G->out << "  " << wa << " = " << op << " " << G->llvmType(t) << " " << a
+             << " to i64\n";
+      G->out << "  " << wb << " = " << op << " " << G->llvmType(t) << " " << b
+             << " to i64\n";
+      a64 = wa; b64 = wb;
+    }
+    std::string r = G->t();
+    G->out << "  " << r << " = call i64 @frt_gcd_i64(i64 " << a64 << ", i64 "
+           << b64 << ")\n";
+    if (t->bits() < 64) {
+      std::string nr = G->t();
+      G->out << "  " << nr << " = trunc i64 " << r << " to "
+             << G->llvmType(t) << "\n";
+      return nr;
+    }
+    return r;
+  }
+  if (n == "clamp") {
+    Type* t = e->args[0]->ty;
+    std::string x = genExpr(e->args[0]);
+    std::string lo = genExpr(e->args[1]);
+    std::string hi = genExpr(e->args[2]);
+    if (t->isFloat()) {
+      std::string mx = G->t(), r = G->t();
+      G->out << "  " << mx << " = call " << G->llvmType(t) << " @llvm.maxnum."
+             << (t->k == Type::F32 ? "f32" : "f64") << "(" << G->llvmType(t)
+             << " " << x << ", " << G->llvmType(t) << " " << lo << ")\n";
+      G->out << "  " << r << " = call " << G->llvmType(t) << " @llvm.minnum."
+             << (t->k == Type::F32 ? "f32" : "f64") << "(" << G->llvmType(t)
+             << " " << mx << ", " << G->llvmType(t) << " " << hi << ")\n";
+      return r;
+    }
+    std::string w = G->llvmType(t);
+    std::string mxIn = t->isSigned() ? "smax" : "umax";
+    std::string mnIn = t->isSigned() ? "smin" : "umin";
+    std::string mx = G->t(), r = G->t();
+    G->out << "  " << mx << " = call " << w << " @llvm." << mxIn << "." << w
+           << "(" << w << " " << x << ", " << w << " " << lo << ")\n";
+    G->out << "  " << r << " = call " << w << " @llvm." << mnIn << "." << w
+           << "(" << w << " " << mx << ", " << w << " " << hi << ")\n";
+    return r;
+  }
+  if (n == "now_ns" || n == "now_ms") {
+    std::string r = G->t();
+    G->out << "  " << r << " = call i64 @frt_" << (n == "now_ns" ? "time_ns" : "time_ms")
+           << "()\n";
+    return r;
+  }
+  if (n == "page_size") {
+    std::string r = G->t();
+    G->out << "  " << r << " = call i64 @frt_page_size()\n";
+    return r;
+  }
+  if (n == "sm64_next") {
+    std::string sp = genExpr(e->args[0]);
+    std::string r = G->t();
+    G->out << "  " << r << " = call i64 @frt_sm64_next(ptr " << sp << ")\n";
+    return r;
   }
 
   // ---------------- fsht-02:01 (registry 02.09.01): Vec<T> builtins
@@ -549,6 +1150,7 @@ std::string genCall(Expr* e) {
       G->out << "  " << tmp << " = alloca " << G->llvmType(et) << ", align "
              << typeAlignOf(et) << "\n";
       std::string val = genExpr(e->args[i]);
+      markTempConsumed(val);   // fsht-03:02: the vec element takes over
       if (et->k == Type::STRUCT || et->k == Type::ENUM ||
           et->k == Type::ARRAY) {
         G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << tmp << ", ptr "
@@ -618,6 +1220,7 @@ std::string genCall(Expr* e) {
       std::string outS = G->t();
       G->out << "  " << outS << " = alloca " << G->llvmType(e->ty)
              << ", align " << typeAlignOf(e->ty) << "\n";
+      registerOwningTemp(outS, e->ty);   // fsht-03:02 temp drop
       if (e->args.size() == 2) {
         std::string cap = widenIdx(1);
         G->out << "  call void @frt_vec_with_cap(ptr " << outS << ", i64 "
@@ -647,15 +1250,21 @@ std::string genCall(Expr* e) {
       }
       G->out << "  call void @frt_vec_from(ptr " << outS << ", ptr " << p
              << ", i64 " << len << ", i64 " << esz << ")\n";
+      registerOwningTemp(outS, e->ty);   // fsht-03:02 temp drop
       return outS;
     }
     if (n == "vec_clone") {
       std::string outS = G->t();
       G->out << "  " << outS << " = alloca " << G->llvmType(e->ty)
              << ", align " << typeAlignOf(e->ty) << "\n";
+      registerOwningTemp(outS, e->ty);   // fsht-03:02 temp drop
       std::string src = genExpr(e->args[0]);   // container value = address
       G->out << "  call void @frt_vec_clone(ptr " << outS << ", ptr " << src
              << ", i64 " << esz << ")\n";
+      // fsht-03:02 (ch. 24 §5): owning element types deep-copy
+      // element-wise (string_clone for String elements, recursive for
+      // nested vectors)
+      if (elem && typeNeedsDrop(elem)) emitDeepCloneElems(outS, e->ty);
       return outS;
     }
     if (n == "vec_push") {
@@ -1001,7 +1610,11 @@ std::string genCall(Expr* e) {
   // any later use of the argument binding)
   for (size_t i = 0; i < e->args.size() && i < f->params.size(); ++i) {
     Type* pt = f->params[i].ty;
-    if (pt && pt->k == Type::STRUCT && containerElemType(pt))
+    // fsht-03:02: borrowed / borrowed-mut parameters keep the caller's
+    // ownership (no move-out invalidation)
+    if (f->params[i].borrowed || f->params[i].borrowedMut) continue;
+    if (pt && pt->k == Type::STRUCT &&
+        (containerElemType(pt) || isHandleType(pt) || typeNeedsDrop(pt)))
       nullContainerSource(e->args[i], pt);
   }
   // bool RETURN ABI (mirror of genArg's parameter widening): the callee
@@ -1019,6 +1632,7 @@ std::string genCall(Expr* e) {
     G->out << "  " << slot << " = alloca " << G->llvmType(f->ret) << "\n";
     G->out << "  store " << G->llvmType(f->ret) << " " << r << ", ptr "
            << slot << "\n";
+    registerOwningTemp(slot, f->ret);   // fsht-03:02 temp drop
     return slot;
   }
   return r;

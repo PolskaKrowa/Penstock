@@ -1,0 +1,72 @@
+// fsht-03:01 (registry 05.04.01, ch. 23 §1): numeric text parsing with
+// the Result<i64, ParseError> surface and the round-trip law.
+fn show(e: ParseError) {
+    match (e) {
+        Invalid => { print("invalid"); }
+        OutOfRange => { print("range"); }
+    }
+}
+fn main() {
+    // the round-trip law: parse_i64(str_of(&fmt_i64(x))) == Ok(x)
+    let t: String = fmt_i64(42);
+    let rt: Result<i64, ParseError> = parse_i64(str_of(&t));
+    match (rt) {
+        Ok(v) => { print_i64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // whitespace skipped, sign forms
+    let ws: Result<i64, ParseError> = parse_i64("  -7  ");
+    match (ws) {
+        Ok(v) => { print_i64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // grammar errors -> Invalid
+    let bad: Result<i64, ParseError> = parse_i64("12x3");
+    match (bad) {
+        Ok(v) => { print_i64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // beyond the type range -> OutOfRange (never wrapped)
+    let big: Result<i64, ParseError> = parse_i64("99999999999999999999");
+    match (big) {
+        Ok(v) => { print_i64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // the exact i64 minimum parses
+    let mn: Result<i64, ParseError> = parse_i64("-9223372036854775808");
+    match (mn) {
+        Ok(v) => { print_i64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // u64 rejects the minus sign
+    let neg: Result<u64, ParseError> = parse_u64("-5");
+    match (neg) {
+        Ok(v) => { print_u64(v); }
+        Err(e) => { show(e); }
+    }
+    println();
+    // f64: exponent forms, inf/nan spellings, out-of-range
+    let e: Result<f64, ParseError> = parse_f64("2.5e3");
+    match (e) {
+        Ok(v) => { print_f64(v, 1); }
+        Err(er) => { show(er); }
+    }
+    println();
+    let inf: Result<f64, ParseError> = parse_f64("INF");
+    match (inf) {
+        Ok(v) => { print_f64(v, 1); }
+        Err(er) => { show(er); }
+    }
+    println();
+    let huge: Result<f64, ParseError> = parse_f64("1e999");
+    match (huge) {
+        Ok(v) => { print_f64(v, 1); }
+        Err(er) => { show(er); }
+    }
+    println();
+}

@@ -190,11 +190,23 @@ endfunction()
 # ---------------------------------------------------------------- patches
 # The two functions below were part of PenstockSuperopt.cmake and are
 # unchanged apart from taking the source directory as an argument: they
-# namespace Z3's and Alive2's colliding component targets (Z3's `opt`
-# component vs LLVM's `opt` executable; Alive2's `smt`/`util` libraries vs
-# Z3 4.15.x components of the same names). Both are idempotent and work on
-# any checkout origin (submodule or FetchContent).
+# namespace Z3's and Alive2's colliding component targets (Z3's historical
+# `opt` component vs LLVM's `opt` executable; Alive2's `smt`/`util`
+# libraries vs Z3 4.15.x components of the same names). Both are
+# idempotent and work on any checkout origin (submodule or FetchContent).
 function(penstock_patch_z3_for_embedded_build source_dir)
+  # Z3's optimisation component historically declared itself as `opt`,
+  # which collides with LLVM's `opt` tool target (target names are
+  # globally unique in CMake). Penstock therefore renames the component
+  # to penstock_z3_opt on Z3 <= 4.15.x. Upstream Z3 renamed the component
+  # to `z3_opt` on master after the 4.15.3 release (the src/api/CMakeLists
+  # dependency entry renamed alongside it), so newer checkouts need no
+  # patch at all. Three states are recognised here:
+  #   `opt`             Z3 <= 4.15.x -> renamed, api dependency updated
+  #   `z3_opt`          upstream rename -> checkout left untouched
+  #   `penstock_z3_opt` this patch already applied -> idempotent no-op
+  # Anything else refuses to configure rather than risk a silent target
+  # collision; the message names the supported pins.
   set(_penstock_z3_opt_cmake "${source_dir}/src/opt/CMakeLists.txt")
   if(NOT EXISTS "${_penstock_z3_opt_cmake}")
     message(FATAL_ERROR
@@ -202,39 +214,110 @@ function(penstock_patch_z3_for_embedded_build source_dir)
       "cannot apply the LLVM `opt` target collision workaround.")
   endif()
   file(READ "${_penstock_z3_opt_cmake}" _penstock_z3_opt_cmake_text)
-  string(FIND "${_penstock_z3_opt_cmake_text}" "z3_add_component(opt" _penstock_z3_opt_decl)
-  string(FIND "${_penstock_z3_opt_cmake_text}" "z3_add_component(penstock_z3_opt" _penstock_z3_opt_renamed_decl)
-  if(NOT _penstock_z3_opt_decl EQUAL -1)
-    string(REPLACE "z3_add_component(opt"
-                   "z3_add_component(penstock_z3_opt"
+  # Whitespace between the macro call and the component name (a cosmetic
+  # reformat upstream) is tolerated: read the declared name, then branch.
+  # CMAKE_MATCH_1 keeps stale values when the regex does not match, so it
+  # is cleared first.
+  set(CMAKE_MATCH_1 "")
+  string(REGEX MATCH "z3_add_component[ \t\r\n]*\\([ \t\r\n]*([A-Za-z0-9_]+)"
+    _penstock_z3_opt_decl "${_penstock_z3_opt_cmake_text}")
+  set(_penstock_z3_opt_name "${CMAKE_MATCH_1}")
+  # The dependency name src/api must use to stay consistent with the
+  # component; empty means the upstream rename already took care of it.
+  set(_penstock_z3_opt_dep_name "")
+  if(_penstock_z3_opt_name STREQUAL "opt")
+    # Z3 <= 4.15.x: keep whatever whitespace followed the macro's opening
+    # parenthesis in the replacement.
+    string(REGEX REPLACE "z3_add_component([ \t\r\n]*\\([ \t\r\n]*)opt"
+      "z3_add_component\\1penstock_z3_opt"
       _penstock_z3_opt_cmake_text "${_penstock_z3_opt_cmake_text}")
     file(WRITE "${_penstock_z3_opt_cmake}" "${_penstock_z3_opt_cmake_text}")
-  elseif(_penstock_z3_opt_renamed_decl EQUAL -1)
+    set(_penstock_z3_opt_dep_name "penstock_z3_opt")
+  elseif(_penstock_z3_opt_name STREQUAL "z3_opt")
+    # Upstream Z3 already renamed the component: the LLVM `opt` collision
+    # it worked around is gone, and src/api already depends on `z3_opt`.
+    # Leave both files untouched.
+    message(STATUS
+      "Penstock: Z3 already names its optimisation component 'z3_opt' "
+      "(upstream rename; no LLVM 'opt' collision to work around).")
+  elseif(_penstock_z3_opt_name STREQUAL "penstock_z3_opt")
+    # Idempotent re-configure: an earlier run already applied the rename.
+    set(_penstock_z3_opt_dep_name "penstock_z3_opt")
+  elseif(_penstock_z3_opt_name STREQUAL "")
     message(FATAL_ERROR
-      "Could not find Z3's expected `z3_add_component(opt ...)` declaration in "
-      "${_penstock_z3_opt_cmake}. The Z3 source layout has changed; refusing "
-      "to continue with a possible CMake target collision.")
-  endif()
-  # Z3's API component declares an explicit dependency on the `opt`
-  # component. Keep its component graph consistent with the renamed target.
-  set(_penstock_z3_api_cmake "${source_dir}/src/api/CMakeLists.txt")
-  if(NOT EXISTS "${_penstock_z3_api_cmake}")
-    message(FATAL_ERROR "The selected Z3 source revision has no src/api/CMakeLists.txt.")
-  endif()
-  file(READ "${_penstock_z3_api_cmake}" _penstock_z3_api_cmake_text)
-  string(FIND "${_penstock_z3_api_cmake_text}"
-    "COMPONENT_DEPENDENCIES\n    opt" _penstock_z3_api_opt_dep)
-  string(FIND "${_penstock_z3_api_cmake_text}"
-    "COMPONENT_DEPENDENCIES\n    penstock_z3_opt" _penstock_z3_api_opt_dep_renamed)
-  if(NOT _penstock_z3_api_opt_dep EQUAL -1)
-    string(REPLACE "COMPONENT_DEPENDENCIES\n    opt"
-                   "COMPONENT_DEPENDENCIES\n    penstock_z3_opt"
-      _penstock_z3_api_cmake_text "${_penstock_z3_api_cmake_text}")
-    file(WRITE "${_penstock_z3_api_cmake}" "${_penstock_z3_api_cmake_text}")
-  elseif(_penstock_z3_api_opt_dep_renamed EQUAL -1)
+      "Z3's src/opt/CMakeLists.txt declares no z3_add_component(...) "
+      "component at all:\n  ${_penstock_z3_opt_cmake}\n"
+      "The Z3 build layout changed in a way this workaround does not "
+      "know, and guessing risks a collision with LLVM's 'opt' target. "
+      "Pin a known Z3 revision, e.g.\n"
+      "  git -C third_party/z3 checkout z3-4.15.3\n"
+      "or restore the revision recorded by Penstock's submodule:\n"
+      "  git submodule update --init third_party/z3\n"
+      "or bypass the submodule and let Penstock fetch the pinned tag:\n"
+      "  cmake <args> -DPENSTOCK_SUBMODULE_Z3=OFF\n"
+      "and report the layout above so the workaround can learn it.")
+  else()
     message(FATAL_ERROR
-      "Could not update Z3's API dependency on the renamed opt component. "
-      "The selected Z3 source layout may have changed.")
+      "Could not recognise Z3's optimisation component declaration in "
+      "${_penstock_z3_opt_cmake} (found '${_penstock_z3_opt_name}'). "
+      "Penstock renames the legacy 'opt' component to avoid a collision "
+      "with LLVM's 'opt' target and accepts upstream's 'z3_opt' rename; "
+      "any other layout is refused rather than risk the collision. "
+      "Pin a known Z3 revision, e.g.\n"
+      "  git -C third_party/z3 checkout z3-4.15.3\n"
+      "or restore the revision recorded by Penstock's submodule:\n"
+      "  git submodule update --init third_party/z3\n"
+      "or bypass the submodule and let Penstock fetch the pinned tag:\n"
+      "  cmake <args> -DPENSTOCK_SUBMODULE_Z3=OFF\n"
+      "and report the declaration above so the workaround can learn it.")
+  endif()
+
+  # Z3's API component declares an explicit dependency on the optimisation
+  # component. Keep its component graph consistent with the renamed target;
+  # upstream z3_opt trees are internally consistent already, so only the
+  # renamed-component cases inspect src/api.
+  if(NOT "${_penstock_z3_opt_dep_name}" STREQUAL "")
+    set(_penstock_z3_api_cmake "${source_dir}/src/api/CMakeLists.txt")
+    if(NOT EXISTS "${_penstock_z3_api_cmake}")
+      message(FATAL_ERROR
+        "The selected Z3 source revision has no src/api/CMakeLists.txt.")
+    endif()
+    file(READ "${_penstock_z3_api_cmake}" _penstock_z3_api_cmake_text)
+    # The dependency entry's indentation and position after the keyword
+    # vary across revisions; tolerate any whitespace run after
+    # COMPONENT_DEPENDENCIES before the component name.
+    set(CMAKE_MATCH_1 "")
+    string(REGEX MATCH "COMPONENT_DEPENDENCIES([ \t\r\n]+)opt"
+      _penstock_z3_api_dep "${_penstock_z3_api_cmake_text}")
+    if(NOT "${_penstock_z3_api_dep}" STREQUAL "")
+      string(REGEX REPLACE "COMPONENT_DEPENDENCIES([ \t\r\n]+)opt"
+        "COMPONENT_DEPENDENCIES\\1${_penstock_z3_opt_dep_name}"
+        _penstock_z3_api_cmake_text "${_penstock_z3_api_cmake_text}")
+      file(WRITE "${_penstock_z3_api_cmake}" "${_penstock_z3_api_cmake_text}")
+    else()
+      # Not found: either an earlier configure already renamed the entry
+      # (idempotent re-run), or the dependency layout genuinely changed.
+      string(FIND "${_penstock_z3_api_cmake_text}"
+        "COMPONENT_DEPENDENCIES[ \t\r\n][ \t\r\n]*${_penstock_z3_opt_dep_name}"
+        _penstock_z3_api_dep_renamed)
+      if(_penstock_z3_api_dep_renamed EQUAL -1)
+        # One last exact form: the pre-4.15.3-style literal that the
+        # previous revision of this patch produced.
+        string(FIND "${_penstock_z3_api_cmake_text}"
+          "COMPONENT_DEPENDENCIES\n    ${_penstock_z3_opt_dep_name}"
+          _penstock_z3_api_dep_literal)
+        if(_penstock_z3_api_dep_literal EQUAL -1)
+          message(FATAL_ERROR
+            "Could not update Z3's API dependency on the renamed opt "
+            "component. The selected Z3 source layout may have changed "
+            "(src/api/CMakeLists.txt names neither 'opt' after "
+            "COMPONENT_DEPENDENCIES nor '${_penstock_z3_opt_dep_name}'). "
+            "Pin a known Z3 revision (git -C third_party/z3 checkout "
+            "z3-4.15.3) and report the file above so the workaround can "
+            "learn it.")
+        endif()
+      endif()
+    endif()
   endif()
 endfunction()
 

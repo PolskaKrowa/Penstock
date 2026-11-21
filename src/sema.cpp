@@ -34,11 +34,24 @@ FnSema* getFnSema(FnDecl* f) {
 // current substitution map is consulted first, so `let s: T = ...` binds
 // to the concrete type the call site inferred.
 static std::map<std::string, Type*>* g_fnTMap = nullptr;
+// fsht-02:03: const-parameter values of the current generic instantiation
+// (parallel to g_fnTMap) — array lengths `[T; N * 2]` and const arguments
+// inside the instance body evaluate against it.
+static std::map<std::string, uint64_t>* g_fnCMap = nullptr;
 
 Type* tparamTypeInScope(const std::string& name) {
   if (g_fnTMap) {
     auto it = g_fnTMap->find(name);
     if (it != g_fnTMap->end()) return it->second;
+  }
+  return nullptr;
+}
+
+// fsht-02:03: const-parameter value of the current instantiation
+uint64_t* constParamValueInScope(const std::string& name) {
+  if (g_fnCMap) {
+    auto it = g_fnCMap->find(name);
+    if (it != g_fnCMap->end()) return &it->second;
   }
   return nullptr;
 }
@@ -49,7 +62,11 @@ static Type* bindType(Type* placeholder, const std::string& tyName, SrcLoc loc) 
     auto it = g_fnTMap->find(tyName);
     if (it != g_fnTMap->end()) return it->second;
   }
-  Type* t = bindTypeEncoding(S->prog, tyName, loc, nullptr);
+  // fsht-02:03 (and a latent Phase-2a fix): thread the substitution maps
+  // INTO the binder so nested shapes (`Pair<T, f64>` fields, `[T; N]`
+  // lengths) resolve against the current instantiation, not just the
+  // top-level bare names handled above.
+  Type* t = bindTypeEncoding(S->prog, tyName, loc, g_fnTMap, g_fnCMap);
   return t ? t : placeholder;
 }
 
@@ -101,6 +118,10 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
     // Phase 2a: struct literals adopt the instantiated generic type
     if (t->k == Type::STRUCT && s->init)
       tryAdoptStructLiteral(s->init, t);
+    // fsht-03:01 (registry 08.01.04): a checked_cast/saturating_cast in
+    // the initialiser infers its destination U from the annotation
+    // (Option<U> unwraps; a plain numeric annotation IS U)
+    trySetCastTarget(fs, s->init, t);
     // Phase 1b: an array literal ADOPTS the annotation's type (element
     // type and length) before typing, so [7, 8, 9] builds a [3 x i32]
     // value against `let f: [i32; 3]`
@@ -337,6 +358,8 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       // Phase 2a: `p = Pair { ... }` adopts the instantiated type
       if (s->lhs->ty && s->lhs->ty->k == Type::STRUCT)
         tryAdoptStructLiteral(s->rhs, s->lhs->ty);
+      // fsht-03:01: `x = checked_cast(v);` infers U from the lhs type
+      trySetCastTarget(fs, s->rhs, s->lhs->ty);
       Type* rt = typeExpr(fs, s->rhs);
       // fsht-02:01: assignments seed the same view-provenance record the
       // LET path keeps — a Span/str binding written from a local
@@ -411,6 +434,9 @@ static void semaStmt(FnSema* fs, Stmt* s) {
         // Phase 2a: struct-literal context for `return Pair { ... };`
         if (fs->fn->ret->k == Type::STRUCT)
           tryAdoptStructLiteral(s->retVal, fs->fn->ret);
+        // fsht-03:01: `return checked_cast(v);` infers U from the fn's
+        // return type
+        trySetCastTarget(fs, s->retVal, fs->fn->ret);
         Type* t = typeExpr(fs, s->retVal);
         // fsht-02:01: returning a borrowed view of a LOCAL container —
         // the container drops at every fn exit, so the view would dangle.
@@ -421,12 +447,13 @@ static void semaStmt(FnSema* fs, Stmt* s) {
           bool viaBinding = s->retVal->k == Expr::IDENT &&
                             fs->containerViewVars.count(s->retVal->name) > 0;
           if (badRoot || viaBinding) {
-            diag(Diag::Error, Code::Own,
-                 std::string("returning a borrowed view of a local Vec<T> — "
-                 "the container drops at fn exit and the view dangles; "
-                 "return the container itself (a move) or take a Span "
-                 "parameter (fsht-03:02 tracks the lifetime analysis that "
-                 "will replace this restriction)"),
+            // fsht-03:02 (03.02.10, ch. 15 ID-split): reclassified F0301 →
+            // F0311 — the precise escape diagnostic
+            diag(Diag::Error, Code::BorrowLifetime,
+                 std::string("returning a borrowed view of local storage — "
+                 "the owner drops at fn exit and the view dangles "
+                 "(fsht-03:02's F0311); return the owner itself (a move) "
+                 "or take a `borrowed` parameter"),
                  s->loc,
                  "kind=view-escape");
           }
@@ -635,6 +662,7 @@ static void semaFnBody(Program* p, FnDecl* f) {
   fs->fn = f;
   fs->push();
   g_fnTMap = f->instTMap.empty() ? nullptr : &f->instTMap;
+  g_fnCMap = f->instCMap.empty() ? nullptr : &f->instCMap;   // fsht-02:03
   if (f->unsafeFn) fs->unsafeDepth = 1;
   for (auto& pm : f->params) {
     Sym s;
@@ -644,6 +672,9 @@ static void semaFnBody(Program* p, FnDecl* f) {
     // flow analysis already treats them as owned when any caller gives);
     // `borrowed` params never own.
     s.owned = pm.owned;
+    // fsht-03:02 (registry 03.02.09): `borrowed mut` grants the callee
+    // exclusive write access through the parameter
+    if (pm.borrowedMut) s.mut = true;
     fs->varDepth[pm.name] = 0;
     fs->declare(s);
   }
@@ -652,6 +683,7 @@ static void semaFnBody(Program* p, FnDecl* f) {
   for (auto* st : f->body->stmts) semaStmt(fs, st);
 
   g_fnTMap = nullptr;
+  g_fnCMap = nullptr;
   // Phase 0b (report §3.2): definite-return analysis. Non-void functions
   // must return a value on every path; the exemption is the documented
   // implicit `return 0` entry convention, which applies to the VOID main
@@ -694,6 +726,112 @@ bool semaProgram(Program* p, bool requireMain) {
   // 1b. register enums (Phase 1d); generic enum templates are registered
   // but NOT laid out (only instantiations have concrete layouts)
   for (auto* ed : p->enums) registerEnum(ed);
+
+  // 1c. fsht-02:02 (registry 06.02.01): traits + impls.  Runs after the
+  // struct/enum registries exist (impl targets may be generic-struct
+  // INSTANTIATIONS like Vec<i64>, which the binder creates on demand)
+  // and BEFORE fn-map registration (step 4 iterates p->fns by name — the
+  // impl members must carry their mangled names by then).
+  for (auto* td : p->traits) {
+    pinContextTo(td->module);
+    registerTrait(td);
+    // duplicate method names inside one trait are unusable for the
+    // impl-side check below
+    for (size_t i = 0; i < td->methods.size(); ++i)
+      for (size_t j = i + 1; j < td->methods.size(); ++j)
+        if (td->methods[i].name == td->methods[j].name)
+          diag(Diag::Error, Code::Dup,
+               "trait " + td->name + " declares method '" +
+               td->methods[i].name + "' twice", td->loc);
+  }
+  for (auto* im : p->impls) {
+    pinContextTo(im->module);
+    TraitDef* td = findTraitDef(im->traitName);
+    if (!td) {
+      diag(Diag::Error, Code::NoTraitImpl,
+           "impl block names unknown trait '" + im->traitName + "'", im->loc);
+      continue;
+    }
+    // resolve the target type — must be CONCRETE (blanket impls over
+    // template parameters are deferred with the registry entry)
+    Type* selfTy = bindType(nullptr, im->selfEnc, im->loc);
+    bool targetOk = selfTy && selfTy->k != Type::VOID;
+    if (targetOk && ((selfTy->k == Type::STRUCT && selfTy->sdef->isGeneric) ||
+                     (selfTy->k == Type::ENUM && selfTy->edef->isGeneric))) {
+      diag(Diag::Error, Code::TraitImplMismatch,
+           "impl " + im->traitName + " for " + typeToString(selfTy) +
+           " targets a generic TEMPLATE — blanket impls are not supported "
+           "in the fsht-02:02 first cut; impl for a concrete instantiation "
+           "instead", im->loc);
+      targetOk = false;
+    }
+    if (!targetOk) selfTy = nullptr;
+    im->selfTy = selfTy;
+    registerImpl(im);
+    // check + rename every member fn
+    for (auto* f : im->fns) {
+      TraitDef::Method* m = findTraitMethodIn(im->traitName, f->name);
+      if (!m) {
+        diag(Diag::Error, Code::TraitImplMismatch,
+             "impl " + im->traitName + " for " +
+             (selfTy ? typeToString(selfTy) : "<unresolved>") +
+             " defines '" + f->name + "' which the trait does not declare",
+             f->loc);
+        continue;
+      }
+      // signature match: every param encoding (Self already substituted
+      // by the parser) must equal the trait's encoding after the same
+      // textual substitution; the return likewise
+      bool sigOk = f->params.size() == m->params.size();
+      if (sigOk)
+        for (size_t i = 0; i < f->params.size(); ++i) {
+          std::string want = substSelfInEnc(m->params[i].tyName, im->selfEnc);
+          if (f->params[i].tyName != want) {
+            diag(Diag::Error, Code::TraitImplMismatch,
+                 "parameter " + std::to_string(i + 1) + " of " +
+                 im->traitName + "::" + f->name + " is " +
+                 (f->params[i].tyName.empty() ? "<unresolved>"
+                  : f->params[i].tyName) +
+                 ", the trait declares " +
+                 (m->params[i].tyName.empty() ? "<unresolved>"
+                  : m->params[i].tyName) + " (Self = " +
+                 (selfTy ? typeToString(selfTy) : "?") + ")",
+                 f->params[i].loc);
+            sigOk = false;
+          }
+        }
+      {
+        std::string wantRet = substSelfInEnc(m->retEnc, im->selfEnc);
+        if (f->retTyName != wantRet) {
+          diag(Diag::Error, Code::TraitImplMismatch,
+               "return type of " + im->traitName + "::" + f->name +
+               " is " + (f->retTyName.empty() ? "void" : f->retTyName) +
+               ", the trait declares " +
+               (wantRet.empty() ? "void" : wantRet),
+               f->loc);
+          sigOk = false;
+        }
+      }
+      if (!sigOk) continue;
+      // all checks pass: assign the mangled direct-call name
+      if (selfTy) {
+        f->implSelfTy = selfTy;
+        f->module = im->module;
+        f->name = traitMethodMangle(im->traitName, selfTy, m->name);
+      }
+    }
+    // duplicate impls of the same trait for the same type
+    if (selfTy) {
+      for (auto* other : allImpls())
+        if (other != im && other->traitName == im->traitName &&
+            other->selfTy == selfTy) {
+          diag(Diag::Error, Code::Dup,
+               "duplicate impl of " + im->traitName + " for " +
+               typeToString(selfTy), im->loc);
+          break;
+        }
+    }
+  }
 
   // 2. bind field types
   for (auto* sd : p->structs) {
@@ -760,15 +898,17 @@ bool semaProgram(Program* p, bool requireMain) {
     }
     if (f->retTyName != "" && !f->isGeneric)
       f->ret = bindType(f->ret, f->retTyName, f->loc);
-    // Phase 2a: validate declared constraints
+    // Phase 2a: validate declared constraints.  fsht-02:02: a
+    // constraint list may mix builtins and user traits (`T: Numeric +
+    // Hashable`); each part must be a builtin or a declared trait.
     if (f->isGeneric) {
       for (size_t i = 0; i < f->tconstraints.size(); ++i) {
         const std::string& c = f->tconstraints[i];
-        if (!c.empty() && c != "Numeric" && c != "Int" && c != "Float" &&
-            c != "Signed") {
+        std::string bad = firstUnknownConstraintPart(c);
+        if (!bad.empty()) {
           diag(Diag::Error, Code::Generic,
-               "unknown type constraint '" + c + "' on " + f->tparams[i] +
-               " (supported: Numeric, Int, Float, Signed)",
+               "unknown type constraint '" + bad + "' on " + f->tparams[i] +
+               " (supported: Numeric, Int, Float, Signed and declared traits)",
                f->loc);
         }
       }

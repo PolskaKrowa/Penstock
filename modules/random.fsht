@@ -1,0 +1,10 @@
+// random — random-number generators (fsht-03:01, ch. 23 §5): the
+// xorshift64* generator (shifts 12/25/27, multiplier 2685821657736338717,
+// u64 wrapping) — the same generator as the conformance fuzz and
+// benchmark harnesses, so random streams are reproducible across
+// implementations.  Compiler-known builtin, re-exported here.
+module random;
+
+pub fn sm64_next(borrowed mut state: *u64) -> u64 {
+    return sm64_next(state);
+}

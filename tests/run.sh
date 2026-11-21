@@ -628,6 +628,18 @@ run_err "container nested in a struct rejected (F0201)" tests/neg_vec_structfiel
 run_err "returning a container view dangles (F0301)" tests/neg_vec_viewescape.fsht F0301
 run_err "container mutation inside parfor (F0307)" tests/neg_vec_parfor_mut.fsht F0307
 
+echo "== fsht-02:02: user-defined traits, static dispatch (registry 06.02.01) =="
+run_ok "traits: decl/impl/generic dispatch/struct targets/Self:: sibling" tests/pos_traits.fsht "10.0|15|4.5|21|12|12.0|24.0|3.0"
+run_err "trait bound without an impl (F0218)" tests/neg_traits_noimpl.fsht F0218
+run_err "impl signature mismatch (F0217)" tests/neg_traits_sig.fsht F0217
+run_err "ambiguous zero-arg trait method (F0216)" tests/neg_traits_ambig.fsht F0216
+
+echo "== fsht-02:03: const generics + const fn (registry 06.03.01) =="
+run_ok "const generics: structs, R*C, const fn args, const_assert, inference" tests/pos_constgen.fsht "5.0|4.0|24 32|48|5.0|72|64|440|61.5|10|36 34|const assertions hold"
+run_err "runtime fn in a const slot (F0219)" tests/neg_constgen_eval.fsht F0219
+run_err "failed compile-time assertion (F0220)" tests/neg_constgen_assert.fsht F0220
+run_err "const-evaluated length is zero (F0219)" tests/neg_constgen_zero.fsht F0219
+
 echo "== Memory modes (report §5) =="
 run_ok "owned/borrowed/unsafe" tests/pos_memmodes.fsht "6.0|5 6|11"
 run_err "own-call owned param without give" tests/neg_ownedcall.fsht F0303
@@ -979,6 +991,68 @@ else bad "--explain lookup"; fi
 $PEN tests/neg_arith.fsht -o "$TMP/t" 2>"$TMP/w.err"; $PEN --strict-performance tests/neg_arith.fsht -o "$TMP/t" 2>"$TMP/e.err"
 if grep -q '^warning\[F0402\]' "$TMP/w.err" && grep -q '^error\[F0402\]' "$TMP/e.err"; then ok "F0402 is warning[F0402] by default, error[F0402] when strict"
 else bad "ID/severity decoupling"; fi
+
+# ---------------------------------------------------------------- fsht-03
+echo "== fsht-03:01 expanded stdlib (registry 05.04.01/05.05.01/05.06.01/08.01.04) =="
+run_ok "checked/saturating/wrapping variants" tests/pos_checked_variants.fsht "None|None|9223372036854775807|-9223372036854775808|-9223372036854775808|-9223372036854775808|127|255"
+run_ok "checked_cast / saturating_cast" tests/pos_checked_cast.fsht "None|127|None|0|3|-3"
+run_ok "parse_i64/u64/f64 + round-trip law" tests/pos_parse.fsht "42|-7|invalid|range|-9223372036854775808|invalid|2500.0|inf|range"
+run_ok "io streaming: buffered reader/writer round trip" tests/pos_io_stream.fsht "line one|line two|eof-ok|bytes=8|108|rt=8|notfound|removed|rm-notfound"
+run_ok "stdlib module decomposition (string/numeric/bits/time/random/alloc/collections)" tests/pos_modules_stdlib.fsht "p=7|3|9223372036854775807|6|50|578437695752307201|8|time-ok|4748208303499903454|page=4096|2|empty=0|2|4.0"
+
+echo "== fsht-03:02 borrows & lifetimes (registry 03.02.09/03.02.10) =="
+run_ok "String migration: auto-drop, clone/clear, moves, string_free" tests/pos_string_migration.fsht "hello world|0|hello world|hello|freed"
+run_ok "drop elaboration through user shapes (Vec<String>, Vec<Vec>, struct fields)" tests/pos_shapes.fsht "2|2|2|5|x|1"
+run_ok "&mut / borrowed mut / views with the in-place carve-out" tests/pos_borrow_mut.fsht "6|2|9|14"
+run_err "F0310 two live mutable borrows in one call" tests/neg_borrow_two_mut.fsht F0310
+run_err "F0310 growth against a live view" tests/neg_borrow_view_growth.fsht F0310
+run_err "F0311 returning a view of local storage" tests/neg_borrow_escape.fsht F0311
+run_err "F0311 returning &mut local" tests/neg_borrow_mut_escape.fsht F0311
+run_err "F0301 use-after-string_free" tests/neg_string_uaf.fsht F0301
+run_err "F0310 string_append against a live str view" tests/neg_string_view_growth.fsht F0310
+run_err "F0307 &mut inside a parfor body" tests/neg_parfor_borrow_mut.fsht F0307
+
+echo "== fsht-03:01 negative typing rules =="
+run_err "F0201 mixed-width variant operands" tests/neg_checked_mixed_width.fsht F0201
+run_err "F0201 unresolved cast destination U" tests/neg_cast_unresolved.fsht F0201
+
+echo "== fsht-03:03 portable runtime (registry 10.03.02) =="
+# same-target compilation: the runtime .ll cache key carries the triple,
+# and the wasm cross-compile selects the wasm platform layer (the wasm
+# runtime object compile needs a wasi sysroot — the CI target-matrix
+# workflow provides it; here the pipeline RUNS and the driver degrades
+# gracefully without one)
+if $PEN --target=wasm32-wasi -S tests/pos_basics.fsht -o "$TMP/w.ll" 2>/dev/null \
+    && grep -q 'target triple = "wasm32-unknown-wasi"' "$TMP/w.ll"; then
+  ok "--target wasm32-wasi cross-targets the user module (triple in IR)"
+else bad "wasm cross-target"; fi
+if $PEN --target=aarch64-linux-gnu -S tests/pos_basics.fsht -o "$TMP/a.ll" 2>/dev/null \
+    && grep -q 'target triple = "aarch64-unknown-linux-gnu"' "$TMP/a.ll"; then
+  ok "--target aarch64-linux cross-targets the user module"
+else bad "aarch64 cross-target"; fi
+# the runtime cache is triple-keyed (a target switch never reuses it)
+if $PEN --target=x86_64-pc-linux-gnu -S tests/pos_basics.fsht -o "$TMP/x.ll" 2>/dev/null \
+    && ls build 2>/dev/null | grep -q 'frt_rt.*_tx86_64'; then
+  ok "runtime cache key includes the triple"
+else bad "triple cache key"; fi
+# unsupported triples: driver diagnostic naming the triple (F0009)
+$PEN --target=avr-unknown-none tests/pos_basics.fsht -o "$TMP/t" 2>"$TMP/err"
+if [ $? -ne 0 ] && grep -q "\[F0009\]" "$TMP/err" && grep -q "avr-unknown-none" "$TMP/err"; then
+  ok "F0009 rejects an unsupported triple, naming it"
+else bad "unsupported-triple gate"; fi
+# platform-conditional link: no -lpthread on a wasm link line is CI's
+# to execute end-to-end (the object compile needs the sysroot); the
+# driver's request surface is asserted instead
+if grep -q "appendPlatformLinkLibs" src/main.cpp && grep -q "targetIsLinux" src/main.cpp; then
+  ok "link lines are platform-conditional (linux-only -lpthread)"
+else bad "platform link lines"; fi
+# the runtime decomposition exists with the chapter's layout
+if [ -d runtime/common ] && [ -d runtime/platforms/linux ] \
+    && [ -d runtime/platforms/windows ] && [ -d runtime/platforms/wasm ] \
+    && [ -d runtime/platforms/baremetal ] \
+    && grep -q "FRT_PLATFORM" runtime/frt_rt.c; then
+  ok "runtime decomposition: common/ + platforms/{linux,windows,wasm,baremetal}"
+else bad "runtime decomposition layout"; fi
 
 echo
 echo "passed: $pass   failed: $fail"

@@ -1,0 +1,77 @@
+// fsht-02:02 (registry 06.02.01) — user-defined traits with static dispatch.
+//
+// The registry's motivating example (trait Numeric with zero/one/add/mul)
+// written verbatim, then exercised over i64 and f64 through ONE generic
+// implementation.  Dispatch is `Trait::method(...)` inside generic code
+// (rewritten at instantiation to the impl for T's concrete type) and
+// first-argument typing in concrete code.
+trait Numeric {
+    fn zero() -> Self;
+    fn one() -> Self;
+    fn add(a: Self, b: Self) -> Self;
+    fn mul(a: Self, b: Self) -> Self;
+}
+
+impl Numeric for i64 {
+    fn zero() -> Self { return 0; }
+    fn one() -> Self { return 1; }
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+    fn mul(a: Self, b: Self) -> Self { return a * b; }
+}
+
+impl Numeric for f64 {
+    fn zero() -> Self { return 0.0; }
+    fn one() -> Self { return 1.0; }
+    fn add(a: Self, b: Self) -> Self { return a + b; }
+    fn mul(a: Self, b: Self) -> Self { return a * b; }
+}
+
+// generic algorithm written ONCE over any Numeric
+fn dot<T: Numeric>(a: T, b: T) -> T {
+    return Numeric::mul(a, b);
+}
+
+fn triple<T: Numeric>(x: T) -> T {
+    return Numeric::add(Numeric::add(x, x), x);
+}
+
+// multiple trait bounds: T must satisfy BOTH
+trait Scalable {
+    fn scale(x: Self, k: Self) -> Self;
+}
+impl Scalable for i64 {
+    fn scale(x: Self, k: Self) -> Self { return x * k; }
+}
+
+fn scale_then_dot<T: Numeric + Scalable>(a: T, b: T) -> T {
+    // both traits' methods resolve through the same tparam
+    return Numeric::mul(Scalable::scale(a, a), b);
+}
+
+// a struct target: geometry over user types
+struct Rect { w: f64, h: f64 }
+trait Area {
+    fn area(r: Self) -> f64;
+    fn double_area(r: Self) -> f64;   // calls the sibling via Self::
+}
+impl Area for Rect {
+    fn area(r: Self) -> f64 { return r.w * r.h; }
+    fn double_area(r: Self) -> f64 {
+        return Self::area(r) + Self::area(r);   // Self:: sibling call
+    }
+}
+
+fn main() {
+    // one implementation, two representations
+    print_f64(dot(2.5, 4.0), 1); println();       // 10.0
+    print_i64(dot(3 as i64, 5 as i64)); println(); // 15
+    print_f64(triple(1.5), 1); println();           // 4.5
+    print_i64(triple(7 as i64)); println();         // 21
+    print_i64(scale_then_dot(2 as i64, 3 as i64)); println(); // 12
+    // struct impl + Self:: sibling call
+    let r: Rect = Rect { w: 3.0, h: 4.0 };
+    print_f64(Area::area(r), 1); println();        // 12.0
+    print_f64(Area::double_area(r), 1); println(); // 24.0
+    // concrete-code call, impl picked by the first argument's type
+    print_f64(Area::area(Rect { w: 1.5, h: 2.0 }), 1); println(); // 3.0
+}

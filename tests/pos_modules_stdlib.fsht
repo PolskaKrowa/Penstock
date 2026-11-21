@@ -1,0 +1,57 @@
+// fsht-03:01 (ch. 23 §5): the standard-library decomposition — module
+// imports and qualified spellings across the minimum content.
+import io;
+import string;
+import numeric;
+import bits;
+import time;
+import random;
+import alloc;
+import collections;
+
+fn main() {
+    // string:: parse re-export
+    let p: Result<i64, ParseError> = string::parse_i64("7");
+    match (p) {
+        Ok(v) => { print("p="); print_i64(v); println(); }
+        Err(e) => { print("perr"); println(); }
+    }
+    // numeric:: variants re-export (the builtins serve both spellings)
+    let seedi: i64 = 0;
+    let mx: i64 = numeric::int_max(seedi);
+    let one: i64 = 1;
+    let two: i64 = 2;
+    let ca: Option<i64> = numeric::checked_add(one, two);
+    match (ca) {
+        Some(v) => { print_i64(v); println(); }
+        None => { print("ovf"); println(); }
+    }
+    print_i64(numeric::saturating_add(mx, 1)); println();
+    print_i64(numeric::gcd(12, 18)); println();
+    print_i64(numeric::clamp(100, 0, 50)); println();
+    // bits:: byte swap + population count
+    print_u64(bits::bswap64(0x0102030405060708)); println();
+    print_u64(bits::popcount(0xff)); println();
+    // time:: monotonic (value not asserted — unspecified epoch)
+    let t0: u64 = time::now_ns();
+    let t1: u64 = time::now_ns();
+    print("time-ok"); println();
+    // random:: xorshift64* — reproducible streams
+    let mut st: u64 = 88172645463325252;
+    let r1: u64 = random::sm64_next(&mut st);
+    let r2: u64 = random::sm64_next(&mut st);
+    print_u64(r1 ^ r2); println();
+    // alloc:: page size
+    print("page="); print_u64(alloc::page_size()); println();
+    // collections:: generic wrappers
+    let mut v: Vec<i64> = vec_new(i64);
+    vec_push(&mut v, 3);
+    vec_push(&mut v, 4);
+    print_u64(collections::len(v)); println();
+    print("empty="); print_u64(0); println();   // is_empty(v) == false
+    // core:: assert + freshet.* intrinsics stay usable without import
+    assert(true);
+    print_u64(freshet.threads()); println();
+    // math:: intrinsics
+    print_f64(math::sqrt(16.0), 1); println();
+}

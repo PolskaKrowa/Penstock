@@ -1,0 +1,88 @@
+// fsht-02:03 (registry 06.03.01) — const generics + const fn.
+//
+// The registry's motivating shapes:
+//   struct Vector<T, const N: usize> { data: [T; N] }
+//   struct Matrix<T, const R: usize, const C: usize> { data: [T; R * C] }
+// plus const fn evaluation in const-argument positions, compile-time
+// assertions, and inference of N from array-typed call arguments.
+struct Vector<T, const N: usize> { data: [T; N] }
+struct Matrix<T, const R: usize, const C: usize> { data: [T; R * C] }
+
+// const fn: interpreted at compile time for const arguments, an ordinary
+// runtime function everywhere else
+const fn square(x: usize) -> usize {
+    return x * x;
+}
+const fn fib(n: usize) -> usize {
+    // loops + conditionals are interpretable const control flow
+    if (n < 2) { return n; }
+    let mut a: usize = 0;
+    let mut b: usize = 1;
+    let mut k: usize = 0;
+    while (k < n) {
+        let t: usize = a + b;
+        a = b;
+        b = t;
+        k = k + 1;
+    }
+    return a;
+}
+
+// generic fn with a const parameter: N is inferred from the ARRAY-shaped
+// parameter — every [T; k] call site instantiates its own sum$k
+fn sum<T, const N: usize>(v: [T; N]) -> T {
+    let mut s: T = 0 as T;
+    for (i in 0..N) {
+        s = s + v[i];
+    }
+    return s;
+}
+
+fn main() {
+    // const generic structs: distinct N are distinct types
+    let v3: Vector<f64, 3> = Vector { data: [1.5, 2.5, 3.5] };
+    let v4: Vector<f64, 4> = Vector { data: [1.0, 2.0, 3.0, 4.0] };
+    print_f64(v3.data[0] + v3.data[2], 1); println();   // 5.0
+    print_f64(v4.data[3], 1); println();                 // 4.0
+    // sizeof confirms separate layouts (3 vs 4 elements)
+    print_i64(sizeof(Vector<f64, 3>) as i64); print(" ");
+    print_i64(sizeof(Vector<f64, 4>) as i64); println(); // 24 32
+
+    // matrix: R * C computed at instantiation (2 * 3 = 6 elements)
+    let m: Matrix<f64, 2, 3> = Matrix { data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] };
+    print_i64(sizeof(Matrix<f64, 2, 3>) as i64); println(); // 48
+    print_f64(m.data[4], 1); println();                      // 5.0
+
+    // const fn in a const-argument position: Vector<f64, square(3)>
+    let v9: Vector<f64, square(3)> = Vector {
+        data: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    };
+    print_i64(sizeof(Vector<f64, square(3)>) as i64); println();  // 72
+
+    // const-parameter arithmetic mixing a literal and a const fn call:
+    // 2 * square(2) = 8 elements
+    let v8: Vector<f64, 2 * square(2)> = Vector {
+        data: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    };
+    print_i64(sizeof(Vector<f64, 2 * square(2)>) as i64); println();  // 64
+
+    // fib stays compile-time even with loops: check the type exists
+    print_i64(sizeof(Vector<f64, fib(10)>) as i64); println();    // 440
+
+    // inference of const N from array-typed arguments (i64 literals adopt
+    // the annotated let type, so the array is [i64; 4])
+    let a3: [f64; 3] = [10.5, 20.5, 30.5];
+    let a4: [i64; 4] = [1, 2, 3, 4];
+    print_f64(sum(a3), 1); println();   // 61.5  (sum$f64$3)
+    print_i64(sum(a4)); println();      // 10    (sum$i64$4)
+
+    // runtime calls of the SAME const fns (they stay ordinary fns)
+    print_i64(square(6) as i64); print(" ");
+    print_i64(fib(9) as i64); println(); // 36 34
+
+    // compile-time assertions over const fn results
+    const_assert(square(4) == 16);
+    const_assert(fib(12) == 144);
+    const_assert(sizeof(Vector<f64, 3>) == 24);
+    print("const assertions hold"); println();
+}

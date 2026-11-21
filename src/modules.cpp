@@ -255,6 +255,11 @@ static Program* mergeLoaded(ModuleLoader& L, Program* entry) {
     for (auto* s : p->structs) { s->module = p->moduleName; m->structs.push_back(s); }
     for (auto* e : p->enums) { e->module = p->moduleName; m->enums.push_back(e); }
     for (auto* g : p->globals) { g->module = p->moduleName; m->globals.push_back(g); }
+    // fsht-02:02: trait declarations and impl blocks travel with their
+    // module; impl MEMBER fns already joined m->fns above (their parser
+    // names are placeholder — sema's step 1c renames them per module)
+    for (auto* t : p->traits) { t->module = p->moduleName; m->traits.push_back(t); }
+    for (auto* i : p->impls) { i->module = p->moduleName; m->impls.push_back(i); }
     for (auto& l : p->linkLibs)
       if (std::find(m->linkLibs.begin(), m->linkLibs.end(), l) == m->linkLibs.end())
         m->linkLibs.push_back(l);

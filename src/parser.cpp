@@ -12,6 +12,12 @@ struct Parser {
   std::vector<Token> toks;
   size_t pos = 0;
   std::string file;
+  // fsht-02:02: while parsing the members of an `impl Trait for Type`
+  // block, these carry the trait name and the target type's binder
+  // encoding so `Self` in member signatures/bodies resolves to the
+  // concrete target and `Self::method(...)` re-targets to the trait path.
+  std::string curImplTrait;
+  std::string curImplSelfEnc;
 
   Token& cur() { return toks[pos]; }
   Token& peek(int n = 1) { return toks[std::min(pos + n, toks.size() - 1)]; }
@@ -97,6 +103,88 @@ struct Parser {
   // not form a well-shaped argument list. Backtracking keeps `a < b`
   // comparisons in expression contexts safe even if a caller gets here by
   // accident.
+  // ---- fsht-02:03: const expressions in type positions ----------------
+  // Grammar (no precedence — the encoding is fully parenthesised, so
+  // evaluation needs no operator table; users parenthesise when it
+  // matters):
+  //   cexpr := INT | IDENT | IDENT '(' cargs ')' | '(' cexpr ')'
+  //   cargs := cexpr (',' cexpr)*
+  //   continuation: cexpr (+|-|*|/|%) cexpr  -- encoded as "(A op B)"
+  // Encoding shapes (consteval.cpp evaluates them):
+  //   "5"  literal ·  "N"  name ·  "sq(3,4)"  const-fn call ·  "(A * B)"  binary
+  // Returns "" (rewound, diagnostics dropped) when the tokens do not form
+  // a const expression.
+  std::string tryParseConstExprEnc(bool allowOps = true) {
+    size_t save = pos;
+    size_t diagSave = g_diags.size();
+    auto rewind = [&]() {
+      pos = save;
+      g_diags.resize(diagSave);
+      return std::string();
+    };
+    auto parsePrim = [&]() -> std::string {
+      if (cur().kind == Token::INT) {
+        std::string v = std::to_string(cur().ival);
+        advance();
+        return v;
+      }
+      if (cur().kind == Token::IDENT || cur().kind == Token::KW) {
+        // a const parameter or const fn name (keywords too — `Self`
+        // methods are not const exprs, but accepting KW keeps the shape
+        // check simple; the evaluator rejects unknown names)
+        std::string nm = cur().text;
+        advance();
+        if (at("(")) {
+          advance();
+          std::string enc = nm + "(";
+          if (!at(")")) {
+            while (true) {
+              std::string a = tryParseConstExprEnc();
+              if (a.empty()) return "";
+              enc += a;
+              if (accept(",")) { enc += ","; continue; }
+              break;
+            }
+          }
+          if (!at(")")) return "";
+          advance();
+          enc += ")";
+          return enc;
+        }
+        return nm;
+      }
+      if (at("(")) {
+        advance();
+        std::string inner = tryParseConstExprEnc();
+        if (inner.empty() || !at(")")) return "";
+        advance();
+        return inner;   // parens only group: the value IS the inner enc
+      }
+      return "";
+    };
+    std::string left = parsePrim();
+    if (left.empty()) return rewind();
+    while (allowOps && (at("+") || at("-") || at("*") || at("/") || at("%"))) {
+      std::string op = cur().text;
+      advance();
+      std::string right = parsePrim();
+      if (right.empty()) return rewind();
+      left = "(" + left + " " + op + " " + right + ")";
+    }
+    return left;
+  }
+
+  // A token position starts a const-expression shape when it is not a
+  // type shape: INT literals, '(' groups, or IDENT '(' const-fn calls.
+  // (Bare IDENTs are AMBIGUOUS — type name or const param — and are
+  // handled by letting the binder decide from the template's parameter
+  // kinds.)
+  bool atConstExprOnly() {
+    if (cur().kind == Token::INT) return true;
+    if (at("(")) return true;
+    return false;
+  }
+
   bool tryParseTypeArgs(std::vector<std::string>* encs,
                         std::vector<Type*>* placeholders) {
     if (!at("<")) return false;
@@ -106,12 +194,40 @@ struct Parser {
     std::vector<std::string> es;
     std::vector<Type*> ps;
     while (true) {
-      auto [ty, nm] = parseTypeNamed();
-      (void)ty;
-      es.push_back(nm);
-      ps.push_back(ty);
+      // fsht-02:03: a const argument position (integer literal, const-fn
+      // call, parenthesised group, or operator expression over them).  A
+      // bare identifier stays a TYPE name — the binder consults the
+      // template's tparamIsConst and evaluates the encoding as a const
+      // expression when the slot is const.
+      if (atConstExprOnly() ||
+          (cur().kind == Token::IDENT && peek().text == "(")) {
+        std::string cenc = tryParseConstExprEnc();
+        if (cenc.empty()) {
+          pos = save;
+          g_diags.resize(diagSave);
+          return false;
+        }
+        es.push_back(cenc);
+        ps.push_back(nullptr);   // not a type; the binder treats it as const
+      } else {
+        auto [ty, nm] = parseTypeNamed();
+        (void)ty;
+        es.push_back(nm);
+        ps.push_back(ty);
+      }
       if (accept(",")) continue;
       if (accept(">")) break;
+      // fsht-03:02 (ch. 24 §5): nested generics end with `>>` (the lexer
+      // merges the two closing brackets, Vec<Vec<i64>>) — treat a `>>`
+      // here as ONE consumed `>` and rewrite the token in place so the
+      // OUTER argument list sees the remaining `>` (the classic C++
+      // angle-bracket problem; C++ solved it identically)
+      if (at(">>")) {
+        cur().text = ">";
+        cur().loc.startOffset += 1;
+        cur().loc.col += 1;
+        break;
+      }
       // not a type-argument shape: rewind tokens and any diagnostics the
       // failed attempt produced
       pos = save;
@@ -191,26 +307,67 @@ struct Parser {
       (void)l;
       return {Type::soaOf(nullptr), "soa:" + sn};
     }
-    // [T; N] — fixed-size array
+    // [T; N] — fixed-size array.  fsht-02:03: N may also be a const
+    // expression over const generic parameters (`[T; N * 2]`) or a
+    // const-fn call — encoded as `arr:<constexpr>:ENC`, evaluated by the
+    // binder under the active const-parameter environment.
     if (cur().kind == Token::PUNCT && t == "[") {
       advance();
       auto [ty, nm] = parseTypeNamed();
       expect(";", "array length");
-      if (cur().kind != Token::INT) {
-        diag(Diag::Error, Code::Parse,
-             "array length must be an integer literal, got '" + cur().text + "'",
-             cur().loc);
+      if (cur().kind == Token::INT) {
+        uint64_t n = cur().ival;
         advance();
-        return {Type::arrayOf(ty, 0), "arr:0:" + nm};
+        expect("]", "array type");
+        if (n == 0) {
+          diag(Diag::Error, Code::Parse, "array length must be at least 1",
+               l);
+        }
+        return {Type::arrayOf(ty, n), nm.empty() ? "" : "arr:" + std::to_string(n) + ":" + nm};
       }
-      uint64_t n = cur().ival;
+      // const-expression length (fsht-02:03): identifier, call or group
+      if (cur().kind == Token::IDENT || at("(")) {
+        std::string cenc = tryParseConstExprEnc();
+        if (!cenc.empty() && at("]")) {
+          advance();
+          if (nm.empty())
+            diag(Diag::Error, Code::Parse,
+                 "array length is a const expression but the element type "
+                 "is unnamed — this combination is unsupported", l);
+          return {Type::arrayOf(ty, 0), "arr:" + cenc + ":" + nm};
+        }
+      }
+      diag(Diag::Error, Code::Parse,
+           "array length must be an integer literal or a const expression "
+           "(fsht-02:03), got '" + cur().text + "'",
+           cur().loc);
       advance();
-      expect("]", "array type");
-      if (n == 0) {
-        diag(Diag::Error, Code::Parse, "array length must be at least 1",
-             l);
+      return {Type::arrayOf(ty, 0), "arr:0:" + nm};
+    }
+    // fsht-02:02: `Self` inside an impl block resolves to the impl's
+    // concrete target type; inside a TRAIT declaration it stays the
+    // placeholder "Self" (trait method signatures).
+    if (cur().kind == Token::KW && t == "Self") {
+      advance();
+      if (!curImplSelfEnc.empty()) {
+        if (at("<") && cur().kind == Token::PUNCT) {
+          // Self<...> — generic target instantiation: substitute the
+          // encoding with the argument list appended
+          std::vector<std::string> encs;
+          if (tryParseTypeArgs(&encs, nullptr)) {
+            std::string argEnc;
+            for (size_t i = 0; i < encs.size(); ++i) {
+              if (i) argEnc += ";";
+              argEnc += encs[i];
+            }
+            return {Type::structOf(nullptr), "gen:" + curImplSelfEnc + "(" + argEnc + ")"};
+          }
+        }
+        if (accept("*"))
+          return {Type::ptr(Type::structOf(nullptr)), "*:" + curImplSelfEnc};
+        return {Type::structOf(nullptr), curImplSelfEnc};
       }
-      return {Type::arrayOf(ty, n), nm.empty() ? "" : "arr:" + std::to_string(n) + ":" + nm};
+      return {Type::structOf(nullptr), "Self"};
     }
     if (cur().kind == Token::IDENT || cur().kind == Token::KW) {
       std::string name = cur().text;
@@ -300,10 +457,16 @@ struct Parser {
   Expr* parseUnary() {
     SrcLoc l = cur().loc;
     if (at("&")) {
-      // address-of: &lvalue
+      // address-of / borrow: &lvalue.  fsht-03:02 (registry 03.02.09):
+      // `&mut place` is the explicit exclusive mutable-borrow spelling;
+      // `&place` is the shared borrow (and the legacy argument form the
+      // mutation builtins re-specified as mutable borrows) — sema and
+      // the ownership analysis distinguish the two through borrowMut.
       advance();
       Expr* u = new Expr(Expr::UN, l);
       u->op = "&";
+      // `mut` is a keyword token — match by text (atIdent is IDENT-only)
+      if (at("mut")) { u->borrowMut = true; advance(); }
       u->rhs = parseUnary();
       return u;
     }
@@ -417,6 +580,39 @@ struct Parser {
           advance();
           return e;
         }
+        // fsht-02:02: `Self::method(args)` / `Self::method` inside an impl
+        // block re-targets to the impl's trait path — sema then resolves
+        // it against the impl's own target type (zero-arg self calls stay
+        // unambiguous this way).
+        if (at("Self") && peek().text == "::") {
+          advance();              // 'Self'
+          advance();              // '::'
+          std::string item = expectIdent("name after '::'");
+          std::string trait = curImplTrait.empty() ? std::string("Self")
+                                                    : curImplTrait;
+          if (at("(")) {
+            Expr* e = new Expr(Expr::CALL, l);
+            e->name = trait + "::" + item;
+            e->qualModule = trait;
+            advance();            // '('
+            if (!at(")")) {
+              while (true) {
+                bool give = false;
+                if (at("give")) { give = true; advance(); }
+                Expr* a = parseExpr();
+                e->args.push_back(a);
+                e->argGive.push_back(give);
+                if (!accept(",")) break;
+              }
+            }
+            expect(")", "call args");
+            return e;
+          }
+          Expr* e = new Expr(Expr::IDENT, l);
+          e->name = trait + "::" + item;
+          e->qualModule = trait;
+          return e;
+        }
         if (at("sizeof") || at("alignof")) {
           std::string kw = cur().text;
           advance();
@@ -477,6 +673,31 @@ struct Parser {
           e->name = full;
           e->qualModule = mod;
           return e;
+        }
+        // fsht-03:02 (ch. 24 §5): a TYPE NAME in expression position —
+        // the type arguments of vec_new/malloc/soa_new (`vec_new(Vec<i64>)`,
+        // now including nested generics like Vec<Vec<i64>>).  The name
+        // parses as a generic instantiation; on rewind the shape degrades
+        // back to a comparison, so `a < b` keeps its meaning.
+        if (cur().kind == Token::IDENT && peek().text == "<") {
+          size_t save = pos;
+          size_t diagSave = g_diags.size();
+          std::string tname = cur().text;
+          advance();
+          std::vector<std::string> encs;
+          if (tryParseTypeArgs(&encs, nullptr)) {
+            std::string argEnc;
+            for (size_t i = 0; i < encs.size(); ++i) {
+              if (i) argEnc += ";";
+              argEnc += encs[i].empty() ? std::string("~") : encs[i];
+            }
+            Expr* e = new Expr(Expr::IDENT, l);
+            e->name = "gen:" + tname + "(" + argEnc + ")";
+            e->constant = true;
+            return e;
+          }
+          pos = save;             // rewind: a comparison `a < b`, not a type
+          g_diags.resize(diagSave);
         }
         // struct literal: Name { field: expr, ... }
         // Phase 3a: resolved by SEMA, not by the parser — a type imported
@@ -947,6 +1168,166 @@ struct Parser {
         advance();
         pub = true;
       }
+      // ---- fsht-02:02 (registry 06.02.01): traits + impls -------------
+      //   trait Numeric {
+      //       fn add(a: Self, b: Self) -> Self;
+      //   }
+      //   impl Numeric for i64 {
+      //       fn add(a: Self, b: Self) -> Self { return a + b; }
+      //   }
+      // Trait method signatures are DECLARATIONS (`;`-terminated, no
+      // body); impl members are ordinary fns that sema mangles to
+      // `Trait$<type>$method` and registers like any other function, so
+      // dispatch stays static (direct call, monomorphised, no vtable).
+      if (at("trait")) {
+        advance();
+        TraitDef* td = new TraitDef();
+        td->loc = l;
+        td->isPub = pub;
+        td->name = expectIdent("trait name");
+        if (at("<")) {
+          diag(Diag::Error, Code::Generic,
+               "generic traits are not supported in the fsht-02:02 first "
+               "cut — declare associated-type traits as separate traits",
+               l);
+          advance();
+          while (!at(">") && cur().kind != Token::EOFTOK) advance();
+          accept(">");
+        }
+        expect("{", "trait body");
+        while (!at("}") && cur().kind != Token::EOFTOK) {
+          if (accept(";")) continue;
+          if (!at("fn")) {
+            diag(Diag::Error, Code::Parse,
+                 "expected a method signature ('fn name(...) -> T;') in "
+                 "trait " + td->name + ", got '" + cur().text + "'",
+                 cur().loc);
+            advance();
+            continue;
+          }
+          advance();   // 'fn'
+          TraitDef::Method m;
+          m.loc = cur().loc;
+          m.name = expectIdent("trait method name");
+          // member attributes are rejected: traits carry signatures only
+          while (at("@")) {
+            diag(Diag::Warning, Code::Attr,
+                 "attributes on trait method " + td->name + "::" + m.name +
+                 " are not honoured (traits declare signatures only)",
+                 cur().loc);
+            advance();
+            expectIdent("attribute");
+          }
+          expect("(", "trait method params");
+          if (!at(")")) {
+            while (true) {
+              Param pm;
+              pm.loc = cur().loc;
+              pm.name = expectIdent("trait method param");
+              expect(":", "param type");
+              auto [ty, nm] = parseTypeNamed();
+              pm.ty = ty; pm.tyName = nm;
+              m.params.push_back(pm);
+              if (!accept(",")) break;
+            }
+          }
+          expect(")", "trait method params");
+          if (accept("->")) {
+            auto [ty, nm] = parseTypeNamed();
+            m.retEnc = nm;
+          }
+          expect(";", "trait method signature");
+          td->methods.push_back(m);
+        }
+        expect("}", "trait body");
+        td->loc = throughLastConsumed(l);
+        if (td->methods.empty()) {
+          diag(Diag::Error, Code::Parse, "trait " + td->name +
+               " must declare at least one method", l);
+        }
+        p->traits.push_back(td);
+        continue;
+      }
+      if (at("impl")) {
+        advance();
+        std::string traitName = expectIdent("trait name");
+        expect("for", "impl trait for type");
+        auto [selfTy, selfEnc] = parseTypeNamed();
+        (void)selfTy;
+        ImplDef* im = new ImplDef();
+        im->loc = l;
+        im->isPub = pub;
+        im->traitName = traitName;
+        im->selfEnc = selfEnc;
+        expect("{", "impl body");
+        // member signatures see `Self` as the concrete target
+        // (curImplSelfEnc), and `Self::method` re-targets to the trait
+        // path (curImplTrait) — both restored after the block.
+        std::string saveTrait = curImplTrait;
+        std::string saveSelf = curImplSelfEnc;
+        curImplTrait = traitName;
+        curImplSelfEnc = selfEnc;
+        while (!at("}") && cur().kind != Token::EOFTOK) {
+          if (accept(";")) continue;
+          if (!at("fn")) {
+            diag(Diag::Error, Code::Parse,
+                 "expected a method ('fn name(...) { ... }') in impl " +
+                 traitName + " for " + (selfEnc.empty() ? "<unresolved>" : selfEnc) +
+                 ", got '" + cur().text + "'",
+                 cur().loc);
+            advance();
+            continue;
+          }
+          advance();   // 'fn'
+          FnDecl* f = new FnDecl();
+          f->loc = cur().loc;
+          f->isTraitImpl = true;
+          f->traitName = traitName;
+          f->implSelfEnc = selfEnc;
+          f->isPub = pub;   // impl-level; sema re-checks fn-level form
+          f->name = expectIdent("impl method name");
+          // (attributes before fn are not honoured inside impls)
+          expect("(", "impl method params");
+          if (!at(")")) {
+            while (true) {
+              Param pm;
+              pm.loc = cur().loc;
+              if (atIdent("owned") && peek().kind == Token::IDENT) {
+                advance();
+                pm.owned = true;
+              } else if (atIdent("borrowed") &&
+                         (peek().kind == Token::IDENT || peek().text == "mut")) {
+                advance();
+                pm.borrowed = true;
+                // fsht-03:02 (ch. 24 §1): `borrowed mut` in impl methods too
+                if (at("mut")) { pm.borrowedMut = true; advance(); }
+              }
+              pm.name = expectIdent("param name");
+              expect(":", "param type");
+              auto [ty, nm] = parseTypeNamed();
+              pm.ty = ty; pm.tyName = nm;
+              f->params.push_back(pm);
+              if (!accept(",")) break;
+            }
+          }
+          expect(")", "impl method params");
+          if (accept("->")) {
+            auto [ty, nm] = parseTypeNamed();
+            f->ret = ty; f->retTyName = nm;
+          }
+          f->body = parseBlock(f, nullptr);
+          f->loc = throughLastConsumed(f->loc);
+          f->id = (int)p->fns.size();
+          p->fns.push_back(f);
+          im->fns.push_back(f);
+        }
+        expect("}", "impl body");
+        curImplTrait = saveTrait;
+        curImplSelfEnc = saveSelf;
+        im->loc = throughLastConsumed(l);
+        p->impls.push_back(im);
+        continue;
+      }
       // Phase 1d (report §4.3): enum declarations
       //   enum Name { A, B(i32, f64) }
       //   enum Name<T> { Some(T), None }
@@ -956,11 +1337,26 @@ struct Parser {
         ed->loc = l;
         ed->isPub = pub;
         ed->name = expectIdent("enum name");
-        // generic template parameters
+        // generic template parameters (fsht-02:03: const params allowed,
+        // same shape as structs)
         if (at("<")) {
           advance();
           while (true) {
-            ed->tparams.push_back(expectIdent("type parameter"));
+            if (at("const") && (peek().kind == Token::IDENT)) {
+              advance();
+              std::string cn = expectIdent("const parameter name");
+              expect(":", "const parameter type");
+              std::string ty = expectIdent("const parameter type");
+              if (ty != "usize")
+                diag(Diag::Error, Code::Generic,
+                     "const parameter " + cn + " must be usize in the "
+                     "fsht-02:03 first cut, got '" + ty + "'", l);
+              ed->tparams.push_back(cn);
+              ed->tparamIsConst.push_back(true);
+            } else {
+              ed->tparams.push_back(expectIdent("type parameter"));
+              ed->tparamIsConst.push_back(false);
+            }
             if (!accept(",")) break;
           }
           expect(">", "enum type parameters");
@@ -1007,11 +1403,27 @@ struct Parser {
         sd->loc = l;
         sd->isPub = pub;
         sd->name = expectIdent("struct name");
-        // Phase 2a: generic struct template parameters
+        // Phase 2a: generic struct template parameters.
+        // fsht-02:03: `const N: usize` adds a compile-time value
+        // parameter (`Vector<T, const N: usize> { data: [T; N] }`).
         if (at("<")) {
           advance();
           while (true) {
-            sd->tparams.push_back(expectIdent("type parameter"));
+            if (at("const") && (peek().kind == Token::IDENT)) {
+              advance();
+              std::string cn = expectIdent("const parameter name");
+              expect(":", "const parameter type");
+              std::string ty = expectIdent("const parameter type");
+              if (ty != "usize")
+                diag(Diag::Error, Code::Generic,
+                     "const parameter " + cn + " must be usize in the "
+                     "fsht-02:03 first cut, got '" + ty + "'", l);
+              sd->tparams.push_back(cn);
+              sd->tparamIsConst.push_back(true);
+            } else {
+              sd->tparams.push_back(expectIdent("type parameter"));
+              sd->tparamIsConst.push_back(false);
+            }
             if (!accept(",")) break;
           }
           expect(">", "struct type parameters");
@@ -1089,6 +1501,15 @@ struct Parser {
                l);
         }
       }
+      // fsht-02:03 (registry 06.03.01): `const fn` — a function whose
+      // body the compiler can interpret at compile time (const-generic
+      // arguments, const_assert).  Const fns remain ordinary runtime
+      // functions too.  Accepted after the attribute loop, before `fn`.
+      bool constFn = false;
+      if (at("const") && peek().text == "fn") {
+        advance();
+        constFn = true;
+      }
       if (at("fn")) {
         advance();
         FnDecl* f = new FnDecl();
@@ -1097,6 +1518,7 @@ struct Parser {
         f->imported = imported;
         f->isPub = pub;
         f->isTest = preTest;
+        f->isConst = constFn;
         // merge pending attributes (pre-fn form)
         f->strictfp = preStrictfp;
         f->userPure = prePure;
@@ -1110,14 +1532,37 @@ struct Parser {
         f->name = expectIdent("fn name");
         // Phase 2a (report §4.2): generic function template
         //   fn clamp<T: Numeric>(x: T, low: T, high: T) -> T
+        // fsht-02:02: constraints accept multiple bounds
+        //   (`T: Numeric + Hashable` — stored "Numeric+Hashable", all
+        //   parts must hold).
+        // fsht-02:03: `const N: usize` value parameters.
         if (at("<")) {
           advance();
           while (true) {
-            std::string tp = expectIdent("type parameter");
-            std::string cons;
-            if (accept(":")) cons = expectIdent("type constraint");
-            f->tparams.push_back(tp);
-            f->tconstraints.push_back(cons);
+            if (at("const") && (peek().kind == Token::IDENT)) {
+              advance();
+              std::string cn = expectIdent("const parameter name");
+              expect(":", "const parameter type");
+              std::string ty = expectIdent("const parameter type");
+              if (ty != "usize")
+                diag(Diag::Error, Code::Generic,
+                     "const parameter " + cn + " must be usize in the "
+                     "fsht-02:03 first cut, got '" + ty + "'", l);
+              f->tparams.push_back(cn);
+              f->tconstraints.push_back("");
+              f->tparamIsConst.push_back(true);
+            } else {
+              std::string tp = expectIdent("type parameter");
+              std::string cons;
+              if (accept(":")) {
+                cons = expectIdent("type constraint");
+                while (accept("+"))
+                  cons += "+" + expectIdent("type constraint");
+              }
+              f->tparams.push_back(tp);
+              f->tconstraints.push_back(cons);
+              f->tparamIsConst.push_back(false);
+            }
             if (!accept(",")) break;
           }
           expect(">", "fn type parameters");
@@ -1134,9 +1579,14 @@ struct Parser {
             if (atIdent("owned") && peek().kind == Token::IDENT) {
               advance();
               pm.owned = true;
-            } else if (atIdent("borrowed") && peek().kind == Token::IDENT) {
+            } else if (atIdent("borrowed") &&
+                       (peek().kind == Token::IDENT || peek().text == "mut")) {
               advance();
               pm.borrowed = true;
+              // fsht-03:02 (registry 03.02.09, ch. 24 §1): `borrowed mut`
+              // — the callee gets exclusive write access; call sites pass
+              // &mut place (F0303 otherwise)
+              if (at("mut")) { pm.borrowedMut = true; advance(); }
             }
             pm.name = expectIdent("param name");
             expect(":", "param type");

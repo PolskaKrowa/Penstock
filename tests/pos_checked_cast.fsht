@@ -1,0 +1,41 @@
+// fsht-03:01 (ch. 23 §3): checked_cast / saturating_cast with the
+// context-inferred destination U.
+fn main() {
+    // int -> int narrowing: None when not representable
+    let n: u8 = 200;
+    let c: Option<i8> = checked_cast(n);
+    match (c) {
+        Some(v) => { print_i64(v as i64); }
+        None => { print("None"); }
+    }
+    println();
+    // saturating clamps to the destination bounds
+    let s: i8 = saturating_cast(n);
+    print_i64(s as i64); println();
+    // float -> int: None for NaN and out-of-range magnitudes
+    let big: f64 = 1.5e18;
+    let fc: Option<i32> = checked_cast(big);
+    match (fc) {
+        Some(v) => { print_i64(v as i64); }
+        None => { print("None"); }
+    }
+    println();
+    // saturating_cast float -> int: clamp, NaN -> 0
+    let nan: f64 = parse_nan();
+    let nz: i64 = saturating_cast(nan);
+    print_i64(nz); println();
+    let fb: f64 = 3.9;
+    let tb: i64 = saturating_cast(fb);
+    print_i64(tb); println();
+    // widening is always representable
+    let small: i8 = -3;
+    let w: Option<i64> = checked_cast(small);
+    match (w) {
+        Some(v) => { print_i64(v); }
+        None => { print("None"); }
+    }
+    println();
+}
+fn parse_nan() -> f64 {
+    return 0.0 / 0.0;
+}

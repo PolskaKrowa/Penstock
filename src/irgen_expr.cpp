@@ -440,6 +440,13 @@ std::string genVariantConstruct(Expr* e, std::vector<Expr*>* args) {
       if (arg->ty && !typesEquivalent(arg->ty, ft) && arg->ty->isNum() &&
           ft->isNum())
         val = genCastInline(arg, ft, val);
+      // bool VALUES are i1 registers while the payload slot uses the
+      // i8 C ABI — widen at the boundary (the genArg rule)
+      if (ft->k == Type::BOOL && arg->ty && arg->ty->k == Type::BOOL) {
+        std::string w = G->t();
+        G->out << "  " << w << " = zext i1 " << val << " to i8\n";
+        val = w;
+      }
       G->out << "  store " << G->llvmType(ft) << " " << val << ", ptr " << fp
              << "\n";
     }
@@ -496,6 +503,15 @@ std::string genExpr(Expr* e) {
                << G->floatToHex((float)e->ival) << "\n";
       } else {
         G->out << "  " << r << " = add i64 0, " << (int64_t)e->ival << "\n";
+        // fsht-03:01 (int_min/int_max folds): a literal TYPED at a
+        // narrow width (the seed's type) narrows to its own width —
+        // consumers store/cast at the type they see
+        if (t && t->isInt() && t->bits() < 64) {
+          std::string w = G->t();
+          G->out << "  " << w << " = trunc i64 " << r << " to "
+                 << G->llvmType(t) << "\n";
+          return w;
+        }
       }
       return r;
     }
@@ -586,8 +602,11 @@ std::string genExpr(Expr* e) {
         Field* f = nullptr;
         for (auto& fd : sd->fields) if (fd.name == e->slitFields[i]) f = &fd;
         if (!f) continue;
-        if (f->ty->k == Type::STRUCT) {
-          // copy from value
+        // aggregate-typed fields copy from the value's address: structs,
+        // enums and (fsht-02:03) inline arrays — `[T; N]` members are
+        // value aggregates whose literal/expr value is an address
+        if (f->ty->k == Type::STRUCT || f->ty->k == Type::ENUM ||
+            f->ty->k == Type::ARRAY) {
           std::string v = genExpr(e->args[i]);
           std::string fa = G->t();
           G->out << "  " << fa << " = getelementptr inbounds "
@@ -595,6 +614,9 @@ std::string genExpr(Expr* e) {
                  << f->idx << "\n";
           G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << fa << ", ptr "
                  << v << ", i64 " << typeSizeOf(f->ty) << ", i1 false)\n";
+          // fsht-03:02 (ch. 24 §5): an owning temporary field value
+          // transfers into the literal's field — never double-drops
+          markTempConsumed(v);
         } else {
           std::string v = genExpr(e->args[i]);
           if (e->args[i]->ty && f->ty && !typesEquivalent(e->args[i]->ty, f->ty)) {
@@ -982,6 +1004,11 @@ std::string genExpr(Expr* e) {
     case Expr::TRYQ: {
       // enum value = address of { i64 tag, payload }
       std::string agg = genExpr(e->base);
+      // fsht-03:02: the payload (or error payload) is extracted out of
+      // the value below — the temporary transfers ownership and never
+      // drops at the statement end (else an Ok(Reader/Writer) payload
+      // would be closed by the temp drop while still in use)
+      markTempConsumed(agg);
       EnumDef* ed = e->enumRef;
       EnumVariant& errV = ed->variants[e->variantIdx];
       std::string tagp = G->t();

@@ -9,6 +9,17 @@
 #   fatal-forced PENSTOCK_SUBMODULE_Z3=ON with no checkout -> must FATAL
 #   real-z3      resolver + patcher + idempotency against third_party/z3
 #   real-alive2  resolver + patcher + idempotency against third_party/alive2
+#   patcher-z3-legacy    fake <= 4.15.x z3 tree: component rename + api
+#                        dependency update + idempotency
+#   patcher-z3-reformat  same layout with the declaration name on its own
+#                        line and different api indentation (whitespace
+#                        tolerance)
+#   patcher-z3-upstream  fake post-4.15.3 z3 tree (upstream z3_opt):
+#                        both files must stay untouched
+#   patcher-z3-patched   fake tree already renamed by an earlier configure:
+#                        idempotent no-op
+#   patcher-z3-unknown  fake tree with an unrecognised declaration: must
+#                        FATAL naming the declaration and the pin hint
 #   builder      penstock_build_llvm_backend_from_source on a fake
 #                llvm-project tree with the REAL build-tree layout (SDK
 #                headers stay in the source checkout, not in the build
@@ -96,6 +107,17 @@ add_custom_target(clang-resource-headers
                            commit -qm "fake llvm-project")
 endfunction()
 
+# Creates a fake z3 checkout shaped like the parts of upstream's tree the
+# patcher touches: src/opt/CMakeLists.txt declares the optimisation
+# component and src/api/CMakeLists.txt depends on it. <opt_text>/<api_text>
+# are the exact file bodies, so each test mode controls the declaration
+# style (component name, indentation, line breaks).
+function(_penstock_test_fake_z3 root opt_text api_text)
+  file(MAKE_DIRECTORY "${root}/z3/src/opt" "${root}/z3/src/api")
+  file(WRITE "${root}/z3/src/opt/CMakeLists.txt" "${opt_text}")
+  file(WRITE "${root}/z3/src/api/CMakeLists.txt" "${api_text}")
+endfunction()
+
 if(PENSTOCK_TEST_MODE STREQUAL "detection")
   set(_root "${PENSTOCK_THIRD_PARTY_ROOT}")
   file(MAKE_DIRECTORY "${_root}")
@@ -172,6 +194,87 @@ elseif(PENSTOCK_TEST_MODE STREQUAL "real-z3")
   file(SHA256 "${PENSTOCK_THIRD_PARTY_ROOT}/z3/src/api/CMakeLists.txt" _h2b)
   expect_eq("${_h1b}" "${_h1}" "z3 opt patch is idempotent")
   expect_eq("${_h2b}" "${_h2}" "z3 api patch is idempotent")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "patcher-z3-legacy")
+  # The pinned tag's exact shapes: `z3_add_component(opt ...)` and a
+  # 4-space indented first COMPONENT_DEPENDENCIES entry.
+  set(_root "${PENSTOCK_TEST_WORK}/third_party")
+  _penstock_test_fake_z3("${_root}"
+    "z3_add_component(opt\nSOURCES\n  opt_context.cpp\n)\n"
+    "z3_add_component(api\nSOURCES\n  api_ast.cpp\nCOMPONENT_DEPENDENCIES\n    opt\n)\n")
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  file(READ "${_root}/z3/src/opt/CMakeLists.txt" _opt_after)
+  expect_contains(_opt_after "z3_add_component(penstock_z3_opt"
+    "legacy z3 opt component namespaced")
+  file(READ "${_root}/z3/src/api/CMakeLists.txt" _api_after)
+  expect_contains(_api_after "COMPONENT_DEPENDENCIES\n    penstock_z3_opt"
+    "legacy z3 api dependency updated")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2)
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1b)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2b)
+  expect_eq("${_h1b}" "${_h1}" "legacy z3 opt patch is idempotent")
+  expect_eq("${_h2b}" "${_h2}" "legacy z3 api patch is idempotent")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "patcher-z3-reformat")
+  # A cosmetic upstream reformat: the component name sits on its own line
+  # and the api dependency entry is indented with two spaces. The patcher
+  # must still rename and preserve the original whitespace.
+  set(_root "${PENSTOCK_TEST_WORK}/third_party")
+  _penstock_test_fake_z3("${_root}"
+    "z3_add_component(\n  opt\nSOURCES\n  opt_context.cpp\n)\n"
+    "z3_add_component(api\nSOURCES\n  api_ast.cpp\nCOMPONENT_DEPENDENCIES\n  opt\n)\n")
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  file(READ "${_root}/z3/src/opt/CMakeLists.txt" _opt_after)
+  expect_contains(_opt_after "z3_add_component(\n  penstock_z3_opt"
+    "reformatted z3 opt component namespaced, whitespace preserved")
+  file(READ "${_root}/z3/src/api/CMakeLists.txt" _api_after)
+  expect_contains(_api_after "COMPONENT_DEPENDENCIES\n  penstock_z3_opt"
+    "reformatted z3 api dependency updated, indentation preserved")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "patcher-z3-upstream")
+  # Post-4.15.3 upstream renamed the component to z3_opt itself (the api
+  # dependency renamed alongside). The patcher must leave both files
+  # byte-identical: there is no collision left to work around.
+  set(_root "${PENSTOCK_TEST_WORK}/third_party")
+  _penstock_test_fake_z3("${_root}"
+    "z3_add_component(z3_opt\nSOURCES\n  opt_context.cpp\n)\n"
+    "z3_add_component(api\nSOURCES\n  api_ast.cpp\nCOMPONENT_DEPENDENCIES\n    z3_opt\n)\n")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2)
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1b)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2b)
+  expect_eq("${_h1b}" "${_h1}" "upstream z3_opt layout left untouched (opt)")
+  expect_eq("${_h2b}" "${_h2}" "upstream z3_opt layout left untouched (api)")
+  file(READ "${_root}/z3/src/opt/CMakeLists.txt" _opt_after)
+  expect_contains(_opt_after "z3_add_component(z3_opt"
+    "upstream z3_opt declaration still present")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "patcher-z3-patched")
+  # A tree an earlier configure already renamed: idempotent no-op.
+  set(_root "${PENSTOCK_TEST_WORK}/third_party")
+  _penstock_test_fake_z3("${_root}"
+    "z3_add_component(penstock_z3_opt\nSOURCES\n  opt_context.cpp\n)\n"
+    "z3_add_component(api\nSOURCES\n  api_ast.cpp\nCOMPONENT_DEPENDENCIES\n    penstock_z3_opt\n)\n")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2)
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  file(SHA256 "${_root}/z3/src/opt/CMakeLists.txt" _h1b)
+  file(SHA256 "${_root}/z3/src/api/CMakeLists.txt" _h2b)
+  expect_eq("${_h1b}" "${_h1}" "already-patched z3 tree left untouched (opt)")
+  expect_eq("${_h2b}" "${_h2}" "already-patched z3 tree left untouched (api)")
+
+elseif(PENSTOCK_TEST_MODE STREQUAL "patcher-z3-unknown")
+  # An unrecognised declaration must fail fatally, naming the component it
+  # found and the supported pins (checked by the shell driver).
+  set(_root "${PENSTOCK_TEST_WORK}/third_party")
+  _penstock_test_fake_z3("${_root}"
+    "z3_add_component(optimisation\nSOURCES\n  opt_context.cpp\n)\n"
+    "z3_add_component(api\nSOURCES\n  api_ast.cpp\nCOMPONENT_DEPENDENCIES\n    optimisation\n)\n")
+  penstock_patch_z3_for_embedded_build("${_root}/z3")
+  message(FATAL_ERROR "TEST FAILURE: unknown z3 layout was accepted")
 
 elseif(PENSTOCK_TEST_MODE STREQUAL "real-alive2")
   set(CMAKE_BINARY_DIR "${PENSTOCK_TEST_WORK}/build")

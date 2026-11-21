@@ -1,0 +1,11 @@
+// core — primitive operations, memory, assertions (fsht-03:01,
+// ch. 23 §5): the assert family and the freshet.* intrinsics.  Both
+// are compiler-known surfaces (assert/const_assert builtins and the
+// freshet.* intrinsic namespace), usable without any import — this
+// module is the decomposition's anchor for them.
+//
+//   assert(cond)          — aborts the program on false
+//   const_assert(expr)   — compile-time assertion (F0219/F0220)
+//   freshet.prefetch_r/w, freshet.clflush, freshet.pause
+//   freshet.cycles, freshet.time_ns, freshet.time_ms, freshet.threads
+module core;

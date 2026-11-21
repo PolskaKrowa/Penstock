@@ -79,6 +79,58 @@ else
   fi
 fi
 
+# ----------------------------------------------------- T3b z3 patcher: legacy
+note "T3b: z3 patcher on a fake <= 4.15.x layout (rename + idempotency)"
+if run_mode patcher-z3-legacy "$WORK/patcher-z3-legacy/third_party" \
+     >"$WORK/patcher-z3-legacy.log" 2>&1; then
+  pass "legacy layout renamed, api dependency updated, idempotent"
+else
+  fail "patcher-z3-legacy mode"; sed -n '1,40p' "$WORK/patcher-z3-legacy.log"
+fi
+
+# --------------------------------------------------- T3c z3 patcher: reformat
+note "T3c: z3 patcher on a reformatted legacy layout (whitespace tolerance)"
+if run_mode patcher-z3-reformat "$WORK/patcher-z3-reformat/third_party" \
+     >"$WORK/patcher-z3-reformat.log" 2>&1; then
+  pass "reformatted declaration renamed with whitespace preserved"
+else
+  fail "patcher-z3-reformat mode"; sed -n '1,40p' "$WORK/patcher-z3-reformat.log"
+fi
+
+# ------------------------------------------------- T3d z3 patcher: z3_opt tree
+note "T3d: z3 patcher on the upstream z3_opt layout (post-4.15.3 rename)"
+if run_mode patcher-z3-upstream "$WORK/patcher-z3-upstream/third_party" \
+     >"$WORK/patcher-z3-upstream.log" 2>&1; then
+  pass "upstream z3_opt layout accepted without modifying the checkout"
+else
+  fail "patcher-z3-upstream mode"; sed -n '1,40p' "$WORK/patcher-z3-upstream.log"
+fi
+
+# -------------------------------------------------- T3e z3 patcher: prepatched
+note "T3e: z3 patcher on a tree this patch already renamed (idempotent)"
+if run_mode patcher-z3-patched "$WORK/patcher-z3-patched/third_party" \
+     >"$WORK/patcher-z3-patched.log" 2>&1; then
+  pass "already-patched tree left untouched"
+else
+  fail "patcher-z3-patched mode"; sed -n '1,40p' "$WORK/patcher-z3-patched.log"
+fi
+
+# -------------------------------------------------- T3f z3 patcher: unknown
+note "T3f: z3 patcher refuses an unknown layout, naming declaration and pins"
+if run_mode patcher-z3-unknown "$WORK/patcher-z3-unknown/third_party" \
+     >"$WORK/patcher-z3-unknown.log" 2>&1; then
+  fail "unknown z3 layout was accepted"
+else
+  if grep -q "found 'optimisation'" "$WORK/patcher-z3-unknown.log" && \
+     grep -q "z3-4.15.3" "$WORK/patcher-z3-unknown.log" && \
+     grep -q "PENSTOCK_SUBMODULE_Z3=OFF" "$WORK/patcher-z3-unknown.log"; then
+    pass "unknown layout fatals with the declaration and the pin hints"
+  else
+    fail "unknown z3 layout failed with an unexpected message"
+    sed -n '1,40p' "$WORK/patcher-z3-unknown.log"
+  fi
+fi
+
 # -------------------------------------------------------------- T4 real alive2
 note "T4: alive2 resolver + patcher on the real third_party/alive2 checkout"
 if [ ! -f "$REPO/third_party/alive2/ir/instr.h" ]; then
