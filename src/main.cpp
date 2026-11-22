@@ -141,6 +141,11 @@ static const char* USAGE =
     "  --llvm-profdata=<e> override the llvm-profdata executable path\n"
     "  --emit-final-ir[=<f>] write the final OPTIMISED IR (<out>.final.ll)\n"
     "                    the backend produced, for inspection.  §13.1\n"
+    "  --emit-c-header[=<f>] generate a C header for the `export fn`\n"
+    "                    surface (<input-stem>.h by default; library targets\n"
+    "                    -- static-lib/shared-lib -- generate it\n"
+    "                    automatically).  Prototypes mirror the emitted\n"
+    "                    ABI exactly.  fsht tooling (registry 07.04.01)\n"
     "  --target=<triple>  cross-target the WHOLE pipeline — the triple\n"
     "                      and data layout AND the runtime (the runtime\n"
     "                      .ll is compiled with the requested triple; its\n"
@@ -510,6 +515,82 @@ static std::string stripRuntimeHeader(const std::string& ll,
     out << line << "\n";
   }
   return out.str();
+}
+
+// checklist-audit fix (PGO guided builds): the combined module is a
+// textual concatenation, and the two halves' numbered metadata ids are
+// only convention-separated (user !100+/!200+/!300+/!900+, runtime a
+// dense clang-allocated !0..!N). A user module with !prof metadata
+// (branch_weights / function_entry_count land at !100+) collides with
+// the runtime's dense range and clang rejects the module with
+// "Metadata id is already used". Shifting every numeric metadata id of
+// the RUNTIME half above the user half's maximum makes the
+// concatenation valid by construction, whatever either side allocates.
+static int maxMetadataId(const std::string& ll) {
+  int max = -1;
+  bool inStr = false, inLineComment = false;
+  for (size_t i = 0; i < ll.size(); ++i) {
+    char c = ll[i];
+    if (inLineComment) { if (c == '\n') inLineComment = false; continue; }
+    if (inStr) {
+      if (c == '\\') { ++i; continue; }
+      if (c == '"') inStr = false;
+      continue;
+    }
+    if (c == ';') { inLineComment = true; continue; }
+    if (c == '"') { inStr = true; continue; }
+    if (c != '!') continue;
+    size_t j = i + 1;
+    if (j >= ll.size() || !isdigit((unsigned char)ll[j])) continue;  // !name
+    long v = 0;
+    while (j < ll.size() && isdigit((unsigned char)ll[j])) {
+      v = v * 10 + (ll[j] - '0');
+      ++j;
+    }
+    if (v > max) max = v;
+    i = j - 1;
+  }
+  return max;
+}
+
+// rewrite every "!<digits>" token of the runtime IR to "!<digits+base>",
+// quote- and comment-aware so ids inside strings/comments stay literal.
+// Definitions and references shift together, so `!N = ... !N` distinct
+// self-references and named lists (`!llvm.dbg.cu = !{!0}`) stay coherent.
+static std::string shiftMetadataIds(const std::string& ll, long base) {
+  if (base <= 0) return ll;
+  std::string out;
+  out.reserve(ll.size() + 256);
+  bool inStr = false, inLineComment = false;
+  for (size_t i = 0; i < ll.size(); ++i) {
+    char c = ll[i];
+    if (inLineComment) {
+      if (c == '\n') inLineComment = false;
+      out += c;
+      continue;
+    }
+    if (inStr) {
+      out += c;
+      if (c == '\\') { if (i + 1 < ll.size()) out += ll[++i]; continue; }
+      if (c == '"') inStr = false;
+      continue;
+    }
+    if (c == ';') { inLineComment = true; out += c; continue; }
+    if (c == '"') { inStr = true; out += c; continue; }
+    if (c != '!') { out += c; continue; }
+    size_t j = i + 1;
+    if (j >= ll.size() || !isdigit((unsigned char)ll[j])) { out += c; continue; }
+    long v = 0;
+    size_t k = j;
+    while (k < ll.size() && isdigit((unsigned char)ll[k])) {
+      v = v * 10 + (ll[k] - '0');
+      ++k;
+    }
+    out += '!';
+    out += std::to_string(v + base);
+    i = k - 1;
+  }
+  return out;
 }
 
 // collect @llvm.* names declared by the user module
@@ -1080,6 +1161,11 @@ int main(int argc, char** argv) {
       g_opts.emitFinalIr = a.substr(16);
       continue;
     }
+    if (a == "--emit-c-header") { g_opts.emitCHeader = "<auto>"; continue; }
+    if (a.rfind("--emit-c-header=", 0) == 0) {
+      g_opts.emitCHeader = a.substr(16);
+      continue;
+    }
     if (a.rfind("--target=", 0) == 0) { g_opts.targetTriple = a.substr(9); continue; }
     if (a == "--portable") { g_opts.portable = true; continue; }
     if (a.rfind("-I", 0) == 0 && a.size() > 2) {
@@ -1144,6 +1230,10 @@ int main(int argc, char** argv) {
   if (libTarget) {
     g_opts.emitObj = true;
     g_opts.output = g_opts.output + ".o";
+    // fsht tooling (registry 07.04.01): a library target's C consumers get
+    // the header automatically — the "automatic" of automatic C header
+    // generation.  --emit-c-header=<f> still overrides the name.
+    if (g_opts.emitCHeader.empty()) g_opts.emitCHeader = "<auto>";
   }
   if (g_opts.irOut == "a.ll" && g_opts.output != "a.out")
     g_opts.irOut = g_opts.output;  // -S -o f.ll
@@ -1217,6 +1307,9 @@ int main(int argc, char** argv) {
     }
   }
   g_backend = "LLVM " + (llvmVer.empty() ? "<unknown>" : llvmVer) + " (" + llvmRoot + ")";
+  // backend-matrix spellings (common.h llvmFminBase/llvmFmaxBase): LLVM 19
+  // vs 20+ intrinsic names differ; record the major before IRgen runs
+  g_backendLlvmMajor = atoi(llvmMajor.c_str());
 
   // ---------------------------------------- 0.4 fsht-03:03 target matrix
   // registry 10.03.02 (ch. 25 §2/§6): the ratified five-target matrix.
@@ -1413,6 +1506,28 @@ int main(int argc, char** argv) {
   // state machine, over the same typed AST
   runBorrowAnalysis(prog);
 
+  // fsht tooling (registry 07.04.01): --emit-c-header / automatic header
+  // for library targets.  Emitted from the post-checks, pre-transform
+  // AST — the header describes the SOURCE surface, not the optimiser's
+  // rewrite of it.
+  if (!g_opts.emitCHeader.empty() && !errorCount()) {
+    std::string headerPath = g_opts.emitCHeader;
+    if (headerPath == "<auto>") {
+      std::string stem = g_opts.inputs.empty() ? "out" : g_opts.inputs[0];
+      size_t slash = stem.find_last_of("/");
+      if (slash != std::string::npos) stem = stem.substr(slash + 1);
+      if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".fsht") == 0)
+        stem = stem.substr(0, stem.size() - 5);
+      headerPath = stem + ".h";
+    }
+    if (emitCHeader(prog, headerPath)) {
+      fprintf(stderr, "penstock: wrote C header %s\n", headerPath.c_str());
+    } else {
+      fprintf(stderr, "penstock: warning: could not write C header %s\n",
+              headerPath.c_str());
+    }
+  }
+
   // ------------------------------------ 4.5 R4 loop optimisation passes
   // Post-sema, post-checks, pre-irgen AST transforms.  Enabled at -O2+;
   // skipped on --profile builds so instrumented profiles are measured
@@ -1592,9 +1707,17 @@ int main(int argc, char** argv) {
     writeFile(base + ".user.ll", readFile(userLl));
   }
   std::string userIr = stripUserRtDecls(readFile(userLl));
+  // checklist-audit fix: shift the runtime's numeric metadata ids above
+  // the user module's maximum before concatenating (see the comment on
+  // shiftMetadataIds) — otherwise a user module carrying !prof metadata
+  // (PGO branch_weights at !100+) collides with the runtime's dense
+  // clang-allocated ids and the backend rejects the module.
+  std::string rtPart = shiftMetadataIds(
+      stripRuntimeHeader(rtLl, userIntrinsicSet(userIr)),
+      (long)maxMetadataId(userIr) + 1);
   std::string combined = userIr +
                          "\n; ---- freshet runtime (libfreshet) ----\n" +
-                         stripRuntimeHeader(rtLl, userIntrinsicSet(userIr));
+                         rtPart;
   if (!writeFile(finalLl, combined)) {
     fprintf(stderr, "penstock: cannot write %s\n", finalLl.c_str());
     return 1;
@@ -1773,9 +1896,12 @@ int main(int argc, char** argv) {
                 w.threads, w.pin, w.chunk);
       } else {
         std::string userIr2 = stripUserRtDecls(readFile(userLl));
+        std::string rtPart2 = shiftMetadataIds(
+            stripRuntimeHeader(readFile(tunedRt), userIntrinsicSet(userIr2)),
+            (long)maxMetadataId(userIr2) + 1);
         std::string combined2 = userIr2 +
             "\n; ---- freshet runtime (libfreshet, -O4 tuned) ----\n" +
-            stripRuntimeHeader(readFile(tunedRt), userIntrinsicSet(userIr2));
+            rtPart2;
         std::string final2 = buildDir + "/combined_tuned_" +
                              std::to_string(getpid()) + ".ll";
         if (!writeFile(final2, combined2)) {

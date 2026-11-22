@@ -155,11 +155,14 @@ static void combineOp(const std::string& op, Type* t, const std::string& acc,
     else if (op == "-") o << "  " << r << " = fsub " << fflag << " " << ty << " " << acc << ", " << v << "\n";
     else if (op == "*") o << "  " << r << " = fmul " << fflag << " " << ty << " " << acc << ", " << v << "\n";
     else if (op == "min")
-      o << "  " << r << " = call " << fflag << " " << ty << " @llvm.fmin."
+      // backend matrix LLVM 19-23: llvm.minnum on 19, llvm.fmin on 20+
+      o << "  " << r << " = call " << fflag << " " << ty << " @"
+        << llvmFminBase() << "."
         << (t->k == Type::F32 ? "f32" : "f64") << "(" << ty << " " << acc
         << ", " << ty << " " << v << ")\n";
     else if (op == "max")
-      o << "  " << r << " = call " << fflag << " " << ty << " @llvm.fmax."
+      o << "  " << r << " = call " << fflag << " " << ty << " @"
+        << llvmFmaxBase() << "."
         << (t->k == Type::F32 ? "f32" : "f64") << "(" << ty << " " << acc
         << ", " << ty << " " << v << ")\n";
   } else {
@@ -408,7 +411,9 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->tmp = 1;
   G->bb = 1;
   auto saveAllocas = G->varAllocas;
+  auto saveSymAllocas = G->symAllocas;
   G->varAllocas.clear();   // fresh symbol map for the chunk fn
+  G->symAllocas.clear();  // (scope map too: chunk-fn uses resolve the shadows)
   // %sp threading (goose port v2): the chunk fn carries its own stack
   // context — the caller's pending restores and sp expression must not
   // leak in, and the chunk fn's must not leak out
@@ -577,6 +582,7 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->out.clear();
   G->out.seekp(0, std::ios::end);
   G->varAllocas = saveAllocas;
+  G->symAllocas = saveSymAllocas;
   G->dstkRestores = saveRestores;
   G->curSpExpr = saveSpExpr;
   G->curFnIsChunkFn = false;
@@ -661,6 +667,7 @@ void genParfor(Stmt* pf) {
   FnDecl* saveFn = G->curFn;
   FnSema* saveFs = G->curFs;
   auto saveAllocas = G->varAllocas;
+  auto saveSymAllocas = G->symAllocas;
   bool saveChunk = G->curFnIsChunkFn;
 
   FnSema* fs = G->curFs;
@@ -714,6 +721,7 @@ void genParfor(Stmt* pf) {
 
   // restore caller state (numbering continues past the dispatch part)
   G->varAllocas = saveAllocas;
+  G->symAllocas = saveSymAllocas;
   G->curFnIsChunkFn = saveChunk;
   G->curFn = saveFn;
   G->curFs = saveFs;

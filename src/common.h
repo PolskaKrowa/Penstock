@@ -445,6 +445,10 @@ struct Sym {
   Type* ty = nullptr;
   bool mut = false;
   bool owned = false;       // owns heap memory (malloc result / give arg)
+  // fsht-03:02 (ch. 24 §1): the binding HOLDS a `&mut` exclusive borrow
+  // — writes through it are legal even on an immutable binding (the
+  // exclusivity is enforced by the F0310 borrow analysis, not by const)
+  bool mutBorrow = false;
   FnDecl* fn = nullptr;
   StructDef* sdef = nullptr;
   int scope = 0;
@@ -594,6 +598,10 @@ struct MatchArm {
   std::string variantName;                // raw spelling from source
   int variantIdx = -1;                    // resolved variant
   std::vector<std::string> bindings;
+  // the binding's declLoc key (sema assigns arm.loc + payload index —
+  // unique per match/arm/payload so two matches binding the same name
+  // never share a slot); IRgen resolves the payload store through it
+  std::vector<SrcLoc> bindingLocs;
   Stmt* body = nullptr;
   SrcLoc loc;
 };
@@ -940,6 +948,12 @@ struct Options {
   // backend once more with -S -emit-llvm at the requested level).
   std::string emitFinalIr;          // "" off, "<auto>" -> <out>.final.ll
 
+  // fsht tooling surface (registry 07.04.01): automatic C header
+  // generation from the `export fn` surface.  "" off, "<auto>" ->
+  // <input-stem>.h; library targets (static-lib/shared-lib) default it
+  // to "<auto>" so C consumers get a header with every build.
+  std::string emitCHeader;
+
   // §12: target configuration.  "" = native host: the triple + data
   // layout are then scraped from the backend clang's own default
   // (main.cpp probes it on every build); otherwise the requested clang
@@ -1124,6 +1138,24 @@ void runOwnershipAnalysis(Program* p);
 // fsht-03:02 (registry 03.02.09/03.02.10): the borrow discipline —
 // F0310 exclusivity + F0311 escape (ownership.cpp)
 void runBorrowAnalysis(Program* p);
+// fsht tooling surface (registry 07.04.01): automatic C header generation
+// — a .h describing the C ABI of every `export fn` (cheader.cpp)
+bool emitCHeader(Program* p, const std::string& path);
+
+// Resolved backend LLVM major (0 = not probed yet).  main.cpp scrapes it
+// from the backend clang --version once per invocation, before IRgen.
+// The backend matrix spans LLVM 19-23, and a few intrinsic spellings
+// changed across it — notably FP min/max: LLVM 19 spells them
+// llvm.minnum/llvm.maxnum; LLVM 20+ renamed them llvm.fmin/llvm.fmax
+// (19's parser treats the new spelling as an unknown external symbol
+// and the link fails with "undefined reference to llvm.fmin.f64").
+extern int g_backendLlvmMajor;
+inline const char* llvmFminBase() {
+  return g_backendLlvmMajor >= 20 ? "llvm.fmin" : "llvm.minnum";
+}
+inline const char* llvmFmaxBase() {
+  return g_backendLlvmMajor >= 20 ? "llvm.fmax" : "llvm.maxnum";
+}
 // Stage B5: consult after runStrictChecks().  Returns true iff the given
 // @alias pair on `fn` was violated by at least one caller in this
 // compilation unit (F0306).  IRgen suppresses the `noalias` LLVM

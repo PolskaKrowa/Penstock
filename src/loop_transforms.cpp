@@ -282,6 +282,15 @@ static bool isSimpleRangeForT(Stmt* s) {
   return s->k == Stmt::FOR && s->forRange && !s->ivar.empty();
 }
 
+// The DOMAIN-REWRITING transforms (partial unroll / peel / interchange /
+// tile / distribute / unroll-and-jam) reconstruct iteration domains as
+// unit-stride ranges `for (i in a..b)`.  A loop with an explicit `by`
+// clause keeps its own lowering (IRgen's stride-aware latch) — veto it
+// there.  LICM below is stride-independent and still applies.
+static bool isUnitStrideRangeForT(Stmt* s) {
+  return isSimpleRangeForT(s) && !s->forStep;
+}
+
 // ================================================================ LICM
 // §6.4 FreshetLICM.  Premises for hoisting `let x = E;` above the loop:
 //   P1  x is immutable and its name is unique in the function (no
@@ -384,7 +393,7 @@ static int partialUnrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* s = list[i];
-    if (!isSimpleRangeForT(s)) continue;
+    if (!isUnitStrideRangeForT(s)) continue;
     TripInfo ti = tripCountOf(s);
     if (!ti.known || ti.empty || ti.saturated) continue;
     int64_t trip = ti.trip;
@@ -605,7 +614,7 @@ static int peelInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* s = list[i];
-    if (!isSimpleRangeForT(s)) continue;
+    if (!isUnitStrideRangeForT(s)) continue;
     TripInfo ti = tripCountOf(s);
     if (!ti.known || ti.empty || ti.saturated || ti.trip < 2) continue;
     Type* ivTy = rangeIvarTyT(s);
@@ -831,7 +840,7 @@ static int interchangeInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* outer = list[i];
-    if (!isSimpleRangeForT(outer)) continue;
+    if (!isUnitStrideRangeForT(outer)) continue;
     BodyInfo ib;
     Stmt* inner = perfectInner(outer, fn, &ib);
     if (!inner) continue;
@@ -896,7 +905,7 @@ static int tileInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* outer = list[i];
-    if (!isSimpleRangeForT(outer)) continue;
+    if (!isUnitStrideRangeForT(outer)) continue;
     BodyInfo ib;
     Stmt* inner = perfectInner(outer, fn, &ib);
     if (!inner) continue;
@@ -1047,7 +1056,7 @@ static int distributeInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* s = list[i];
-    if (!isSimpleRangeForT(s)) continue;
+    if (!isUnitStrideRangeForT(s)) continue;
     if (!isInt64KindT(rangeIvarTyT(s))) continue;
     auto* bodyList = stmtsOf(s->body);
     if (!bodyList || bodyList->size() < 2) continue;
@@ -1144,7 +1153,7 @@ static int unrollJamInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* outer = list[i];
-    if (!isSimpleRangeForT(outer)) continue;
+    if (!isUnitStrideRangeForT(outer)) continue;
     BodyInfo ib;
     Stmt* inner = perfectInner(outer, fn, &ib);
     if (!inner) continue;

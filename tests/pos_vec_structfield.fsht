@@ -1,0 +1,9 @@
+// fsht-03:02 — the fsht-02:01 restriction is LIFTED (registry 03.02.10,
+// ch. 24 §5): containers nested inside user aggregates are legal; the
+// struct's scope-exit drop walks its owning field. This exact program
+// was the fsht-02:01 negative `neg_vec_structfield.fsht`.
+struct Holder { v: Vec<i64>, n: i64 }
+fn main() {
+    let h: Holder = Holder { v: vec_new(i64, 2), n: 1 };
+    print_i64(h.n); println();
+}

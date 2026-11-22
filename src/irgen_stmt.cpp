@@ -151,7 +151,7 @@ void nullContainerSource(Expr* src, Type* cty) {
     r = r->args[0];
   }
   if (!r || r->k != Expr::IDENT || !r->sym) return;   // temporaries own nothing
-  std::string addr = G->varAllocas[r->name];
+  std::string addr = G->slotOf(r->name, r->sym->declLoc);
   if (addr.empty()) return;
   emitShapeMoveInvalidate(addr, inner ? inner : cty);
 }
@@ -207,6 +207,7 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   g_defers.clear();
   g_drops.clear();
   varAllocas.clear();
+  symAllocas.clear();
   g_tempDrops.clear();
 
   // PGO function counter
@@ -325,38 +326,54 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   }
 
   // allocas for params + all locals
-  for (auto& sym : fs->allSyms) {
-    if (sym.k != Sym::PARAM && sym.k != Sym::VAR) continue;
-    if (sym.name == f->name) continue;
-    if (varAllocas.count(sym.name)) continue;   // dedupe (same name redeclared)
-    std::string a = "%" + sym.name + ".addr";
-    std::string ty = llvmType(sym.ty);
-    if (sym.ty->k == Type::STRUCT) {
-      // struct var: alloca struct
-      out << "  " << a << " = alloca " << structTypes[sym.ty->sdef->name]
-          << ", align " << typeAlignOf(sym.ty) << "\n";
-    } else if (sym.ty->k == Type::ARRAY || sym.ty->k == Type::ENUM) {
-      // Phase 1b/1d: array/enum locals get their full aggregate slot
-      out << "  " << a << " = alloca " << ty << ", align "
-          << typeAlignOf(sym.ty) << "\n";
-    } else {
-      uint64_t align = typeAlignOf(sym.ty);
-      // pad hot accumulators to 64 to avoid false sharing between threads
-      if (sym.ty->isNum() && fs->varDepth.count(sym.name) &&
-          fs->varDepth[sym.name] == 0) {
-        // top-level: parfor reductions run per-chunk; pad numeric muts
-        // conservatively when written in any parfor
-        out << "  ; (alignment widened for cache isolation)\n";
-        align = 64;
+  // (scope-aware: every DECLARATION gets its own slot keyed by
+  // name@declLoc — a redeclared name never reuses an earlier, possibly
+  // differently-typed slot.  varAllocas keeps the first binding under
+  // the bare name for the legacy fallbacks.)
+  {
+    std::map<std::string, int> slotGen;
+    for (auto& sym : fs->allSyms) {
+      if (sym.k != Sym::PARAM && sym.k != Sym::VAR) continue;
+      if (sym.name == f->name) continue;
+      std::string key = sym.name + "@" +
+                        std::to_string(sym.declLoc.startOffset) + ":" +
+                        std::to_string(sym.declLoc.line);
+      if (symAllocas.count(key)) continue;   // same binding twice
+      std::string a;
+      if (!varAllocas.count(sym.name)) {
+        a = "%" + sym.name + ".addr";
+        varAllocas[sym.name] = a;
+      } else {
+        a = "%" + sym.name + ".addr" + std::to_string(++slotGen[sym.name]);
       }
-      out << "  " << a << " = alloca " << ty << ", align " << align << "\n";
+      std::string ty = llvmType(sym.ty);
+      if (sym.ty->k == Type::STRUCT) {
+        // struct var: alloca struct
+        out << "  " << a << " = alloca " << structTypes[sym.ty->sdef->name]
+            << ", align " << typeAlignOf(sym.ty) << "\n";
+      } else if (sym.ty->k == Type::ARRAY || sym.ty->k == Type::ENUM) {
+        // Phase 1b/1d: array/enum locals get their full aggregate slot
+        out << "  " << a << " = alloca " << ty << ", align "
+            << typeAlignOf(sym.ty) << "\n";
+      } else {
+        uint64_t align = typeAlignOf(sym.ty);
+        // pad hot accumulators to 64 to avoid false sharing between threads
+        if (sym.ty->isNum() && fs->varDepth.count(sym.name) &&
+            fs->varDepth[sym.name] == 0) {
+          // top-level: parfor reductions run per-chunk; pad numeric muts
+          // conservatively when written in any parfor
+          out << "  ; (alignment widened for cache isolation)\n";
+          align = 64;
+        }
+        out << "  " << a << " = alloca " << ty << ", align " << align << "\n";
+      }
+      symAllocas[key] = a;
+      // fsht-03:02: OWNING bindings zero-initialise their slot at entry —
+      // a drop reached on a path that skipped the binding's LET (a match
+      // arm that did not run, an early ? exit) then sees null roots and is
+      // an idempotent no-op instead of freeing garbage
+      if (typeWantsDrop(sym.ty)) emitShapeInit(a, sym.ty);
     }
-    varAllocas[sym.name] = a;
-    // fsht-03:02: OWNING bindings zero-initialise their slot at entry —
-    // a drop reached on a path that skipped the binding's LET (a match
-    // arm that did not run, an early ? exit) then sees null roots and is
-    // an idempotent no-op instead of freeing garbage
-    if (typeWantsDrop(sym.ty)) emitShapeInit(a, sym.ty);
   }
   // store params into allocas
   for (auto& pm : f->params) {
@@ -364,7 +381,7 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
     if (pt && (pt->k == Type::STRUCT || pt->k == Type::ENUM ||
                pt->k == Type::ARRAY)) {
       // by-address parameter: the callee sees its own copy (spec §4)
-      out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << varAllocas[pm.name]
+      out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << slotOf(pm.name, pm.loc)
           << ", ptr %" << pm.name << "param, i64 " << typeSizeOf(pt)
           << ", i1 false)\n";
       // fsht-02:01: a by-value Vec<T> parameter moves its ownership in
@@ -373,12 +390,12 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
       // `borrowed` / `borrowed mut` parameters never drop — the caller
       // owns the storage and keeps it (ch. 24 §1).
       if (!pm.borrowed && !pm.borrowedMut)
-        pushContainerDrop(varAllocas[pm.name], pt);
+        pushContainerDrop(slotOf(pm.name, pm.loc), pt);
     } else {
       // scalars, pointers, SOA descriptors (a ptr value) and pair
       // aggregates all store directly
       out << "  store " << llvmType(pt) << " %" << pm.name << "param, ptr "
-          << varAllocas[pm.name] << "\n";
+          << slotOf(pm.name, pm.loc) << "\n";
     }
   }
 
@@ -816,7 +833,7 @@ void genStmt(Stmt* s) {
     case Stmt::LET: {
       if (s->init) {
         std::string v = genExpr(s->init);
-        std::string a = G->varAllocas[s->var];
+        std::string a = G->slotOf(s->var, s->loc);   // the binding's own slot
         Type* vt = s->init->ty;
         Type* dt = s->annTy;
         if (!dt || s->tyName != "") dt = vt;
@@ -1157,7 +1174,7 @@ void genStmt(Stmt* s) {
       // Phase 1a: break targets exit; continue runs the latch (the step)
       G->loopStack.push_back({exit, latch, g_defers.size(), false,
                               G->dstkRestores.size(), g_drops.size()});
-      std::string iA = G->varAllocas[ivar];
+      std::string iA = G->slotOf(ivar, s->loc);   // the loop var's own slot
       std::string lo, hi;
       // step analysis (report §7 follow-on: with F0405 downgraded to a
       // warning by default, the lowering must honour the actual step)
@@ -1166,8 +1183,14 @@ void genStmt(Stmt* s) {
       bool descendingRange = false;
       if (s->forStep) {
         if (s->forStep->k == Expr::UN && s->forStep->op == "-" &&
-            s->forStep->rhs->k == Expr::INT && s->forStep->rhs->ival == 1) {
-          descendingRange = true;   // `by -1`
+            s->forStep->rhs->k == Expr::INT &&
+            s->forStep->rhs->ival > 0) {
+          // `by -N`: descending with magnitude N (`by -1` is the common
+          // spelling).  Larger magnitudes used to fall through the
+          // step-analysis unhandled and silently stepped +1.
+          descendingRange = true;
+          stepDir = -1;
+          stepAmt = s->forStep->rhs;
         } else if (s->forStep->k == Expr::BIN && s->forStep->op == "+=") {
           stepDir = 1; stepAmt = s->forStep->rhs;
         } else if (s->forStep->k == Expr::BIN && s->forStep->op == "-=") {
@@ -1187,8 +1210,27 @@ void genStmt(Stmt* s) {
           }
         } else if (s->forStep->k == Expr::INT || s->forStep->k == Expr::IDENT ||
                    s->forStep->k == Expr::BIN) {
-          // bare `by N` step expression on a range loop
-          stepAmt = s->forStep;
+          // bare `by N` step expression on a range loop.  The typed
+          // const-fold pass rewrites `-N` into a wrapped u64 INT literal
+          // — recognise the folded negative as a DESCENDING stride so
+          // the comparison direction keeps matching the source.
+          if (s->forStep->k == Expr::INT &&
+              s->forStep->ival >= (1ull << 63)) {
+            uint64_t mag = 0ull - s->forStep->ival;   // 2^64 - ival
+            if (mag > 0 && mag <= (uint64_t)INT64_MAX) {
+              Expr* magLit = new Expr(Expr::INT, s->loc);
+              magLit->ival = mag;
+              magLit->ty = Type::simple(Type::I64);
+              magLit->constant = true;
+              descendingRange = true;
+              stepDir = -1;
+              stepAmt = magLit;
+            } else {
+              stepAmt = nullptr;   // absurd magnitude: keep unit step
+            }
+          } else {
+            stepAmt = s->forStep;
+          }
         }
       }
       if (s->forRange) {
@@ -1325,7 +1367,12 @@ void genStmt(Stmt* s) {
             G->out << "  " << fp << " = getelementptr i8, ptr " << sv
                    << ", i64 " << (8 + v.offsets[b]) << "\n";
             Type* ft = v.fields[b].ty;
-            std::string dst = G->varAllocas[arm.bindings[b]];
+            // the binding's OWN slot (name@declLoc): two matches binding
+            // the same name must never share one — the payload would land
+            // in the other match's (possibly differently-typed) slot
+            std::string dst = b < arm.bindingLocs.size()
+                ? G->slotOf(arm.bindings[b], arm.bindingLocs[b])
+                : G->varAllocas[arm.bindings[b]];
             if (ft->k == Type::STRUCT || ft->k == Type::ENUM ||
                 ft->k == Type::ARRAY) {
               G->out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << dst

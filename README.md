@@ -103,6 +103,7 @@ Backend pinning (`-DLLVM_ROOT=/path/to/llvm-20`), offline builds, installation
 | [opt-plugin.md](docs/opt-plugin.md) | Penstock's O4 pipeline as an LLVM `opt` plugin |
 | [install.md](docs/install.md) | Installation, `PATH`, CMake package (`Penstock::fsh`) |
 | [optimization-integration.md](docs/optimization-integration.md) · [report-integration.md](docs/report-integration.md) | Change reports mapping the optimisation and language audits to the implementation |
+| [checklist-audit.md](docs/checklist-audit.md) | The 28-item roadmap checklist audited item-by-item against both repositories, with the latent defects the audit fixed |
 | [errors/](docs/errors/) | Long-form diagnostic pages behind `penstock --explain <ID>` |
 
 ## Repository layout
@@ -139,8 +140,8 @@ core, paired by `--smt-interleave`).
 ## Freshet-lang: the standard, the stress suite, the benchmarks
 
 The language is specified and stress-tested by the standards repository
-[Freshet-lang](https://github.com/OWNER/Freshet-lang) (current standard:
-`fsht-02:03`). This repository consumes it in two places:
+[Freshet-lang](https://github.com/PolskaKrowa/Freshet-lang) (current standard:
+`fsht-03:03`). This repository consumes it in two places:
 
 - **`.github/workflows/freshet-conformance.yml`** — every PR builds
   Penstock and runs the Freshet-lang conformance suite (corpus goldens,
@@ -169,15 +170,18 @@ tools/lang-bench/run.sh --kernels dot,matmul
 
 Set `FRESHET_LANG_REPO` (or the workflow input / `--freshet-lang` flag)
 to your `owner/Freshet-lang` checkout before the first run — the
-shipped default is the placeholder `OWNER/Freshet-lang`.
+shipped default is the placeholder `PolskaKrowa/Freshet-lang`.
 
 ## Status
 
-Version `0.1.0-INDEV`. The two integration reports document what is
-implemented and what is deliberately deferred (variadic `extern fn`, numeric
-text parsing, LSP completions/inlay hints):
-[docs/report-integration.md](docs/report-integration.md) and
-[docs/optimization-integration.md](docs/optimization-integration.md).
+Version `0.1.0-INDEV`. The integration reports document what is
+implemented and what is deliberately deferred (variadic `extern fn`, and
+the registry-tracked deferrals: custom allocators, bulk-copy container
+APIs, associated types, dynamic dispatch, the package manager):
+[docs/report-integration.md](docs/report-integration.md),
+[docs/optimization-integration.md](docs/optimization-integration.md) and
+[docs/checklist-audit.md](docs/checklist-audit.md) (the 28-item roadmap
+audit mapping every checklist item to both repositories).
 
 ### fsht-02:01 — dynamic collections (ratified 2026-11-19)
 
@@ -251,3 +255,69 @@ Deferred with the registry entries: blanket impls over template
 parameters, generic traits, associated types, dynamic dispatch;
 const parameters beyond usize, const inference from container-typed
 arguments, `sizeof(T)` inside const fn bodies.
+
+### fsht-03:01–fsht-03:03 — stdlib, borrows & lifetimes, portable
+runtime (ratified 2026-11-19)
+
+The three fsht-03 increments are in the tree (registry
+`fsht-03:01-05.04.01/05.05.01/05.06.01/08.01.04`,
+`fsht-03:02-03.02.09/03.02.10`, `fsht-03:03-10.03.02`):
+
+- **fsht-03:01 expanded standard library** — `parse_i64/u64/f64` over
+  `Result<T, ParseError>` (with the MUST-level round-trip law),
+  buffered streaming I/O (`Reader`/`Writer`, `IoError`, ownership-
+  tracked handles), the checked/saturating/wrapping variant family
+  with `checked_cast`/`saturating_cast`, and the ten-module stdlib
+  decomposition (`core/alloc/collections/string/math/io/numeric/time/
+  bits/random`, `fsh` façade kept).
+- **fsht-03:02 borrows & lifetimes** — `&mut`/`&` borrow expressions
+  with `F0310` exclusivity (one writer or many readers), `F0311`
+  escape analysis (borrows/views must not outlive their storage),
+  the `String` migration onto the ownership-tracked container model
+  (auto-drop, move invalidation, pre-emptive `string_free`), drop
+  elaboration through user shapes (`Vec<String>`, `Vec<Vec<T>>`, struct
+  fields, arrays), and `usize` resolved as the fixed 64-bit integer on
+  every target.
+- **fsht-03:03 portable runtime** — the runtime decomposes into
+  `common/` + `platforms/{linux,windows,wasm,baremetal}`;
+  same-target runtime compilation (the `--target` triple in the
+  runtime cache key), platform-conditional link lines, serialised
+  `parfor` on wasm with `@reproducible` output unchanged; the
+  five-target matrix is gated by the standards repository's
+  `targets.yml` workflow (tested-before-declared).
+
+Conformance: `tests/pos_parse.fsht`, `pos_checked_{variants,cast}.fsht`,
+`pos_io_stream.fsht`, `pos_modules_stdlib.fsht`,
+`pos_string_migration.fsht`, `pos_shapes.fsht`, `pos_borrow_mut.fsht`,
+the `neg_borrow_*`/`neg_string_*` families and the fsht-03:03 target
+checks in `tests/run.sh`; the standards-side corpus 20/21/22,
+negatives n26–n31 and props p08/p09. Spec chapters 23–25 are
+normative since fsht-03:01/02/03.
+
+### fsht-04 working set (checklist audit 2026-11-22)
+
+The maintainer's 28-item roadmap checklist was audited item-by-item
+against both repositories — [docs/checklist-audit.md](docs/checklist-audit.md)
+has the full mapping. Two fsht-04 items landed early as a
+pre-ratification preview (registry 07.04.01 in development,
+10.04.01's tooling increment):
+
+- **automatic C header generation** — `penstock --emit-c-header[=<f>]`
+  writes an ABI-mirroring header for the `export fn` surface
+  (prototypes, struct bodies, tagged-union enums, `fsh_span_T`
+  typedefs, by-address aggregate parameters); the generated header is
+  itself valid C (consumer compile in `tests/run.sh`).
+- **LSP completions and inlay hints** — `textDocument/completion`
+  (scope-aware, prefix-filtered) and `textDocument/inlayHint`
+  (parameter-name hints at call sites, let-type hints) in
+  `freshet-language-server`, conformance
+  `scripts/lsp_completion_inlay_check.py`.
+
+The audit also fixed five latent defects the fsht-03 increments had
+left in the tree (fusion's induction-variable identity bug — a
+wrong-code bug producing uninitialised offsets — the PGO metadata-id
+collision in the combined module, a stale `pos_strings` shape, the
+builtin/generic `clamp` shadowing that silently degraded
+`pos_generics`' coverage, and the SMT unit test's include path),
+taking the regression suite from 220/16 to **237 passed, 0 failed**
+and the standards conformance suite to **63 passed, 0 failed**.

@@ -14,7 +14,7 @@
 # usage:
 #   tools/lang-bench/run.sh [--perf auto|force|off] [--kernels k1,k2]
 #                            [--reps 5] [--freshet-lang PATH|URL]
-#   env: FRESHET_LANG_REPO (default: https://github.com/OWNER/Freshet-lang)
+#   env: FRESHET_LANG_REPO (default: https://github.com/PolskaKrowa/Freshet-lang)
 #        CXX, RUSTC (optional toolchain overrides)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -22,7 +22,7 @@ cd "$(dirname "$0")/../.."
 PERF=auto
 KERNELS=
 REPS=5
-LANG_REPO=${FRESHET_LANG_REPO:-https://github.com/OWNER/Freshet-lang}
+LANG_REPO=${FRESHET_LANG_REPO:-https://github.com/PolskaKrowa/Freshet-lang}
 while [ $# -gt 0 ]; do
   case "$1" in
     --perf) PERF=$2; shift 2;;

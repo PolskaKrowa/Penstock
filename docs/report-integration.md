@@ -502,13 +502,33 @@ Both build systems were re-verified from a clean configure through
 
 ## 13. Remaining gaps (honest list)
 
-- No generic `Vector<T>` dynamic array (growables = `String` only).
-- No numeric text parsing (`parse_i64` etc.); formatting exists.
-- Variadic `extern fn` not supported (the report defers these too).
-- C ABI bindings are declared, not generated.
-- LSP has hover/definition/references/rename; completion, formatting
-  and inlay hints are future work.
-- Phase 5 optional facilities (§9.3 above) remain future work.
+Superseded in part by later increments — this report documents the
+0.1.0-INDEV integration and is kept for the record. Status of each of
+its original gaps today:
+
+- ~~No generic `Vector<T>` dynamic array~~ — landed with fsht-02:01
+  (`Vec<T>`, registry 02.09.01/02.09.02; `tests/pos_vec_*.fsht`).
+- ~~No numeric text parsing~~ — landed with fsht-03:01
+  (`parse_i64/u64/f64`, registry 05.04.01; `tests/pos_parse.fsht`).
+- Variadic `extern fn` not supported — still a registry proposal
+  (fsht-04:01-07.03.01).
+- ~~C ABI bindings are declared, not generated~~ — `--emit-c-header`
+  landed as the fsht-04:01 working set's first cut (registry 07.04.01
+  in development; `tests/pos_c_header.fsht` + the consumer compile).
+- ~~LSP: completion, formatting and inlay hints are future work~~ —
+  completions and inlay hints are implemented (registry 10.04.01's
+  tooling increment, `scripts/lsp_completion_inlay_check.py`);
+  "formatting" in this sentence meant editor-side pretty-printing,
+  which is the shipped `penstock fmt`.
+- Phase 5 optional facilities (§9.3 above): traits, const generics and
+  compile-time evaluation HAVE landed (fsht-02:02/02:03); richer
+  task-level concurrency, atomics, GPU/MPI and package management
+  remain registry-tracked decisions.
+
+The current full status — including the fsht-03 increments and the
+2026-11-22 checklist audit that re-verified both suites — is
+[checklist-audit.md](checklist-audit.md) and the README's Status
+section.
 
 The optimisation-and-proof audit was integrated in the same version;
 its own change report (`docs/optimization-integration.md`) documents

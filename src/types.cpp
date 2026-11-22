@@ -4,6 +4,10 @@
 
 namespace freshet {
 
+// resolved backend LLVM major (common.h declares the extern; main.cpp
+// scrapes it from the backend clang --version before IRgen runs)
+int g_backendLlvmMajor = 0;
+
 static std::map<std::string, std::vector<StructDef*>>& registry() {
   static std::map<std::string, std::vector<StructDef*>> r;
   return r;

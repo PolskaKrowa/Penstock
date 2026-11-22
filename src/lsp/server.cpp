@@ -26,6 +26,12 @@
 //   - textDocument/definition (goto-definition)
 //   - textDocument/references (find-references)
 //   - textDocument/rename (edits exactly the resolved symbol's occurrences)
+//   - textDocument/completion (scope-aware identifier completion: locals
+//     and params of the enclosing fn, fns/globals/structs/enums, the
+//     keyword and compiler-known builtin surfaces; `module::` paths offer
+//     only that module's members)
+//   - textDocument/inlayHint (parameter-name hints at resolved call sites,
+//     inferred-type hints on un-annotated `let` bindings)
 //
 // Everything is serialised through a single analysis mutex because the
 // existing frontend still has process-global state.  Concurrent analysis
@@ -39,6 +45,7 @@
 #include "../session.h"
 #include "../common.h"
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -449,8 +456,19 @@ Json serverCapabilities() {
     {"definitionProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"referencesProvider",     Json::boolean(true)},   // Phase 4 (§10.1)
     {"renameProvider",         Json::boolean(true)},   // Phase 4 (§10.1)
-    // Completion, code actions, inlay hints and semantic tokens are not
-    // implemented yet.  Do not advertise placeholders for them.
+    {"completionProvider", Json::object({
+      // ":" covers `name:` type positions and `mod::` member paths; "."
+      // covers field access.  Word-character typing triggers client-side
+      // completion without any trigger character, so these only widen the
+      // surface.
+      {"triggerCharacters", Json::array({Json::str(":"), Json::str(".")})},
+      {"resolveProvider", Json::boolean(false)},
+    })},
+    {"inlayHintProvider", Json::object({
+      {"resolveProvider", Json::boolean(false)},
+    })},
+    // Code actions and semantic tokens are not implemented yet.  Do not
+    // advertise placeholders for them.
   });
 }
 
@@ -966,6 +984,546 @@ void handleRename(Workspace& ws, int id, const Json& params) {
   sendResponse(id, Json::object({{"changes", changes}}));
 }
 
+// ---------------- Completion + inlay hints -------------------------------
+// textDocument/completion and textDocument/inlayHint close the tooling
+// checklist surface (registry 10.04.01): scope-aware identifier completion
+// and the two rust-analyzer-style inlay hint families.
+
+// byte offset -> LSP (line, UTF-16 character) position; the inverse of
+// lspPosToOffset above.  Textbook editors only ever position hints inside
+// single-Byte ASCII identifiers here, but the conversion is general.
+static Json offsetToLspPos(const std::string& text, size_t off) {
+  off = off > text.size() ? text.size() : off;
+  int line = 0, units = 0;
+  size_t i = 0;
+  while (i < off) {
+    if (text[i] == '\n') { ++line; units = 0; ++i; continue; }
+    unsigned char c = (unsigned char)text[i];
+    units += (c & 0xF0) == 0xF0 ? 2 : 1;   // surrogate pair for 4-Byte UTF-8
+    if ((c & 0x80) == 0) i += 1;
+    else if ((c & 0xE0) == 0xC0) i += 2;
+    else if ((c & 0xF0) == 0xE0) i += 3;
+    else i += 4;
+  }
+  return Json::object({{"line", Json::num(line)},
+                       {"character", Json::num(units)}});
+}
+
+static bool hintSpanContains(freshet::SrcLoc loc, size_t off) {
+  uint64_t end = loc.endOffset > loc.startOffset ? loc.endOffset
+                                                 : loc.startOffset + 1;
+  return off >= loc.startOffset && off < end;
+}
+
+// the identifier being completed: chars immediately left of the cursor.
+// Returns the prefix and where the word starts.
+static void wordPrefixAt(const std::string& text, size_t off,
+                         std::string& prefix, size_t& wordStart) {
+  size_t i = off;
+  while (i > 0) {
+    char c = text[i - 1];
+    if (isalnum((unsigned char)c) || c == '_') --i; else break;
+  }
+  wordStart = i;
+  prefix = text.substr(i, off - i);
+}
+
+// `module::|` — completing a qualified path.  Returns the module name and
+// true when the text just left of the word is the `::` separator.
+static bool qualifiedBefore(const std::string& text, size_t wordStart,
+                            std::string& module) {
+  if (wordStart < 2) return false;
+  if (text.compare(wordStart - 2, 2, "::") != 0) return false;
+  size_t i = wordStart - 2;
+  while (i > 0) {
+    char c = text[i - 1];
+    if (isalnum((unsigned char)c) || c == '_') --i; else break;
+  }
+  module = text.substr(i, wordStart - 2 - i);
+  return !module.empty();
+}
+
+// push the direct child statements of `s` (BLOCK / IF / WHILE / FOR /
+// PARFOR / MATCH arms).  Mirrors the traversal shape of NavWalker::stmt.
+static void pushStmtChildren(freshet::Stmt* s,
+                             std::vector<freshet::Stmt*>& out) {
+  switch (s->k) {
+    case freshet::Stmt::IF:
+      if (s->thenB) out.push_back(s->thenB);
+      if (s->elseB) out.push_back(s->elseB);
+      break;
+    case freshet::Stmt::WHILE:
+    case freshet::Stmt::FOR:
+    case freshet::Stmt::PARFOR:
+      if (s->body) out.push_back(s->body);
+      break;
+    case freshet::Stmt::MATCH:
+      for (auto& a : s->matchArms)
+        if (a.body) out.push_back(a.body);
+      break;
+    case freshet::Stmt::BLOCK:
+      for (auto* t : s->stmts)
+        if (t) out.push_back(t);
+      break;
+    default:
+      break;
+  }
+}
+
+// the fn whose (non-generic, non-imported) body encloses the cursor —
+// the scope whose locals and params completion offers.
+static freshet::FnDecl* fnEnclosing(Program* prog, size_t off) {
+  if (!prog) return nullptr;
+  for (auto* f : prog->fns) {
+    if (!f || f->imported || f->isGeneric || !f->body) continue;
+    std::vector<freshet::Stmt*> pending{f->body};
+    std::unordered_set<const freshet::Stmt*> seen;
+    while (!pending.empty()) {
+      freshet::Stmt* s = pending.back();
+      pending.pop_back();
+      if (!s || !seen.insert(s).second) continue;
+      if (hintSpanContains(s->loc, off)) return f;
+      std::vector<freshet::Stmt*> kids;
+      pushStmtChildren(s, kids);
+      for (auto it = kids.rbegin(); it != kids.rend(); ++it)
+        pending.push_back(*it);
+    }
+  }
+  return nullptr;
+}
+
+// Keyword list mirrors src/lexer.cpp KEYWORDS — advisory editor data;
+// a stale entry only costs a bogus suggestion, so duplication is safe.
+static const char* COMPLETION_KEYWORDS[] = {
+  "fn","let","mut","return","defer","if","else","while","for","parfor","in",
+  "struct","align","true","false","as","export","extern","give","by","step",
+  "reduction","threads","chunk","affinity","collapse","close","spread",
+  "soa","sizeof","alignof","nil","break","continue","enum","match","unsafe",
+  "str","module","import","pub","trait","impl","Self","const",
+};
+
+// Compiler-known builtins (sema_expr.cpp typeBuiltin): the completion
+// surface most useful while editing.  Advisory only — signatures shown as
+// documentation anchors, not checked here.
+static const struct { const char* name; const char* sig; } COMPLETION_BUILTINS[] = {
+  {"malloc",       "malloc(T, n) -> *T"},
+  {"stack_alloc",  "stack_alloc(T, n) -> *T"},
+  {"free",         "free(p)"},
+  {"give",         "give(p)"},
+  {"memcpy",       "memcpy(dst, src, n)"},
+  {"memset",       "memset(dst, v, n)"},
+  {"print",        "print(s: str)"},
+  {"println",      "println()"},
+  {"print_i64",    "print_i64(x)"},
+  {"print_u64",    "print_u64(x)"},
+  {"print_f64",    "print_f64(x, digits)"},
+  {"soa_new",      "soa_new(S, n) -> soa(S)"},
+  {"soa_free",     "soa_free(p)"},
+  {"soa_len",      "soa_len(p) -> u64"},
+  {"assert",       "assert(cond)"},
+  {"const_assert", "const_assert(cond)"},
+  {"span",         "span(arr) -> Span<T>"},
+  {"len",          "len(view) -> i64"},
+  {"str_eq",       "str_eq(a: str, b: str) -> bool"},
+  {"str_cat",      "str_cat(a: str, b: str) -> String"},
+  {"str_of",       "str_of(&s: String) -> str"},
+  {"str_to_cstr",  "str_to_cstr(s: str) -> *u8"},
+  {"string_new",   "string_new() -> String"},
+  {"string_from",  "string_from(s: str) -> String"},
+  {"string_append","string_append(&mut s: String, a: str)"},
+  {"string_clone", "string_clone(&s: String) -> String"},
+  {"string_clear", "string_clear(&mut s: String)"},
+  {"fmt_i64",      "fmt_i64(x) -> String"},
+  {"fmt_f64",      "fmt_f64(x, digits) -> String"},
+  {"fmt",          "fmt(parts: str...) -> String"},
+  {"parse_i64",    "parse_i64(s: str) -> Result<i64, ParseError>"},
+  {"parse_u64",    "parse_u64(s: str) -> Result<u64, ParseError>"},
+  {"parse_f64",    "parse_f64(s: str) -> Result<f64, ParseError>"},
+  {"vec_new",      "vec_new(T, cap) -> Vec<T>"},
+  {"vec_from_span","vec_from_span(v: Span<T>) -> Vec<T>"},
+  {"vec_from_array","vec_from_array(a: [T; N]) -> Vec<T>"},
+  {"vec_clone",    "vec_clone(&v: Vec<T>) -> Vec<T>"},
+  {"vec_slice",    "vec_slice(&v: Vec<T>, lo, hi) -> Span<T>"},
+  {"vec_push",     "vec_push(&mut v: Vec<T>, x: T)"},
+  {"vec_pop",      "vec_pop(&mut v: Vec<T>) -> Option<T>"},
+  {"vec_get",      "vec_get(&v: Vec<T>, i) -> Option<T>"},
+  {"vec_remove",   "vec_remove(&mut v: Vec<T>, i)"},
+  {"vec_insert",   "vec_insert(&mut v: Vec<T>, i, x: T)"},
+  {"vec_reserve",  "vec_reserve(&mut v: Vec<T>, cap)"},
+  {"vec_resize",   "vec_resize(&mut v: Vec<T>, n)"},
+  {"vec_truncate", "vec_truncate(&mut v: Vec<T>, n)"},
+  {"vec_clear",    "vec_clear(&mut v: Vec<T>)"},
+  {"vec_free",     "vec_free(&mut v: Vec<T>)"},
+  {"vec_len",      "vec_len(&v: Vec<T>) -> u64"},
+  {"vec_capacity", "vec_capacity(&v: Vec<T>) -> u64"},
+  {"vec_is_empty", "vec_is_empty(&v: Vec<T>) -> bool"},
+  {"checked_add",  "checked_add(a, b) -> Option<T>"},
+  {"checked_sub",  "checked_sub(a, b) -> Option<T>"},
+  {"checked_mul",  "checked_mul(a, b) -> Option<T>"},
+  {"checked_div",  "checked_div(a, b) -> Option<T>"},
+  {"checked_rem",  "checked_rem(a, b) -> Option<T>"},
+  {"saturating_add","saturating_add(a, b)"},
+  {"saturating_sub","saturating_sub(a, b)"},
+  {"saturating_mul","saturating_mul(a, b)"},
+  {"wrapping_add", "wrapping_add(a, b)"},
+  {"wrapping_sub", "wrapping_sub(a, b)"},
+  {"wrapping_mul", "wrapping_mul(a, b)"},
+  {"checked_cast", "checked_cast(x) -> Option<U>"},
+  {"saturating_cast","saturating_cast(x) -> U"},
+  {"int_min",      "int_min(x) -> T"},
+  {"int_max",      "int_max(x) -> T"},
+  {"imin",         "imin(a, b)"},
+  {"imax",         "imax(a, b)"},
+  {"abs",          "abs(x)"},
+  {"gcd",          "gcd(a, b)"},
+  {"clamp",        "clamp(x, lo, hi)"},
+  {"sqrt",         "sqrt(x: f64) -> f64"},
+  {"sin",          "sin(x: f64) -> f64"},
+  {"cos",          "cos(x: f64) -> f64"},
+  {"tan",          "tan(x: f64) -> f64"},
+  {"exp",          "exp(x: f64) -> f64"},
+  {"log",          "log(x: f64) -> f64"},
+  {"log2",         "log2(x: f64) -> f64"},
+  {"log10",        "log10(x: f64) -> f64"},
+  {"fabs",         "fabs(x: f64) -> f64"},
+  {"floor",        "floor(x: f64) -> f64"},
+  {"ceil",         "ceil(x: f64) -> f64"},
+  {"round",        "round(x: f64) -> f64"},
+  {"pow",          "pow(x, y) -> f64"},
+  {"fmin",         "fmin(x, y) -> f64"},
+  {"fmax",         "fmax(x, y) -> f64"},
+  {"bswap16",      "bswap16(x: u16) -> u16"},
+  {"bswap32",      "bswap32(x: u32) -> u32"},
+  {"bswap64",      "bswap64(x: u64) -> u64"},
+  {"popcount",     "popcount(x: u64) -> u64"},
+  {"now_ns",       "now_ns() -> i64"},
+  {"now_ms",       "now_ms() -> i64"},
+  {"page_size",    "page_size() -> u64"},
+  {"sm64_next",    "sm64_next(&mut st: u64) -> u64"},
+};
+
+// LSP CompletionItemKind numbers used below.
+enum {
+  K_FUNCTION = 3, K_VARIABLE = 6, K_KEYWORD = 14, K_ENUM = 13,
+  K_STRUCT = 22, K_MODULE = 9,
+};
+
+// Well-known prelude types.  The prelude materialises lazily in the AST
+// (ensurePreludeString etc. on first use), so the dynamic struct/enum
+// tables only carry them AFTER the document references them.  Completion
+// offers the language-level surface unconditionally; the labels are
+// always valid to write.
+static const struct { const char* name; const char* detail; int kind; }
+PRELUDE_TYPES[] = {
+  {"String",     "prelude owned growable UTF-8 buffer",      22},
+  {"Vec",        "prelude dynamic container <T>",            22},
+  {"Span",       "prelude borrowed contiguous view <T>",      22},
+  {"Reader",     "prelude streaming input handle",           22},
+  {"Writer",     "prelude streaming output handle",          22},
+  {"Option",     "prelude enum <T> (Some/None)",             13},
+  {"Result",     "prelude enum <T, E> (Ok/Err)",             13},
+  {"ParseError", "prelude enum (Invalid/OutOfRange)",        13},
+  {"IoError",    "prelude enum (streaming I/O errors)",       13},
+};
+
+void handleCompletion(Workspace& ws, int id, const Json& params) {
+  const Json* td = params.find("textDocument");
+  const Json* pos = params.find("position");
+  if (!td || !pos) {
+    sendResponse(id, Json::object({{"isIncomplete", Json::boolean(false)},
+                                   {"items", Json::array({})}}));
+    return;
+  }
+  const Json* uri = td->find("uri");
+  if (!uri) {
+    sendResponse(id, Json::object({{"isIncomplete", Json::boolean(false)},
+                                   {"items", Json::array({})}}));
+    return;
+  }
+  const Json* line = pos->find("line");
+  const Json* ch = pos->find("character");
+  if (!line || !ch) {
+    sendResponse(id, Json::object({{"isIncomplete", Json::boolean(false)},
+                                   {"items", Json::array({})}}));
+    return;
+  }
+  std::lock_guard<std::mutex> g(ws.mu);
+  auto* an = ensureAnalysed(ws, uri->s);
+  const std::string& text = ws.docs[uri->s].text;
+  size_t off = lspPosToOffset(text, (int)line->i, (int)ch->i);
+  std::string prefix;
+  size_t wordStart = 0;
+  wordPrefixAt(text, off, prefix, wordStart);
+  std::string moduleQualifier;
+  bool qualified = qualifiedBefore(text, wordStart, moduleQualifier);
+
+  Json items = Json::array({});
+  auto addItem = [&](const std::string& label, int kind,
+                     const std::string& detail, char sortClass) {
+    if (label.empty()) return;
+    if (!prefix.empty() && label.compare(0, prefix.size(), prefix) != 0)
+      return;
+    items.arr.push_back(Json::object({
+      {"label",    Json::str(label)},
+      {"kind",     Json::num(kind)},
+      {"detail",   Json::str(detail)},
+      {"sortText", Json::str(std::string(1, sortClass) + label)},
+    }));
+  };
+
+  if (an && an->program) {
+    Program* prog = an->program.get();
+
+    // scope-visible locals + params of the fn the cursor sits in.  The
+    // same name can be re-bound in inner scopes; keep the binding closest
+    // BEFORE the cursor (a binding after the cursor is not yet in scope).
+    if (!qualified) {
+      freshet::FnDecl* enc = fnEnclosing(prog, off);
+      if (enc) {
+        freshet::FnSema* fs = freshet::semaForFn(enc);
+        if (fs) {
+          std::map<std::string, const freshet::Sym*> latest;
+          for (auto& sym : fs->allSyms) {
+            if (!sym.declLoc.startOffset && !sym.declLoc.line) continue;
+            if (sym.declLoc.startOffset > off) continue;
+            latest[sym.name] = &sym;
+          }
+          for (auto& kv : latest)
+            addItem(kv.first, K_VARIABLE,
+                    freshet::typeToString(kv.second->ty) +
+                        (kv.second->mut ? " (mut)" : ""),
+                    '0');
+        }
+      }
+    }
+
+    // functions (qualified mode: only that module's).  Trait impl methods
+    // are mangled and not nameable bare — leave them out.
+    for (auto* f : prog->fns) {
+      if (!f || f->isTraitImpl) continue;
+      if (qualified && f->module != moduleQualifier) continue;
+      std::string sig = NavWalker::fnSignature(f);
+      if (f->isGeneric) {
+        sig += "  <";
+        for (size_t i = 0; i < f->tparams.size(); ++i) {
+          if (i) sig += ", ";
+          sig += f->tparams[i];
+        }
+        sig += ">";
+      }
+      std::string detail = sig;
+      if (!qualified && !f->module.empty() && !f->imported)
+        detail += "  [module " + f->module + "]";
+      addItem(f->name, f->imported ? K_FUNCTION : K_FUNCTION, detail, '1');
+    }
+    // globals (qualified mode: only that module's)
+    for (auto* gv : prog->globals) {
+      if (!gv) continue;
+      if (qualified && gv->module != moduleQualifier) continue;
+      addItem(gv->name, K_VARIABLE,
+              (gv->mut ? "mut global: " : "global: ") +
+                  freshet::typeToString(gv->ty),
+              '1');
+    }
+  }
+
+  if (!qualified) {
+    // declared type constructors (templates included: `Vec` is usable
+    // through instantiation even when the template itself is not)
+    if (an && an->program) {
+      for (auto* sd : an->program->structs) {
+        if (!sd) continue;
+        std::string detail = sd->isGeneric ? "generic struct" : "struct";
+        if (sd->isGeneric && !sd->tparams.empty()) {
+          detail += " <";
+          for (size_t i = 0; i < sd->tparams.size(); ++i) {
+            if (i) detail += ", ";
+            detail += sd->tparams[i];
+          }
+          detail += ">";
+        }
+        addItem(sd->name, K_STRUCT, detail, '2');
+      }
+      for (auto* ed : an->program->enums) {
+        if (!ed) continue;
+        addItem(ed->name, K_ENUM, "enum", '2');
+      }
+    }
+    // the language surface: prelude types, keywords, compiler-known builtins
+    for (auto& pt : PRELUDE_TYPES)
+      addItem(pt.name, pt.kind, pt.detail, '2');
+    for (auto* kw : COMPLETION_KEYWORDS)
+      addItem(kw, K_KEYWORD, "keyword", '3');
+    for (auto& b : COMPLETION_BUILTINS)
+      addItem(b.name, K_FUNCTION, std::string("builtin: ") + b.sig, '1');
+  }
+
+  sendResponse(id, Json::object({{"isIncomplete", Json::boolean(false)},
+                                 {"items", items}}));
+}
+
+// Collect the inlay-hint sites of one fn body: every un-annotated `let`
+// (type hint) and every resolved user call (parameter hints).
+struct HintWalker {
+  std::vector<freshet::Stmt*> lets;
+  std::vector<freshet::Expr*> calls;
+  std::unordered_set<const freshet::Expr*> seenExprs;
+  std::unordered_set<const freshet::Stmt*> seenStmts;
+
+  void expr(freshet::Expr* root) {
+    if (!root) return;
+    std::vector<freshet::Expr*> pending;
+    pending.push_back(root);
+    while (!pending.empty()) {
+      freshet::Expr* e = pending.back();
+      pending.pop_back();
+      if (!e || !seenExprs.insert(e).second) continue;
+      if (e->k == freshet::Expr::CALL && e->callee) calls.push_back(e);
+      if (e->base) pending.push_back(e->base);
+      if (e->rhs) pending.push_back(e->rhs);
+      if (e->lhs) pending.push_back(e->lhs);
+      // SLICE reuses lhs/rhs; CAST carries castTy only
+      for (auto it = e->args.rbegin(); it != e->args.rend(); ++it)
+        if (*it) pending.push_back(*it);
+    }
+  }
+
+  void stmt(freshet::Stmt* root) {
+    if (!root) return;
+    std::vector<freshet::Stmt*> pending;
+    pending.push_back(root);
+    while (!pending.empty()) {
+      freshet::Stmt* s = pending.back();
+      pending.pop_back();
+      if (!s || !seenStmts.insert(s).second) continue;
+      if (s->k == freshet::Stmt::LET && !s->hasAnn) lets.push_back(s);
+      expr(s->init);
+      expr(s->lhs);      expr(s->rhs);
+      expr(s->retVal);   expr(s->deferExpr);
+      expr(s->cond);     expr(s->expr);
+      expr(s->matchOn);
+      expr(s->rangeLo);  expr(s->rangeHi);
+      expr(s->forInit);  expr(s->forCond); expr(s->forStep);
+      expr(s->plo);      expr(s->phi);
+      for (auto& c : s->clauses) expr(c.e);
+      std::vector<freshet::Stmt*> kids;
+      pushStmtChildren(s, kids);
+      for (auto it = kids.rbegin(); it != kids.rend(); ++it)
+        pending.push_back(*it);
+    }
+  }
+};
+
+// end offset of the binding identifier of `let [mut] name ...` — the type
+// hint is rendered right after the name.  Falls back to the statement
+// start when the scan does not line up (error-recovery ASTs).
+static size_t letNameEnd(const std::string& text, freshet::Stmt* s) {
+  size_t i = s->loc.startOffset;
+  if (i >= text.size()) return s->loc.startOffset;
+  auto skipWs = [&]() {
+    while (i < text.size() && isspace((unsigned char)text[i])) ++i;
+  };
+  auto skipIdent = [&]() {
+    while (i < text.size() &&
+           (isalnum((unsigned char)text[i]) || text[i] == '_')) ++i;
+  };
+  skipWs();
+  if (text.compare(i, 3, "let") != 0) return s->loc.startOffset;
+  i += 3;
+  skipWs();
+  // optional `mut` keyword (followed by more word chars => it was the
+  // binding's own name spelled like the keyword — impossible, keywords
+  // cannot bind; take the safe branch anyway)
+  if (text.compare(i, 3, "mut") == 0 &&
+      (i + 3 >= text.size() ||
+       (!isalnum((unsigned char)text[i + 3]) && text[i + 3] != '_'))) {
+    i += 3;
+    skipWs();
+  }
+  skipIdent();
+  return i;
+}
+
+void handleInlayHint(Workspace& ws, int id, const Json& params) {
+  const Json* td = params.find("textDocument");
+  const Json* range = params.find("range");
+  if (!td || !range) { sendResponse(id, Json::null()); return; }
+  const Json* uri = td->find("uri");
+  if (!uri) { sendResponse(id, Json::null()); return; }
+  const Json* rs = range->find("start");
+  const Json* re = range->find("end");
+  if (!rs || !re) { sendResponse(id, Json::null()); return; }
+
+  std::lock_guard<std::mutex> g(ws.mu);
+  auto* an = ensureAnalysed(ws, uri->s);
+  if (!an || !an->program) { sendResponse(id, Json::array({})); return; }
+  const std::string& text = ws.docs[uri->s].text;
+  size_t startOff = lspPosToOffset(text, (int)rs->find("line")->i,
+                                   (int)rs->find("character")->i);
+  size_t endOff = lspPosToOffset(text, (int)re->find("line")->i,
+                                 (int)re->find("character")->i);
+
+  Json hints = Json::array({});
+  auto addHint = [&](size_t pos, const std::string& label, int kind,
+                    bool padLeft, bool padRight) {
+    if (pos < startOff || pos > endOff) return;
+    Json h = Json::object({
+      {"position", offsetToLspPos(text, pos)},
+      {"label",    Json::str(label)},
+      {"kind",     Json::num(kind)},
+    });
+    if (padLeft)   h.obj.push_back({"paddingLeft",  Json::boolean(true)});
+    if (padRight)  h.obj.push_back({"paddingRight", Json::boolean(true)});
+    hints.arr.push_back(h);
+  };
+
+  for (auto* f : an->program->fns) {
+    if (!f || f->imported || f->isGeneric || !f->body) continue;
+    freshet::FnSema* fs = freshet::semaForFn(f);
+    HintWalker hw;
+    hw.stmt(f->body);
+
+    // ---- inferred-type hints: `let x = ...;` without an annotation ----
+    for (auto* s : hw.lets) {
+      if (!s || !s->init) continue;
+      freshet::Type* ty = nullptr;
+      if (fs) {
+        for (auto& sym : fs->allSyms) {
+          if (sym.declLoc.startOffset == s->loc.startOffset &&
+              (sym.declLoc.line == s->loc.line)) {
+            ty = sym.ty;
+            break;
+          }
+        }
+      }
+      if (!ty) ty = s->init->ty;      // fall back to the init's own type
+      if (!ty || ty->k == freshet::Type::VOID) continue;
+      size_t pos = letNameEnd(text, s);
+      addHint(pos, ": " + freshet::typeToString(ty),
+              /*Type=*/1, /*padLeft=*/true, /*padRight=*/false);
+    }
+
+    // ---- parameter-name hints at resolved call sites ----
+    for (auto* e : hw.calls) {
+      freshet::FnDecl* callee = e->callee;
+      if (!callee) continue;
+      for (size_t i = 0; i < e->args.size() && i < callee->params.size();
+           ++i) {
+        freshet::Expr* arg = e->args[i];
+        if (!arg) continue;
+        // an argument already spelled as the parameter's own name carries
+        // no information — editors suppress those, so do not send them
+        if (arg->k == freshet::Expr::IDENT && arg->name == callee->params[i].name)
+          continue;
+        addHint(arg->loc.startOffset, callee->params[i].name + ":",
+                /*Parameter=*/2, false, /*padRight=*/true);
+      }
+    }
+  }
+
+  sendResponse(id, hints);
+}
+
 void handleUnknownMethod(int id, const std::string& method) {
   // Method not found error (LSP spec §6.2).
   Json err = Json::object({
@@ -1014,6 +1572,10 @@ void handleMessage(Workspace& ws, const Json& msg) {
     if (isRequest) handleRename(ws, (int)id->i, p);
   } else if (m == "textDocument/documentSymbol") {
     if (isRequest) handleDocumentSymbol(ws, (int)id->i, p);
+  } else if (m == "textDocument/completion") {
+    if (isRequest) handleCompletion(ws, (int)id->i, p);
+  } else if (m == "textDocument/inlayHint") {
+    if (isRequest) handleInlayHint(ws, (int)id->i, p);
   } else if (m == "$/cancelRequest") {
     // MVP ignores cancellation; analysis is fast enough for typical
     // files.  A future async variant will honour cancellation tokens.

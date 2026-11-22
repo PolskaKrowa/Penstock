@@ -903,6 +903,10 @@ struct Parser {
           expect("=>", "match arm");
           arm.body = parseBlock(fn, s);
           s->matchArms.push_back(std::move(arm));
+          // ch. 08 grammar: `arm { "," arm }` — comma-separated arms are
+          // normative (newline-only matches parse the same; the comma is
+          // simply consumed between arms)
+          accept(",");
         }
         expect("}", "match arms");
         return s;

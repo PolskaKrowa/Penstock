@@ -460,8 +460,8 @@ if grep -q "optnone" "$TMP/rt.ll"; then
 else
   ok "§3 runtime IR has no optnone (built at -O$( [ -n "$($PEN --version >/dev/null 2>&1; echo)" ] && echo 2 || echo 2 ))"
 fi
-if ls build/frt_rt_*_o2.ll >/dev/null 2>&1; then
-  ok "§3 runtime cache file keyed with optimisation level (frt_rt_*_o2.ll)"
+if ls build/frt_rt*_o2*.ll >/dev/null 2>&1; then
+  ok "§3 runtime cache file keyed with optimisation level (frt_rt*_o2*.ll)"
 else bad "§3 runtime cache key missing level"; fi
 
 # default: NO forced vectorisation metadata; --force-vectorize restores
@@ -623,9 +623,9 @@ run_err "container use-after-move (F0301)" tests/neg_vec_move.fsht F0301
 run_err "container use-after-free (F0301)" tests/neg_vec_useafterfree.fsht F0301
 run_err "container double free (F0301)" tests/neg_vec_doublefree.fsht F0301
 run_err "rebinding a container that still owns (F0301)" tests/neg_vec_rebind.fsht F0301
-run_err "owning element type rejected (F0201)" tests/neg_vec_owned_elem.fsht F0201
-run_err "container nested in a struct rejected (F0201)" tests/neg_vec_structfield.fsht F0201
-run_err "returning a container view dangles (F0301)" tests/neg_vec_viewescape.fsht F0301
+run_ok "owning element types legal (fsht-03:02 lifting)" tests/pos_vec_owned_elem.fsht "2"
+run_ok "container nested in a struct legal (fsht-03:02 lifting)" tests/pos_vec_structfield.fsht "1"
+run_err "returning a container view dangles (F0311)" tests/neg_vec_viewescape.fsht F0311
 run_err "container mutation inside parfor (F0307)" tests/neg_vec_parfor_mut.fsht F0307
 
 echo "== fsht-02:02: user-defined traits, static dispatch (registry 06.02.01) =="
@@ -702,7 +702,10 @@ else bad "smt-interleave mem_class IR check"; fi
 # parser and every inline/dispatch combination of a paired dispatch must
 # match the sequential reference
 if command -v gcc >/dev/null 2>&1; then
-  if gcc -std=c11 -D_GNU_SOURCE -w -o "$TMP/rt_smt_test" \
+  # -I runtime: the fsht-03:03 decomposition nests platform includes
+  # as runtime/-relative paths (common/frt_platform.h) — the umbrella
+  # resolves them through the runtime directory on the include path
+  if gcc -std=c11 -D_GNU_SOURCE -w -I runtime -o "$TMP/rt_smt_test" \
       scripts/rt_smt_test.c runtime/frt_rt.c -lpthread -lm 2>/dev/null \
       && "$TMP/rt_smt_test" >"$TMP/rt_smt.out" 2>&1 \
       && grep -q "ALL RUNTIME SMT TESTS PASSED" "$TMP/rt_smt.out"; then
@@ -958,6 +961,21 @@ else
   sed -n '1,8p' "$TMP/lspdiagerr"
 fi
 
+# fsht tooling: completion + inlay hints (registry 10.04.01 surface).
+# Scope-aware identifier completion (locals of the enclosing fn, fns,
+# globals, prelude types, keywords, the compiler-known builtins;
+# module-qualified paths restrict to that module) and the two inlay hint
+# families (inferred types on un-annotated lets, parameter names at
+# resolved call sites).
+if [ ! -x "$PEN_LSP" ]; then
+  bad "LSP: completion + inlay hints (server not built)"
+elif python3 scripts/lsp_completion_inlay_check.py "$PEN_LSP" >/dev/null 2>"$TMP/lspcomperr"; then
+  ok "LSP: completion + inlay hints over stdio JSON-RPC"
+else
+  bad "LSP: completion + inlay hints over stdio JSON-RPC"
+  sed -n '1,8p' "$TMP/lspcomperr"
+fi
+
 echo "== optimisation-audit: §10.2/§10.3 differential + property tests =="
 if [ "${RUN_DIFFTEST:-0}" = "1" ]; then
   if bash scripts/difftest.sh; then ok "difftest: all configurations agree"; else bad "difftest: outputs differ"; fi
@@ -1053,6 +1071,55 @@ if [ -d runtime/common ] && [ -d runtime/platforms/linux ] \
     && grep -q "FRT_PLATFORM" runtime/frt_rt.c; then
   ok "runtime decomposition: common/ + platforms/{linux,windows,wasm,baremetal}"
 else bad "runtime decomposition layout"; fi
+
+echo "== fsht tooling: automatic C header generation (registry 07.04.01) =="
+# The export surface compiles and runs like any program ...
+run_ok "export fns build and run normally" tests/pos_c_header.fsht "25.0|12.0|10.0|10.0|6765"
+# ... and --emit-c-header describes it with C declarations that mirror
+# the emitted ABI: struct bodies, tagged-union enums, { ptr, len } pair
+# typedefs for Span<T>, by-address aggregate parameters.
+if $PEN tests/pos_c_header.fsht -o "$TMP/ch.bin" --emit-c-header="$TMP/pos_c_header.h" 2>"$TMP/cherr" \
+    && [ -s "$TMP/pos_c_header.h" ]; then
+  hdrs=$(grep -cE '^(int64_t|double|fsh_) [a-z_]+\(' "$TMP/pos_c_header.h")
+  if grep -q 'struct Particle' "$TMP/pos_c_header.h" \
+     && grep -q 'int64_t tag;' "$TMP/pos_c_header.h" \
+     && grep -q 'fsh_span_double' "$TMP/pos_c_header.h" \
+     && grep -q 'int64_t fib(int64_t n);' "$TMP/pos_c_header.h" \
+     && grep -q 'double kinetic(Particle\* p);' "$TMP/pos_c_header.h" \
+     && grep -q 'double area(Shape\* s);' "$TMP/pos_c_header.h" \
+     && grep -q 'double sum_span(fsh_span_double v);' "$TMP/pos_c_header.h"; then
+    ok "--emit-c-header writes ABI-mirroring C declarations"
+  else
+    bad "--emit-c-header: expected prototypes not found"
+  fi
+else
+  bad "--emit-c-header: compile/header emission failed"; sed -n '1,5p' "$TMP/cherr"
+fi
+# the header must itself be valid C: compile a consumer that includes it
+# and references every exported symbol (a C compiler is optional — CI has
+# one, minimal installs may not)
+CC_BIN=""
+for c in gcc cc clang; do command -v "$c" >/dev/null 2>&1 && CC_BIN="$c" && break; done
+if [ -n "$CC_BIN" ]; then
+  cat > "$TMP/use_header.c" <<'CEOF'
+#include <stddef.h>
+#include "pos_c_header.h"
+const void *use_exports(void) {
+  (void)fib(0); (void)kinetic((const Particle[]){ {1,2,3} });
+  Shape s; s.tag = 0;
+  double v[1] = { 0 }; fsh_span_double sp = { v, 1 };
+  (void)area(&s); (void)sum_span(sp);
+  return sp.ptr;
+}
+CEOF
+  if $CC_BIN -fsyntax-only -I"$TMP" "$TMP/use_header.c" 2>"$TMP/ccerr"; then
+    ok "generated header compiles as C ($CC_BIN)"
+  else
+    bad "generated header is not valid C"; sed -n '1,5p' "$TMP/ccerr"
+  fi
+else
+  echo "  (no C compiler found — header syntax check skipped)"
+fi
 
 echo
 echo "passed: $pass   failed: $fail"

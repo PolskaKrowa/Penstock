@@ -1,12 +1,14 @@
 // Phase 2b (report §4.5): str views + owned Strings.
 struct Named { name: str, value: i64 }
 
-fn greet(name: str) -> str {
-    // slicing + concatenation on views
+fn greet(name: str) -> String {
+    // slicing + concatenation on views. fsht-03:02: the fn returns the
+    // OWNER (moved out) — returning `str_of(&s)` would dangle the view at
+    // the fn's drop (F0311); the caller binds, views and drops it.
     let mut s: String = string_from("hello, ");
     string_append(&s, name);
     string_append(&s, "!");
-    return str_of(&s);
+    return s;
 }
 fn main() {
     // str literals are values now, not just print arguments
@@ -55,7 +57,8 @@ fn main() {
     string_free(&f);
 
     // strings through functions (by-value pair aggregates)
-    print(greet("freshet")); println();                // hello, freshet!
+    let g: String = greet("freshet");
+    print(str_of(&g)); println();                     // hello, freshet!
 
     // C interop: NUL-terminated copy (caller frees)
     let cz: *u8 = str_to_cstr("abc");

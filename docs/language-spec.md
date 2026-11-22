@@ -516,6 +516,7 @@ Index (generated from the registry):
 | `F0006` | `fmt` | formatter refused to rewrite the file |
 | `F0007` | `pgo` | profile data could not be used |
 | `F0008` | `ir` | internal error while generating IR |
+| `F0009` | `unsupported-target` | `--target` triple is not a ratified/declared target of this build |
 
 **Syntax**
 
@@ -566,6 +567,8 @@ Index (generated from the registry):
 | `F0307` | `thread` | unsafe construct inside a parfor body |
 | `F0308` | `red-add-init` | reduction(+) not initialized to 0 |
 | `F0309` | `red-mul-init` | reduction(*) not initialized to 1 |
+| `F0310` | `borrow-exclusivity` | borrow exclusivity violated (one writer or many readers) |
+| `F0311` | `borrow-lifetime` | a borrow or view would outlive its storage |
 
 **Performance**
 

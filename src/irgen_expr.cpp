@@ -156,7 +156,7 @@ std::string genAddr(Expr* e) {
   switch (e->k) {
     case Expr::IDENT: {
       if (e->sym) {
-        return G->varAllocas[e->name];
+        return G->slotOf(e->name, e->sym->declLoc);
       }
       if (e->globalRef) {
         return "@" + irGlobalSymbol(e->globalRef);
@@ -348,7 +348,7 @@ std::string genSoaFieldAddr(Expr* fld) {
   Expr* soaVar = node->base;
   std::string descPtr;
   if (soaVar->k == Expr::IDENT) {
-    descPtr = G->varAllocas[soaVar->name];   // alloca holding descriptor ptr
+    descPtr = G->slotOf(soaVar->name, soaVar->sym ? soaVar->sym->declLoc : SrcLoc{});   // alloca holding descriptor ptr
     if (descPtr.empty()) descPtr = genExpr(soaVar);
   } else {
     descPtr = genExpr(soaVar);
@@ -564,12 +564,12 @@ std::string genExpr(Expr* e) {
         // struct/enum/array-typed var: value is its address
         if (e->ty && (e->ty->k == Type::STRUCT || e->ty->k == Type::ENUM ||
                       e->ty->k == Type::ARRAY)) {
-          return e->sym ? G->varAllocas[e->name]
+          return e->sym ? G->slotOf(e->name, e->sym->declLoc)
                         : ("@" + irGlobalSymbol(e->globalRef));
         }
         if (e->ty && e->ty->k == Type::SOA) {
           // soa value = descriptor ptr (load from var slot)
-          std::string addr = e->sym ? G->varAllocas[e->name]
+          std::string addr = e->sym ? G->slotOf(e->name, e->sym->declLoc)
                                     : ("@" + irGlobalSymbol(e->globalRef));
           std::string r = G->t();
           G->out << "  " << r << " = load ptr, ptr " << addr << "\n";
@@ -577,13 +577,13 @@ std::string genExpr(Expr* e) {
         }
         // pair aggregates (Span/str): value is the loaded { ptr, i64 }
         if (e->ty && e->ty->isPair()) {
-          std::string addr = e->sym ? G->varAllocas[e->name]
+          std::string addr = e->sym ? G->slotOf(e->name, e->sym->declLoc)
                                     : ("@" + irGlobalSymbol(e->globalRef));
           std::string r = G->t();
           G->out << "  " << r << " = load { ptr, i64 }, ptr " << addr << "\n";
           return r;
         }
-        std::string addr = e->sym ? G->varAllocas[e->name]
+        std::string addr = e->sym ? G->slotOf(e->name, e->sym->declLoc)
                                   : ("@" + irGlobalSymbol(e->globalRef));
         std::string r = G->t();
         G->out << "  " << r << " = load " << G->scalarCodegenTy(e->ty)

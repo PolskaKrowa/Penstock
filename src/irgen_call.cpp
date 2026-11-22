@@ -352,6 +352,11 @@ std::string genCall(Expr* e) {
     {"log", "llvm.log"},
   };
   auto it = llvmMath.find(n);
+  // backend matrix LLVM 19-23: FP min/max spellings differ (common.h
+  // llvmFminBase/llvmFmaxBase) — resolve at emission time, not table time
+  std::string intrBase = it != llvmMath.end() ? it->second : "";
+  if (intrBase == "llvm.fmin") intrBase = llvmFminBase();
+  if (intrBase == "llvm.fmax") intrBase = llvmFmaxBase();
   if (it != llvmMath.end() && e->args.size() >= 1) {
     Type* at = e->args[0]->ty;
     if (at && (at->k == Type::F32 || at->k == Type::F64)) {
@@ -362,11 +367,11 @@ std::string genCall(Expr* e) {
       std::string r = G->t();
       if (e->args.size() == 2)
         G->out << "  " << r << " = call " << G->fflag() << " " << ty << " @"
-               << it->second << "." << (at->k == Type::F32 ? "f32" : "f64")
+               << intrBase << "." << (at->k == Type::F32 ? "f32" : "f64")
                << "(" << ty << " " << a << ", " << ty << " " << b << ")\n";
       else
         G->out << "  " << r << " = call " << G->fflag() << " " << ty << " @"
-               << it->second << "." << (at->k == Type::F32 ? "f32" : "f64")
+               << intrBase << "." << (at->k == Type::F32 ? "f32" : "f64")
                << "(" << ty << " " << a << ")\n";
       return r;
     }
@@ -1426,7 +1431,7 @@ std::string genCall(Expr* e) {
   if (!f && e->fnPtrSym) {
     Type* fpty = e->fnPtrSym->ty;
     if (fpty && fpty->isFnPtr()) {
-      std::string fpAddr = G->varAllocas[e->fnPtrSym->name];
+      std::string fpAddr = G->slotOf(e->fnPtrSym->name, e->fnPtrSym->declLoc);
       std::string fp = G->t();
       G->out << "  " << fp << " = load ptr, ptr " << fpAddr << "\n";
       std::vector<std::string> argRegs;

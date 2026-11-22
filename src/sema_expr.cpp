@@ -735,13 +735,28 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     Type* a = argT(0);
     Type* b = argT(1);
     if (a && b && a->isInt() && b->isInt() && a->k != b->k) {
-      // literal adoption (only constant INT literals retype)
+      // literal adoption (ch. 14): a BARE, default-typed (u64/usize) INT
+      // literal adopts the other operand's type.  A semantically-typed
+      // literal — an int_min/int_max fold — KEEPS its type, and the bare
+      // literal adopts IT: the historical order retyped the int_min fold
+      // itself to u64, so saturating_sub(int_min(z), 100) silently chose
+      // the unsigned lowering (llvm.usub + clamp-to-0) and printed the
+      // wrapped 2^63-100 instead of saturating at INT64_MIN.
+      auto bareLiteral = [&](int i) {
+        return e->args[i] && e->args[i]->constant &&
+               e->args[i]->k == Expr::INT && e->args[i]->ty &&
+               (e->args[i]->ty->k == Type::U64 ||
+                e->args[i]->ty->k == Type::USIZE);
+      };
       auto adopt = [&](int i, Type* other) {
         e->args[i]->ty = other;
         if (i == 0) a = other; else b = other;
       };
-      if (e->args[0]->constant && e->args[0]->k == Expr::INT) adopt(0, b);
-      else if (e->args[1]->constant && e->args[1]->k == Expr::INT) adopt(1, a);
+      bool aBare = bareLiteral(0), bBare = bareLiteral(1);
+      if (aBare && !bBare) adopt(0, b);
+      else if (bBare && !aBare) adopt(1, a);
+      // both bare: identical default types — cannot reach here with
+      // a->k != b->k; both typed: the F0201 below fires (casts required)
     }
     if (!a || !b || !a->isInt() || !b->isInt()) {
       diag(Diag::Error, Code::Type,
@@ -838,7 +853,10 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
   if (n == "parse_i64" || n == "parse_u64" || n == "parse_f64") {
     if (!need(1)) return Type::simple(Type::I64);
     if (argT(0) && argT(0)->k != Type::STR) {
-      diag(Diag::Error, Code::Args, n + " expects a str value", e->loc);
+      // the suite's n31 pins this as the TYPE family (the counterpart of
+      // fmt_i64's argument rule, ch. 23 §1) — F0201, not the arg-count
+      // family
+      diag(Diag::Error, Code::Type, n + " expects a str value", e->loc);
     }
     Type* t = n == "parse_i64" ? Type::simple(Type::I64)
             : n == "parse_u64" ? Type::simple(Type::USIZE)
@@ -1651,12 +1669,28 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       // unary -
       if (rt && !rt->isNum()) return bad("unary minus needs number");
       e->ty = rt ? rt : Type::simple(Type::U64);
-      if (rt && rt->isInt() && !rt->isSigned() && !e->rhs->constant) {
-        // unsigned negation is always a hard error (F0215); only
-        // constant operands are exempt (they fold in sema)
-        diag(Diag::Error, Code::ArithNegUnsigned,
-             "negation of unsigned value — declare as i64 or use 0 - x",
-             e->loc);
+      if (rt && rt->isInt() && !rt->isSigned()) {
+        if (!e->rhs->constant) {
+          // unsigned negation of a NON-constant is always a hard error
+          // (F0215); constants are exempt (they fold in sema)
+          diag(Diag::Error, Code::ArithNegUnsigned,
+               "negation of unsigned value — declare as i64 or use 0 - x",
+               e->loc);
+        } else {
+          // ch. 14 numeric semantics: a syntactically negative operand
+          // takes the SIGNED interpretation of the same width — the same
+          // rule imin/imax already apply ("`-5` can never be silently
+          // reinterpreted as a huge unsigned value").  Without this,
+          // `-7 / 2` wrapped to 2^64-7 and divided UNSIGNED, yielding
+          // 9223372036854775804 instead of the spec's -3 (truncate
+          // toward zero), and `-7 % 8` gave 1 instead of -7.
+          switch (rt->bits()) {
+            case 8:  e->ty = Type::simple(Type::I8);  break;
+            case 16: e->ty = Type::simple(Type::I16); break;
+            case 32: e->ty = Type::simple(Type::I32); break;
+            default: e->ty = Type::simple(Type::I64); break;
+          }
+        }
       }
       e->constant = e->rhs->constant;
       return e->ty;

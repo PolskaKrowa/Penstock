@@ -234,6 +234,13 @@ static bool tryFuseRun(std::vector<Stmt*>& list, size_t from, size_t end,
   Stmt* first = list[from];
   run.push_back({first, BodyInfo{}});
   collectBody(first->body, first->ivar, fn, &run.back().info);
+  // checklist-audit fix: the rename decision compares the loops' IV
+  // SYMBOLS, not their names. Two adjacent `for (k in ...)` loops each
+  // bind their OWN k (fresh Sym -> fresh slot); a name-only comparison
+  // skipped the rename for same-named loops, and the later bodies kept
+  // reading their own — now never-initialised, never-incremented —
+  // slots (uninitialised-offset wrong code in the fused sweep).
+  Sym* firstSym = ivarSymOf(first->body, first->ivar);
 
   size_t lastLegal = from;   // exclusive end of the legal run
   for (size_t j = from + 1; j < end; ++j) {
@@ -252,12 +259,18 @@ static bool tryFuseRun(std::vector<Stmt*>& list, size_t from, size_t end,
     if (!boundsPure(cur->rangeLo) || !boundsPure(cur->rangeHi)) break;
 
     // rename feasibility (checked before including in the run so the
-    // rewrite below cannot fail): different ivar names need a rebindable
-    // sym + a 64-bit int ivar type on both sides
-    if (cur->ivar != first->ivar) {
+    // rewrite below cannot fail): a body whose IV binding differs from
+    // the fused loop's IV — a different NAME, or the same name bound by
+    // a different loop — needs a rebindable sym + a 64-bit int ivar
+    // type, and the replacement target (the fused ivar's own sym) must
+    // exist. A body that never references its own ivar needs nothing.
+    {
       Sym* curSym = ivarSymOf(cur->body, cur->ivar);
-      Type* curIvTy = rangeIvarTy(cur);
-      if (!curSym || !curIvTy || !isInt64Kind(curIvTy)) break;
+      bool needRename = curSym != firstSym && curSym != nullptr;
+      if (needRename) {
+        Type* curIvTy = rangeIvarTy(cur);
+        if (!firstSym || !curIvTy || !isInt64Kind(curIvTy)) break;
+      }
     }
 
     // observable / structural vetoes
@@ -357,19 +370,24 @@ static bool tryFuseRun(std::vector<Stmt*>& list, size_t from, size_t end,
   for (size_t idx = 0; idx < run.size(); ++idx) {
     Stmt* L = run[idx].loop;
     Stmt* body = L->body;
-    if (L->ivar != ivar) {
-      // rename: clone the body, substituting its ivar with an IDENT of
-      // the fused ivar (sema fields copied; addressing is name-keyed).
-      // Feasibility was proven during run extension.
-      Sym* ivSym = ivarSymOf(body, L->ivar);
+    // rename whenever THIS loop's IV binding is not the fused loop's —
+    // different name, or the same name bound by a different loop (each
+    // `for (k in ...)` declares a fresh k). The replacement IDENT carries
+    // BOTH the fused ivar's name and the fused loop's IV sym: irgen
+    // resolves slots by name@declLoc of the sym, so the sym must be the
+    // binding whose slot the fused loop initialises and increments.
+    // Feasibility was proven during run extension.
+    Sym* lSym = ivarSymOf(body, L->ivar);
+    if (lSym && lSym != firstSym) {
       Type* ivTy = rangeIvarTy(L);
-      if (!ivSym || !ivTy || !isInt64Kind(ivTy)) return false;   // defensive
+      if (!ivTy || !isInt64Kind(ivTy) || !firstSym)
+        return false;   // defensive: cannot happen after feasibility
       Expr* repl = new Expr(Expr::IDENT, L->loc);
       repl->name = ivar;
       repl->ty = ivTy;
-      repl->sym = ivSym;
+      repl->sym = firstSym;
       repl->isLvalue = false;
-      std::map<Sym*, Expr*> subst{{ivSym, repl}};
+      std::map<Sym*, Expr*> subst{{lSym, repl}};
       body = cloneStmt(body, subst);
     }
     body->parent = fused->body;
@@ -400,14 +418,19 @@ static int fuseInList(std::vector<Stmt*>& list, FnDecl* fn) {
   size_t i = 0;
   while (i < list.size()) {
     Stmt* s = list[i];
-    if (s->k == Stmt::FOR && s->forRange && !s->ivar.empty() &&
+    // unit-stride range loops only: the fused loop reconstructs a
+    // `for (i in lo..hi)` domain, and a `by <stride>` clause would be
+    // dropped from the trip model (ch. 05 loops; stride-aware lowering
+    // keeps the original loop)
+    if (s->k == Stmt::FOR && s->forRange && !s->forStep &&
+        !s->ivar.empty() &&
         rangeIvarTy(s) && isInt64Kind(rangeIvarTy(s)) &&
         boundsPure(s->rangeLo) && boundsPure(s->rangeHi)) {
       // maximal block of adjacent simple range loops starting at i
       size_t j = i + 1;
       while (j < list.size() &&
              list[j]->k == Stmt::FOR && list[j]->forRange &&
-             !list[j]->ivar.empty())
+             !list[j]->forStep && !list[j]->ivar.empty())
         ++j;
       if (j - i >= 2 && tryFuseRun(list, i, j, fn, &applied))
         continue;   // list[i] is now the fused loop; rescan from i
@@ -441,7 +464,9 @@ static int unrollInList(std::vector<Stmt*>& list, FnDecl* fn) {
   int applied = 0;
   for (size_t i = 0; i < list.size(); ++i) {
     Stmt* s = list[i];
-    if (!(s->k == Stmt::FOR && s->forRange)) continue;
+    // unit-stride only: the unroller substitutes lo + k literals — a
+    // `by <stride>` clause would need lo + k*stride (ch. 05 loops)
+    if (!(s->k == Stmt::FOR && s->forRange && !s->forStep)) continue;
     // §4.4: exact trip information via __int128-checked distance — the
     // historical `hi - lo` could overflow int64_t before the bounds
     // checks below ran

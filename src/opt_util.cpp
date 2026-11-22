@@ -208,8 +208,10 @@ bool evalConstTyped(Expr* e, TypedConst* out) {
       return false;
     }
     case Expr::CAST: {
-      // narrowing = truncation to the TARGET width; widening keeps the
-      // zero-extended bit pattern (signedness applies at interpretation)
+      // narrowing = truncation to the TARGET width; widening a SIGNED
+      // source sign-extends — `(i8)0x80 as i64` is -128, not 128 (the
+      // two's-complement VALUE is preserved; the historical zero-extend
+      // mis-read int_min folds of narrow signed types)
       if (!e->castTy || !e->castTy->isInt()) return false;
       TypedConst a;
       if (!evalConstTyped(e->base, &a) || !a.valid) return false;
@@ -217,7 +219,12 @@ bool evalConstTyped(Expr* e, TypedConst* out) {
       bool NS = e->castTy->isSigned();
       if (NW < 1 || NW > 64) return false;
       uint64_t nm = NW == 64 ? ~0ull : ((1ull << NW) - 1);
-      out->bits = a.bits & nm; out->width = NW; out->isSigned = NS;
+      uint64_t bits = a.bits;
+      if (a.width < 64 && NW > a.width && a.isSigned) {
+        uint64_t sign = 1ull << (a.width - 1);
+        if (bits & sign) bits |= ~((1ull << a.width) - 1);   // upper ones
+      }
+      out->bits = bits & nm; out->width = NW; out->isSigned = NS;
       out->valid = true;
       return true;
     }
@@ -320,6 +327,32 @@ TripInfo tripCountOf(Stmt* loop) {
   if (!loop->rangeLo || !loop->rangeHi) return t;
   if (!evalConstTyped(loop->rangeLo, &lo) || !lo.valid) return t;
   if (!evalConstTyped(loop->rangeHi, &hi) || !hi.valid) return t;
+  // ch. 05 `by <stride>`: a constant stride divides the iteration
+  // distance (ceil); a descending stride flips the direction; anything
+  // else makes the trip unknown.  The historical model ignored the
+  // clause entirely — `for (k in 0..9 by 3)` reported 9 trips instead of
+  // 3, so every consumer that trusted the number mis-modelled the loop.
+  int64_t strideMag = 1;
+  bool descending = false;
+  if (loop->forStep) {
+    Expr* st = loop->forStep;
+    if (st->k == Expr::INT && st->ival > 0) {
+      strideMag = (int64_t)st->ival;
+    } else if (st->k == Expr::INT && st->ival >= (1ull << 63)) {
+      // the typed const-fold pass rewrites `-N` into a wrapped u64 INT
+      // literal — recognise the folded negative as descending
+      uint64_t mag = 0ull - st->ival;   // 2^64 - ival
+      if (mag == 0 || mag > (uint64_t)INT64_MAX) return t;
+      strideMag = (int64_t)mag;
+      descending = true;
+    } else if (st->k == Expr::UN && st->op == "-" && st->rhs &&
+               st->rhs->k == Expr::INT && st->rhs->ival > 0) {
+      strideMag = (int64_t)st->rhs->ival;
+      descending = true;
+    } else {
+      return t;   // variable / complex stride: unknown trip
+    }
+  }
   t.known = true;
   // mathematical distance in 128 bits: never overflows, never wraps —
   // the historical `hi - lo` could overflow int64_t BEFORE the bounds
@@ -328,10 +361,11 @@ TripInfo tripCountOf(Stmt* loop) {
                              : (__int128)hi.unsignedVal();
   __int128 loM = lo.isSigned ? (__int128)lo.signedVal()
                              : (__int128)lo.unsignedVal();
-  __int128 d = hiM - loM;
+  __int128 d = descending ? (loM - hiM) : (hiM - loM);
   if (d <= 0) { t.empty = true; t.trip = 0; return t; }
-  if (d > (__int128)INT64_MAX) { t.saturated = true; t.trip = INT64_MAX; return t; }
-  t.trip = (int64_t)d;
+  __int128 trips = (d + strideMag - 1) / strideMag;   // ceil division
+  if (trips > (__int128)INT64_MAX) { t.saturated = true; t.trip = INT64_MAX; return t; }
+  t.trip = (int64_t)trips;
   return t;
 }
 

@@ -36,6 +36,25 @@ struct IrGen {
   int profMetaBase = 0;
   std::map<std::string, int> varSlots;     // var -> alloca number
   std::map<std::string, std::string> varAllocas; // var -> alloca reg
+  // Scope-aware variable slots: a REDECLARED name (a match-arm binding
+  // whose block ended, a later same-name let) gets its OWN alloca — the
+  // historical name-keyed dedupe reused the first binding's slot, so
+  // `Some(v) => …` (i32) followed by `let mut v: Vec<i64>` memcpy'd 24
+  // bytes into a 4-byte slot and smashed the stack.  Keyed by
+  // name@declLoc (every declare() copies declLoc into allSyms; resolved
+  // IDENTs carry the same declLoc through e->sym).  varAllocas keeps the
+  // name-keyed view — the parfor machinery swaps it for chunk-fn shadow
+  // registers (symAllocas is cleared alongside it there), and unresolved
+  // recovery shapes fall back to it.
+  std::map<std::string, std::string> symAllocas;
+  std::string slotOf(const std::string& name, const SrcLoc& declLoc) {
+    std::string k = name + "@" + std::to_string(declLoc.startOffset) +
+                     ":" + std::to_string(declLoc.line);
+    auto it = symAllocas.find(k);
+    if (it != symAllocas.end()) return it->second;
+    auto n = varAllocas.find(name);
+    return n == varAllocas.end() ? "" : n->second;
+  }
   std::vector<std::string> deferStack;     // IR text of deferred calls
   int parforCounter = 0;
 

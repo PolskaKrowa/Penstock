@@ -1,5 +1,5 @@
 // Phase 2a (report §4.2): generics via monomorphisation.
-fn clamp<T: Numeric>(x: T, low: T, high: T) -> T {
+fn clamped<T: Numeric>(x: T, low: T, high: T) -> T {
     if (x < low) { return low; }
     if (x > high) { return high; }
     return x;
@@ -27,9 +27,9 @@ fn pick<T>(cond: bool, a: T, b: T) -> T {
 
 fn main() {
     // one generic fn, several instantiations
-    print_f64(clamp(2.5, 1.0, 2.0), 1); println();      // clamp$f64: 2.0
-    print_i64(clamp(9 as i64, 1 as i64, 5 as i64)); println();  // clamp$i64: 5
-    print_f64(clamp(0.5f32, 1.0f32, 2.0f32) as f64, 1); println(); // clamp$f32: 1.0
+    print_f64(clamped(2.5, 1.0, 2.0), 1); println();      // clamped$f64: 2.0
+    print_i64(clamped(9 as i64, 1 as i64, 5 as i64)); println();  // clamped$i64: 5
+    print_f64(clamped(0.5f32, 1.0f32, 2.0f32) as f64, 1); println(); // clamped$f32: 1.0
 
     // generic struct
     let p: Pair<f64, i64> = Pair { a: 1.5, b: 7 };

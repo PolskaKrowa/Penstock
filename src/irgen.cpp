@@ -171,8 +171,6 @@ declare double @llvm.fabs.f64(double)
 declare double @llvm.floor.f64(double)
 declare double @llvm.ceil.f64(double)
 declare double @llvm.round.f64(double)
-declare double @llvm.fmin.f64(double, double)
-declare double @llvm.fmax.f64(double, double)
 declare double @llvm.pow.f64(double, double)
 declare double @llvm.exp.f64(double)
 declare double @llvm.log.f64(double)
@@ -181,8 +179,6 @@ declare float @llvm.fabs.f32(float)
 declare float @llvm.floor.f32(float)
 declare float @llvm.ceil.f32(float)
 declare float @llvm.round.f32(float)
-declare float @llvm.fmin.f32(float, float)
-declare float @llvm.fmax.f32(float, float)
 declare float @llvm.pow.f32(float, float)
 declare float @llvm.exp.f32(float)
 declare float @llvm.log.f32(float)
@@ -557,6 +553,13 @@ bool irgenProgram(Program* p, const std::string& outLl) {
 
   // ---------------- runtime decls
   out << RUNTIME_DECLS << "\n";
+  // Backend-matrix FP min/max (LLVM 19-23): LLVM 19 spells them
+  // llvm.minnum/llvm.maxnum, LLVM 20+ llvm.fmin/llvm.fmax — emit the
+  // resolved backend's spelling (g_backendLlvmMajor, common.h).
+  out << "declare double @" << llvmFminBase() << ".f64(double, double)\n"
+      << "declare double @" << llvmFmaxBase() << ".f64(double, double)\n"
+      << "declare float @" << llvmFminBase() << ".f32(float, float)\n"
+      << "declare float @" << llvmFmaxBase() << ".f32(float, float)\n";
 
   // ---------------- functions and imported C prototypes
   for (auto* f : p->fns) {

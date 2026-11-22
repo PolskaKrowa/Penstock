@@ -56,6 +56,17 @@ static bool containerReleaseCall(const std::string& n) {
          n == "reader_close" || n == "writer_close";
 }
 
+// module-qualified calls keep the FULL source spelling in Expr::name
+// ("io::reader_close") while the matchers above work on the bare name —
+// normalise through qualModule (ch. 16 module paths) so a qualified
+// io::reader_close(&mut r) invalidates r exactly like the bare builtin
+static std::string bareCallName(const Expr* e) {
+  if (!e) return "";
+  if (!e->qualModule.empty() && e->name.size() > e->qualModule.size() + 2)
+    return e->name.substr(e->qualModule.size() + 2);
+  return e->name;
+}
+
 struct OwnCtx {
   std::map<std::string, OwnInfo> vars;
   std::vector<std::string> errors;
@@ -173,27 +184,37 @@ static OwnCtx joinStates(const OwnCtx& a, const OwnCtx& b, SrcLoc at) {
 static void ownBlock(OwnCtx& ctx, FnSema* fs, Stmt* b,
                      std::vector<Deferred>& defers, bool checkLeaks) {
   std::map<std::string, OwnInfo> entry = ctx.vars;
+  // Only the defers registered INSIDE this block fire at its exit.  The
+  // historical loop ran the WHOLE accumulated vector — including the
+  // enclosing scopes' entries — and never removed them, so a top-level
+  // `defer free(c)` fired once for every later sibling nested block and
+  // AGAIN at the function end: a false F0301 double free.  Snapshot the
+  // base, process only the new slice in reverse, then drop it (those
+  // defers fired; they must not re-run at fn end).
+  size_t base = defers.size();
   for (auto* st : b->stmts) ownStmt(ctx, fs, st, defers);
   // run defers in reverse (simulate: apply frees)
-  for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
-    Expr* de = it->expr;
-    if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free" ||
-                                de->name == "vec_free")) {
-      std::string v = rootVarName(de->args.empty() ? nullptr : de->args[0]);
+  for (size_t i = defers.size(); i > base; --i) {
+    Deferred& de = defers[i - 1];
+    Expr* dxe = de.expr;
+    if (dxe->k == Expr::CALL && (bareCallName(dxe) == "free" || bareCallName(dxe) == "soa_free" ||
+                                 bareCallName(dxe) == "vec_free")) {
+      std::string v = rootVarName(dxe->args.empty() ? nullptr : dxe->args[0]);
       if (!v.empty()) {
         auto f = ctx.vars.find(v);
         if (f != ctx.vars.end() && f->second.st == OS_FREED) {
           diag(Diag::Error, Code::Own,
                "double free: '" + v + "' freed manually and again by defer",
-               it->loc,
+               de.loc,
                "var=" + v + ",kind=double");
         } else if (f != ctx.vars.end() && f->second.st == OS_ALIVE) {
           f->second.st = OS_FREED;
-          f->second.freeLoc = it->loc;
+          f->second.freeLoc = de.loc;
         }
       }
     }
   }
+  defers.resize(base);   // the block's defers fired; outer ones remain
   if (checkLeaks) {
     for (auto& [v, oi] : ctx.vars) {
       if (!oi.owned) continue;
@@ -233,10 +254,10 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
       oi.container = letTy && isContainerType(letTy);
       oi.owningShape = letTy && (typeNeedsDrop(letTy) || isHandleType(letTy));
       bool owning = oi.container || oi.owningShape;
-      oi.owned = (s->init->k == Expr::CALL && (s->init->name == "malloc" ||
-                                               s->init->name == "soa_new")) ||
+      oi.owned = (s->init->k == Expr::CALL && (bareCallName(s->init) == "malloc" ||
+                                               bareCallName(s->init) == "soa_new")) ||
                  (owning && s->init->k == Expr::CALL &&
-                  containerCtorCall(s->init->name)) ||
+                  containerCtorCall(bareCallName(s->init))) ||
                  (owning && s->init->k == Expr::IDENT);
       oi.allocLoc = s->loc;
       // fsht-02:01/03:02 move-out invalidation: `let b = a;` with an
@@ -288,10 +309,10 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         oi.container = asTy && isContainerType(asTy);
         oi.owningShape = asTy && (typeNeedsDrop(asTy) || isHandleType(asTy));
         bool owning = oi.container || oi.owningShape;
-        oi.owned = (s->rhs->k == Expr::CALL && (s->rhs->name == "malloc" ||
-                                                s->rhs->name == "soa_new")) ||
+        oi.owned = (s->rhs->k == Expr::CALL && (bareCallName(s->rhs) == "malloc" ||
+                                                bareCallName(s->rhs) == "soa_new")) ||
                    (owning && s->rhs->k == Expr::CALL &&
-                    containerCtorCall(s->rhs->name)) ||
+                    containerCtorCall(bareCallName(s->rhs))) ||
                    (owning && s->rhs->k == Expr::IDENT);
         oi.allocLoc = s->loc;
         // move-out invalidation for `b = a` owning sources
@@ -390,13 +411,14 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
     case Stmt::EXPR: {
       checkExprUses(ctx, s->expr, s->loc);
       if (s->expr->k == Expr::CALL) {
-        if (s->expr->name == "free" || s->expr->name == "soa_free" ||
-            containerReleaseCall(s->expr->name)) {
+        std::string bcn = bareCallName(s->expr);
+        if (bcn == "free" || bcn == "soa_free" ||
+            containerReleaseCall(bcn)) {
           std::string v = rootVarName(s->expr->args.empty() ? nullptr : s->expr->args[0]);
           if (!v.empty()) applyFree(ctx, v, s->loc, false);
         }
         // give() marks moved
-        if (s->expr->name == "give") {
+        if (bcn == "give") {
           std::string v = rootVarName(s->expr->args.empty() ? nullptr : s->expr->args[0]);
           if (!v.empty()) applyFree(ctx, v, s->loc, true);
         }
@@ -495,8 +517,8 @@ void runOwnershipAnalysis(Program* p) {
     // function-end defers
     for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
       Expr* de = it->expr;
-      if (de->k == Expr::CALL && (de->name == "free" || de->name == "soa_free" ||
-                                  de->name == "vec_free")) {
+      if (de->k == Expr::CALL && (bareCallName(de) == "free" || bareCallName(de) == "soa_free" ||
+                                  bareCallName(de) == "vec_free")) {
         std::string v = rootVarName(de->args.empty() ? nullptr : de->args[0]);
         if (!v.empty()) {
           auto f = ctx.vars.find(v);
@@ -808,7 +830,7 @@ static void walkBorrowStmt(BorrowWalk& W, Stmt* s, int ordinal) {
     }
     case Stmt::EXPR: {
       if (s->expr && s->expr->k == Expr::CALL) {
-        const std::string& n = s->expr->name;
+        const std::string n = bareCallName(s->expr);
         // two &mut of one root inside one call: f(&mut x, &mut x)
         std::map<std::string, int> mutCount;
         for (auto* a : s->expr->args)

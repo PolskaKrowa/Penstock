@@ -1,0 +1,11 @@
+// fsht-03:02 — the fsht-02:01 restriction is LIFTED (registry 03.02.10,
+// ch. 24 §5): owning element types are legal, and drops walk the shape
+// innermost-first (the Vec frees each element's buffer). This exact
+// program was the fsht-02:01 negative `neg_vec_owned_elem.fsht`; its
+// shape is covered positively here and in pos_shapes.fsht.
+fn main() {
+    let mut v: Vec<String> = vec_new(String, 2);
+    vec_push(&mut v, string_from("x"));
+    vec_push(&mut v, string_from("y"));
+    print_u64(v.len); println();
+}

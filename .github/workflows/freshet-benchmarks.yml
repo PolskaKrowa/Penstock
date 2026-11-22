@@ -18,7 +18,7 @@ on:
     inputs:
       freshet_lang_repo:
         description: 'Freshet-lang repository (owner/repo)'
-        default: 'OWNER/Freshet-lang'
+        default: 'PolskaKrowa/Freshet-lang'
         required: true
       kernels:
         description: 'Kernel subset (empty = all 12)'
@@ -28,7 +28,7 @@ on:
     - cron: '0 3 * * 1'   # weekly benchmark run
 
 env:
-  FRESHET_LANG_REPO: ${{ github.event.inputs.freshet_lang_repo || 'OWNER/Freshet-lang' }}
+  FRESHET_LANG_REPO: ${{ github.event.inputs.freshet_lang_repo || 'PolskaKrowa/Freshet-lang' }}
 
 jobs:
   bench:

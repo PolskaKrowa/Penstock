@@ -199,6 +199,11 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
   if (s->init->k == Expr::CALL && s->init->name == "malloc") sym.owned = true;
   if (s->init->k == Expr::CALL && s->init->name == "soa_new") sym.owned = true;
   if (s->init->k == Expr::CALL && s->init->name == "stack_alloc") sym.owned = true;
+  // fsht-03:02 (ch. 24 §1): a binding initialised from `&mut place`
+  // holds the exclusive borrow — writes through it are legal (F0310
+  // governs the exclusivity, const-ness of the binding does not)
+  if (s->init->k == Expr::UN && s->init->op == "&" && s->init->borrowMut)
+    sym.mutBorrow = true;
   fs->varDepth[s->var] = fs->parforDepth;
   fs->declare(sym);
 }
@@ -264,6 +269,7 @@ static void semaParfor(FnSema* fs, Stmt* s) {
   Sym iv;
   iv.k = Sym::VAR; iv.name = s->pvar; iv.ty = Type::simple(Type::USIZE);
   iv.mut = false;
+  iv.declLoc = s->loc;   // IRgen resolves the parfor var's slot by name@declLoc
   fs->declare(iv);
   fs->varDepth[s->pvar] = fs->parforDepth + 1;
 
@@ -388,8 +394,10 @@ static void semaStmt(FnSema* fs, Stmt* s) {
             Sym* bs = fs->lookup(base->name);
             // owned pointers (malloc results / give params) are writable
             // through immutable bindings: the binding is const, the memory
-            // is exclusively owned
-            if (bs && !bs->mut && !bs->owned && bs->ty && bs->ty->k == Type::PTR) {
+            // is exclusively owned; a `&mut`-held borrow (ch. 24 §1) is
+            // writable too — its exclusivity is F0310's business
+            if (bs && !bs->mut && !bs->owned && !bs->mutBorrow &&
+                bs->ty && bs->ty->k == Type::PTR) {
               diag(Diag::Error, Code::Mut,
                    "cannot mutate through immutable pointer " + base->name,
                    s->loc);
@@ -572,6 +580,12 @@ static void semaStmt(FnSema* fs, Stmt* s) {
           bs.name = arm.bindings[i];
           bs.ty = v.fields[i].ty;
           bs.mut = false;
+          // unique slot key: two matches binding the same NAME (Some(v)
+          // then Ok(v)) used to share one declLoc-defaulted slot and the
+          // second arm read the first's stale bytes
+          bs.declLoc = arm.loc;
+          bs.declLoc.startOffset += (int)i + 1;
+          arm.bindingLocs.push_back(bs.declLoc);   // IRgen's store key
           fs->varDepth[arm.bindings[i]] = fs->parforDepth;
           fs->declare(bs);
         }
@@ -623,11 +637,17 @@ static void semaStmt(FnSema* fs, Stmt* s) {
       fs->push();
       Sym iv;
       iv.k = Sym::VAR; iv.name = s->ivar; iv.mut = true;
+      iv.declLoc = s->loc;   // IRgen resolves loop-var slots by name@declLoc
       if (s->forRange) {
         Type* lt = typeExpr(fs, s->rangeLo);
         Type* ht = typeExpr(fs, s->rangeHi);
         iv.ty = (lt && ht) ? commonType(lt, ht) : Type::simple(Type::USIZE);
         if (iv.ty->k == Type::USIZE) iv.ty = Type::simple(Type::U64);
+        // type the `by <step>` expression too: IRgen's latch lowers it
+        // through genExpr(stepAmt) — an untyped literal used to crash the
+        // compiler with a null-type deref (only `by -1` survived, because
+        // the descending path never evaluates the step expression).
+        if (s->forStep) typeExpr(fs, s->forStep);
         // the ivar must be visible to the body only (ranges are exprs)
         fs->varDepth[s->ivar] = fs->parforDepth;
         fs->declare(iv);
@@ -1047,7 +1067,21 @@ GlobalVar* lookupGlobal(const std::string& name) {
   return pickVisible(it->second, name, "global", SrcLoc{});
 }
 SemaState* semaState() { return S; }
-std::vector<FnSema*>& allFnSemas() { return S->fnSemas; }
-FnSema* semaForFn(FnDecl* f) { return getFnSema(f); }
+std::vector<FnSema*>& allFnSemas() {
+  // LSP error-recovery path: a document with parse errors never reaches
+  // sema, so S is null (first analysis) or holds an EARLIER analysis's
+  // state.  Callers must tolerate an empty registry.
+  static std::vector<FnSema*> empty;
+  return S ? S->fnSemas : empty;
+}
+FnSema* semaForFn(FnDecl* f) {
+  // Same guard as allFnSemas(): analysis of a parse-error document skips
+  // semaProgram entirely, and the language server still walks the
+  // recovered AST for hover/completion/hints.  A null S used to crash
+  // every navigation request on such documents (nullptr deref in
+  // getFnSema's loop below).
+  if (!S) return nullptr;
+  return getFnSema(f);
+}
 
 } // namespace freshet
