@@ -21,6 +21,7 @@
 #include <utility>
 #include <sstream>
 #include <cstring>
+#include <cctype>
 
 using namespace freshet;
 
@@ -212,6 +213,80 @@ static int runCmd(const std::vector<std::string>& command,
   if (WIFEXITED(status)) return WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
   return 127;
+}
+
+// §driver: run a command with the child's stderr redirected to a file, so
+// the parent can show WHY a tool failed instead of an opaque one-liner
+// ("cannot compile runtime library").  A file, not a pipe: a tool dumping a
+// large diagnostic can never deadlock the parent, which never holds the
+// descriptor open while the child runs.
+static int runCmdStderrToFile(const std::vector<std::string>& command,
+                              const std::string& errPath) {
+  if (command.empty() || command.front().empty()) return 127;
+  fflush(nullptr);
+
+  std::vector<char*> argv;
+  argv.reserve(command.size() + 1);
+  for (const auto& arg : command)
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    fprintf(stderr, "penstock: fork failed: %s\n", strerror(errno));
+    return 127;
+  }
+  if (pid == 0) {
+    const int fd = open(errPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    // If the redirection itself fails (unwritable dir), let the tool's
+    // diagnostics reach the terminal untouched rather than vanish.
+    if (fd >= 0) {
+      if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
+      if (fd != STDERR_FILENO) close(fd);
+    }
+    execvp(command.front().c_str(), argv.data());
+    const int execError = errno;
+    dprintf(STDERR_FILENO, "penstock: cannot execute '%s': %s\n",
+            command.front().c_str(), strerror(execError));
+    _exit(execError == ENOENT ? 127 : 126);
+  }
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == EINTR) continue;
+    fprintf(stderr, "penstock: waitpid failed: %s\n", strerror(errno));
+    return 127;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 127;
+}
+
+// One shell-copyable line for a failed command: quote only the arguments
+// that need it, so the user can paste it straight into a terminal and
+// reproduce the failure exactly as the driver saw it.
+static std::string quoteCmd(const std::vector<std::string>& command) {
+  std::string out;
+  for (size_t i = 0; i < command.size(); ++i) {
+    if (i) out += " ";
+    const std::string& a = command[i];
+    bool plain = !a.empty();
+    for (char c : a) {
+      if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' ||
+          c == '/' || c == '-' || c == '+' || c == '=' || c == ':')
+        continue;
+      plain = false;
+      break;
+    }
+    if (plain) { out += a; continue; }
+    out += '\'';
+    for (char c : a) {
+      if (c == '\'') out += "'\\''";
+      else out += c;
+    }
+    out += '\'';
+  }
+  return out;
 }
 
 // Capture stdout from a directly-executed program.  stderr can be inherited
@@ -432,6 +507,12 @@ static std::string exeDir() {
 // The cache key includes the LLVM major version: a runtime .ll compiled by
 // one LLVM must not be reused after switching toolchains (auto-upgraded IR
 // carries version-specific intrinsic/attribute syntax).
+//
+// §driver: on failure this path NEVER just prints the opaque "cannot compile
+// runtime library" — it replays clang's captured stderr and the exact
+// command, because a failed runtime compile is almost always an environment
+// fault (incomplete clang, unsupported --target, unwritable cache dir) the
+// user cannot see otherwise.
 static std::string runtimeLl(const std::string& clangBin,
                              const std::string& cacheDir,
                              const std::string& rtSrc,
@@ -468,8 +549,92 @@ static std::string runtimeLl(const std::string& clangBin,
     cmd.push_back("-target");
     cmd.push_back(g_targetTriple);
   }
-  if (runCmd(cmd, ChildStderr::Discard) != 0 || readFile(cache).empty()) {
-    fprintf(stderr, "penstock: cannot compile runtime library\n");
+  // capture the toolchain's own diagnostic instead of discarding it: the
+  // driver's error must point at the actual fault, not hide it
+  std::string errPath = cache + ".err";
+  const int rc = runCmdStderrToFile(cmd, errPath);
+  std::string clangErr = readFile(errPath);
+  unlink(errPath.c_str());
+  if (rc != 0 || readFile(cache).empty()) {
+    fprintf(stderr, "penstock: cannot compile runtime library\n"
+                    "  command: %s\n", quoteCmd(cmd).c_str());
+    if (clangErr.empty()) {
+      // rc==0 with an empty cache file, or the stderr capture itself could
+      // not be created (unwritable cache dir — clang then already told the
+      // terminal directly, and execvp failures print their own line).
+      if (rc == 0)
+        fprintf(stderr, "  clang exited 0 but the output file is empty or "
+                        "unreadable: %s\n", cache.c_str());
+    } else {
+      fprintf(stderr, "  clang reported:\n");
+      // replay enough to point at the fault, never a wall of text
+      bool truncated = false;
+      int lines = 0;
+      size_t printed = 0, pos = 0;
+      const int kMaxLines = 40;
+      const size_t kMaxChars = 4000;
+      while (pos < clangErr.size()) {
+        if (lines == kMaxLines || printed >= kMaxChars) {
+          truncated = true;
+          break;
+        }
+        const size_t e = clangErr.find('\n', pos);
+        const std::string line = clangErr.substr(
+            pos, e == std::string::npos ? clangErr.size() - pos : e - pos);
+        fprintf(stderr, "    %s\n", line.c_str());
+        printed += line.size() + 1;
+        ++lines;
+        pos = (e == std::string::npos) ? clangErr.size() : e + 1;
+      }
+      if (truncated)
+        fprintf(stderr, "    ... (truncated)\n");
+    }
+    // targeted hints for the signatures this failure actually takes: the
+    // fix lands on the same screen as the error
+    const std::string maj =
+        llvmMajor.empty() ? std::string("NN") : llvmMajor;
+    static const char* const kBuiltinHeaders[] = {
+        "stddef.h", "stdint.h", "stdbool.h", "stdarg.h",
+        "float.h", "limits.h", "iso646.h"};
+    for (const char* h : kBuiltinHeaders) {
+      const std::string sig =
+          std::string("'") + h + "' file not found";
+      if (clangErr.find(sig) != std::string::npos) {
+        fprintf(stderr,
+                "  hint: '%s' is a clang BUILTIN header, shipped in the "
+                "resource dir,\n"
+                "        not with libc. The selected clang is incomplete "
+                "— install the\n"
+                "        matching libclang-common-%s-dev (Debian/Ubuntu) or "
+                "point LLVM_ROOT\n"
+                "        at an LLVM prefix whose lib/clang/%s/include "
+                "contains it.\n",
+                h, maj.c_str(), maj.c_str());
+        break;
+      }
+    }
+    if (clangErr.find("unknown target triple") != std::string::npos ||
+        clangErr.find("no available target is compatible") !=
+            std::string::npos) {
+      fprintf(stderr, "  hint: the selected clang does not support the "
+                      "requested target\n"
+                      "        ('%s') — build with a toolchain that does\n",
+              g_targetTriple.c_str());
+    }
+    if (clangErr.find("no such file or directory") != std::string::npos &&
+        clangErr.find(rtSrc) != std::string::npos) {
+      fprintf(stderr, "  hint: the runtime source is missing from this "
+                      "penstock tree:\n"
+                      "        %s\n"
+                      "        reinstall or build from a complete checkout "
+                      "(runtime/ must ship with the driver)\n",
+              rtSrc.c_str());
+    }
+    if (clangErr.find("unable to open output file") != std::string::npos ||
+        (clangErr.empty() && rc != 0 && rc != 127)) {
+      fprintf(stderr, "  hint: the cache directory may be unwritable; set "
+                      "PENSTOCK_CACHE_DIR\n        to a writable path\n");
+    }
     return "";
   }
   return readFile(cache);

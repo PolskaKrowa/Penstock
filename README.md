@@ -88,6 +88,30 @@ Backend pinning (`-DLLVM_ROOT=/path/to/llvm-20`), offline builds, installation
 [docs/install.md](docs/install.md); the full option surface lives in the
 [language spec](docs/language-spec.md) and `penstock --help`.
 
+### Troubleshooting: `penstock: cannot compile runtime library`
+
+The runtime support library (`runtime/frt_rt.c`, plain C with platform
+layers) is compiled by the driver with the selected clang and cached in
+`build/` (or `~/.cache/penstock` when installed). This error means that
+one compile failed — and the driver reports clang's own diagnostic and
+the exact failing command underneath the message, so read the first
+`error:` line there. The usual causes:
+
+- **Incomplete clang** — `'stddef.h' file not found` (or `stdint.h`,
+  `stdarg.h`, …): the selected toolchain is missing its *builtin
+  headers* from `<llvm>/lib/clang/<major>/include`. Debian/Ubuntu:
+  `apt install libclang-common-<major>-dev`; source builds: use an LLVM
+  install prefix created by a full `ninja install`. `LLVM_ROOT` selects
+  which clang is used.
+- **Unsupported `--target`** — `unknown target triple`: this clang build
+  has no backend for the requested triple.
+- **Unwritable cache** — `unable to open output file`: set
+  `PENSTOCK_CACHE_DIR` to a writable path.
+
+The cache key covers the LLVM major, `-O` level and target triple, so a
+toolchain switch recompiles the runtime automatically; deleting
+`build/frt_rt_*.ll` forces a rebuild.
+
 ## Documentation
 
 | Guide | Contents |
@@ -140,7 +164,7 @@ core, paired by `--smt-interleave`).
 ## Freshet-lang: the standard, the stress suite, the benchmarks
 
 The language is specified and stress-tested by the standards repository
-[Freshet-lang](https://github.com/PolskaKrowa/Freshet-lang) (current standard:
+[Freshet-lang](https://github.com/OWNER/Freshet-lang) (current standard:
 `fsht-03:03`). This repository consumes it in two places:
 
 - **`.github/workflows/freshet-conformance.yml`** — every PR builds
@@ -170,7 +194,7 @@ tools/lang-bench/run.sh --kernels dot,matmul
 
 Set `FRESHET_LANG_REPO` (or the workflow input / `--freshet-lang` flag)
 to your `owner/Freshet-lang` checkout before the first run — the
-shipped default is the placeholder `PolskaKrowa/Freshet-lang`.
+shipped default is the placeholder `OWNER/Freshet-lang`.
 
 ## Status
 
