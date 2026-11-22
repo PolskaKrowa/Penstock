@@ -15,7 +15,7 @@
 #include <sched.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include "../../common/frt_platform.h"
+#include "common/frt_platform.h"
 
 /* facility flags for the common core */
 #define FRT_PAL_DSTK_GUARD 1     /* mmap + PROT_NONE guard tails */

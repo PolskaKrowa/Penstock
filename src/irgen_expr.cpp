@@ -622,6 +622,15 @@ std::string genExpr(Expr* e) {
           if (e->args[i]->ty && f->ty && !typesEquivalent(e->args[i]->ty, f->ty)) {
             v = genCastInline(e->args[i], f->ty, v);
           }
+          // bool VALUES are i1 registers while the field slot uses the i8
+          // C ABI — widen at the boundary (the genArg rule; struct fields
+          // keep i8, bool BINDINGS keep i1)
+          if (f->ty->k == Type::BOOL && e->args[i]->ty &&
+              e->args[i]->ty->k == Type::BOOL) {
+            std::string w = G->t();
+            G->out << "  " << w << " = zext i1 " << v << " to i8\n";
+            v = w;
+          }
           std::string fa = G->t();
           G->out << "  " << fa << " = getelementptr inbounds "
                  << G->structTypes[sd->name] << ", ptr " << a << ", i32 0, i32 "
@@ -894,6 +903,25 @@ std::string genExpr(Expr* e) {
           if (el->ty && !typesEquivalent(el->ty, et) && el->ty->isNum() &&
               et->isNum())
             v = genCastInline(el, et, v);
+          // i1 <-> integer boundary: bool elements are i1 registers, but
+          // an INTEGER element slot stores llvmType (i8/i16/...) bytes —
+          // coerce so the written store type always matches the value.
+          // Sema rejects these combinations; this keeps IRgen total over
+          // whatever slips past future sema changes (defence in depth).
+          if (el->ty && et->k == Type::BOOL && el->ty->k != Type::BOOL &&
+              el->ty->isInt()) {
+            std::string w = G->t();
+            G->out << "  " << w << " = icmp ne "
+                   << (el->ty->bits() == 64 ? "i64" : G->llvmType(el->ty))
+                   << " " << v << ", 0\n";
+            v = w;
+          } else if (el->ty && el->ty->k == Type::BOOL &&
+                     et->k != Type::BOOL && et->isInt()) {
+            std::string w = G->t();
+            G->out << "  " << w << " = zext i1 " << v << " to "
+                   << G->llvmType(et) << "\n";
+            v = w;
+          }
           G->out << "  store " << G->scalarCodegenTy(et) << " " << v
                  << ", ptr " << fp << "\n";
         }

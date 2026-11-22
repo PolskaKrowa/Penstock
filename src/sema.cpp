@@ -97,6 +97,41 @@ static Expr* containerViewRoot(FnSema* fs, Expr* e) {
   return root;
 }
 
+// fsht-03:03 (user report: clang object emit failed "'%N' defined with
+// type 'i1' but expected 'i8'"): an ANNOTATED array literal adopts the
+// annotation's type — the adoption must also type-check the elements
+// instead of trusting the layout.  Historically adoption typed the
+// elements but checked nothing, so `[a < b]` against `let x: [u8; 1]`
+// reached IRgen, whose element store wrote `store i8 <i1>` and malformed
+// the module.  Nested literals adopt RECURSIVELY ([[1, 2], [3, 4]] keeps
+// working: the inner literal takes the outer element type before ITS
+// elements are checked, so the u64-defaulted inner rows match [i64; N]).
+// Numeric elements of any width keep the historical freedom (IRgen casts
+// them); bool <-> non-bool and non-scalar mismatches are what malformed
+// the IR, so those are rejected.
+static void adoptArrayLiteral(FnSema* fs, Expr* lit, Type* arrTy) {
+  lit->ty = arrTy;   // memoizes for the later typeExpr call
+  for (size_t ei = 0; ei < lit->args.size(); ++ei) {
+    Expr* el = lit->args[ei];
+    if (el->k == Expr::ARRLIT && arrTy->pointee &&
+        arrTy->pointee->k == Type::ARRAY &&
+        el->args.size() == arrTy->pointee->arrLen) {
+      adoptArrayLiteral(fs, el, arrTy->pointee);
+      continue;
+    }
+    typeExpr(fs, el);
+    if (el->ty && arrTy->pointee &&
+        !typesCompatible(arrTy->pointee, el->ty) &&
+        !(arrTy->pointee->isNum() && el->ty->isNum())) {
+      diag(Diag::Error, Code::Type,
+           "array literal element " + std::to_string(ei + 1) + ": " +
+               typeToString(el->ty) + " does not match element type " +
+               typeToString(arrTy->pointee),
+           el->loc);
+    }
+  }
+}
+
 static void declareVarFromInit(FnSema* fs, Stmt* s) {
   Type* t = nullptr;
   if (s->hasAnn) t = s->annTy;
@@ -134,9 +169,9 @@ static void declareVarFromInit(FnSema* fs, Stmt* s) {
       } else if (t->arrLen > 0) {
         // adopt (also lets the empty literal resolve).  The adopted type
         // memoizes the whole literal, so its ELEMENTS must be typed here
-        // — otherwise IRgen dereferences their null types.
-        s->init->ty = t;
-        for (auto* el : s->init->args) typeExpr(fs, el);
+        // — otherwise IRgen dereferences their null types — and CHECKED
+        // (adoptArrayLiteral) so mismatches cannot slip into IRgen.
+        adoptArrayLiteral(fs, s->init, t);
       }
     }
     // check init compatible

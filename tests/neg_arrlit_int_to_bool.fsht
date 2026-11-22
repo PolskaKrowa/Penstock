@@ -1,0 +1,9 @@
+// fsht-03:03: mirror direction — integer elements against a bool array
+// annotation previously reached IRgen and emitted `store i1 <i64>`; the
+// language rule (sema: "cast to bool — use 'x != 0'") keeps bools out of
+// integer literals and integers out of bool literals alike
+fn main() {
+    let a: [bool; 2] = [1, 0];
+    if (a[0]) { print("T"); }
+    println();
+}

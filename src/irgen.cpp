@@ -1,9 +1,10 @@
 // Freshet IRgen — LLVM IR text emission (module scaffolding, types, globals,
 // runtime decls, DWARF lines, PGO counters, attribute groups).
-// User fns use attribute groups #50+; the runtime .ll keeps its own #0..#9
-// (clang -O2 output by default — see --runtime-opt — on LLVM 19-23) —
-// textual concatenation stays collision-free with headroom for future
-// runtime attribute groups.
+// User fns use attribute groups #50+ by convention, but no margin is relied
+// on: the driver's combine step (main.cpp shiftAttrGroupIds) renumbers the
+// runtime .ll's group ids above the user module's maximum before
+// concatenation, so the two halves' `attributes #N` spaces can never
+// overlap regardless of how either side allocates them.
 #include "irgen.h"
 #include "dstk.h"
 

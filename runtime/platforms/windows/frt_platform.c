@@ -9,7 +9,7 @@
 #include <errno.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include "../../common/frt_platform.h"
+#include "common/frt_platform.h"
 
 /* facility flags for the common core */
 #define FRT_PAL_DSTK_GUARD 1     /* VirtualAlloc + PAGE_NOACCESS guards */

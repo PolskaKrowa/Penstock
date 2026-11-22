@@ -539,8 +539,14 @@ static std::string runtimeLl(const std::string& clangBin,
       "_o" + std::to_string(g_opts.runtimeOpt) +
       (tripleKey.empty() ? "" : "_t" + tripleKey) + ".ll";
   struct stat cst;
-  if (stat(cache.c_str(), &cst) == 0 && cst.st_mtime >= srcMtime)
-    return readFile(cache);
+  if (stat(cache.c_str(), &cst) == 0 && cst.st_mtime >= srcMtime) {
+    // A zero-byte leftover is NOT a hit: a failed runtime compile can
+    // leave an empty output file behind, and serving it would poison the
+    // next run with an undiagnosable "cannot compile" — recompile
+    // instead.
+    std::string cached = readFile(cache);
+    if (!cached.empty()) return cached;
+  }
   std::vector<std::string> cmd = {
       clangBin, "-S", "-emit-llvm", "-O" + std::to_string(g_opts.runtimeOpt),
       "-g0", "-x", "c", "-I" + dirNameOf(rtSrc), rtSrc, "-o", cache};
@@ -630,6 +636,23 @@ static std::string runtimeLl(const std::string& clangBin,
                       "(runtime/ must ship with the driver)\n",
               rtSrc.c_str());
     }
+    // fsht-03:03 (registry 10.03.02): the runtime is a TREE — the umbrella
+    // frt_rt.c #includes its platform layer and common/ support from beside
+    // itself.  An install that shipped only frt_rt.c (pre-fsht-03:03 install
+    // rules) fails exactly here, on the first program compile.
+    if ((clangErr.find("'platforms/") != std::string::npos ||
+         clangErr.find("'common/") != std::string::npos) &&
+        clangErr.find("file not found") != std::string::npos) {
+      fprintf(stderr,
+              "  hint: the installed runtime tree is incomplete — frt_rt.c\n"
+              "        #includes its platform layer and common/ support from\n"
+              "        beside itself, and they are missing from:\n"
+              "          %s\n"
+              "        reinstall with the fixed install rules (cmake --install)\n"
+              "        or copy the whole runtime/ directory from a checkout\n"
+              "        over it (runtime/{frt_rt.c,common,platforms})\n",
+              dirNameOf(rtSrc).c_str());
+    }
     if (clangErr.find("unable to open output file") != std::string::npos ||
         (clangErr.empty() && rc != 0 && rc != 127)) {
       fprintf(stderr, "  hint: the cache directory may be unwritable; set "
@@ -716,6 +739,91 @@ static int maxMetadataId(const std::string& ll) {
     i = j - 1;
   }
   return max;
+}
+
+// ATTRIBUTE-GROUP ids get exactly the same treatment (this was the
+// fsht-data crash: "'allocsize' element size argument must refer to an
+// integer parameter ... Broken module found"). The two halves' numbered
+// attribute groups `#N` are only convention-separated — the user module's
+// irgen numbers from #50 up, the runtime .ll's clang numbering is dense
+// from #0 (a plain clang -O2 of frt_rt.c reaches #50 already — the margin
+// is gone on current toolchains, and a bigger/clang-24 runtime crosses it).
+// On collision the module carries TWO definitions of `attributes #N`, and
+// the LATER (runtime) definition silently REPLACES the user's for every
+// reference — so a runtime group carrying clang-generated `allocsize(...)`
+// (calloc/malloc/realloc wrappers) lands on user functions and call sites,
+// where LLVM >= 24's parser validates allocsize arguments against the
+// callee signature and aborts the backend on "Broken module"; older LLVM
+// attaches the wrong attributes without a diagnostic (e.g. memory(none) on
+// a storing function — a miscompile, not an error).  Shifting every numeric
+// attribute-group id of the RUNTIME half above the user half's maximum
+// makes the concatenation collision-free by construction, whatever either
+// side allocates.
+static long maxAttrGroupId(const std::string& ll) {
+  long max = -1;
+  bool inStr = false, inLineComment = false;
+  for (size_t i = 0; i < ll.size(); ++i) {
+    char c = ll[i];
+    if (inLineComment) { if (c == '\n') inLineComment = false; continue; }
+    if (inStr) {
+      if (c == '\\') { ++i; continue; }
+      if (c == '"') inStr = false;
+      continue;
+    }
+    if (c == ';') { inLineComment = true; continue; }
+    if (c == '"') { inStr = true; continue; }
+    if (c != '#') continue;
+    size_t j = i + 1;
+    if (j >= ll.size() || !isdigit((unsigned char)ll[j])) continue;
+    long v = 0;
+    while (j < ll.size() && isdigit((unsigned char)ll[j])) {
+      v = v * 10 + (ll[j] - '0');
+      ++j;
+    }
+    if (v > max) max = v;
+    i = j - 1;
+  }
+  return max;
+}
+
+// rewrite every "#<digits>" token of the runtime IR to "#<digits+base>",
+// quote- and comment-aware so ids inside strings/comments stay literal
+// (attribute-group references are the ONLY `#N` tokens in textual LLVM IR;
+// definitions and references shift together).
+static std::string shiftAttrGroupIds(const std::string& ll, long base) {
+  if (base <= 0) return ll;
+  std::string out;
+  out.reserve(ll.size() + 256);
+  bool inStr = false, inLineComment = false;
+  for (size_t i = 0; i < ll.size(); ++i) {
+    char c = ll[i];
+    if (inLineComment) {
+      if (c == '\n') inLineComment = false;
+      out += c;
+      continue;
+    }
+    if (inStr) {
+      out += c;
+      if (c == '\\') { if (i + 1 < ll.size()) out += ll[++i]; continue; }
+      if (c == '"') inStr = false;
+      continue;
+    }
+    if (c == ';') { inLineComment = true; out += c; continue; }
+    if (c == '"') { inStr = true; out += c; continue; }
+    if (c != '#') { out += c; continue; }
+    size_t j = i + 1;
+    if (j >= ll.size() || !isdigit((unsigned char)ll[j])) { out += c; continue; }
+    long v = 0;
+    size_t k = j;
+    while (k < ll.size() && isdigit((unsigned char)ll[k])) {
+      v = v * 10 + (ll[k] - '0');
+      ++k;
+    }
+    out += '#';
+    out += std::to_string(v + base);
+    i = k - 1;
+  }
+  return out;
 }
 
 // rewrite every "!<digits>" token of the runtime IR to "!<digits+base>",
@@ -1877,9 +1985,18 @@ int main(int argc, char** argv) {
   // shiftMetadataIds) — otherwise a user module carrying !prof metadata
   // (PGO branch_weights at !100+) collides with the runtime's dense
   // clang-allocated ids and the backend rejects the module.
-  std::string rtPart = shiftMetadataIds(
-      stripRuntimeHeader(rtLl, userIntrinsicSet(userIr)),
-      (long)maxMetadataId(userIr) + 1);
+  // fsht-data crash fix: the runtime's numeric ATTRIBUTE-GROUP ids shift the
+  // same way (maxAttrGroupId/shiftAttrGroupIds above) — the historical
+  // "user #50+ / runtime #0..#9" convention no longer holds (a clang -O2 of
+  // the runtime alone reaches #50), and on collision the runtime's later
+  // `attributes #N` definition replaces the user's, attaching e.g.
+  // allocsize to user functions where the LLVM >= 24 parser aborts with
+  // "Broken module found".
+  std::string rtPart = shiftAttrGroupIds(
+      shiftMetadataIds(
+          stripRuntimeHeader(rtLl, userIntrinsicSet(userIr)),
+          (long)maxMetadataId(userIr) + 1),
+      (long)maxAttrGroupId(userIr) + 1);
   std::string combined = userIr +
                          "\n; ---- freshet runtime (libfreshet) ----\n" +
                          rtPart;
@@ -2061,9 +2178,14 @@ int main(int argc, char** argv) {
                 w.threads, w.pin, w.chunk);
       } else {
         std::string userIr2 = stripUserRtDecls(readFile(userLl));
-        std::string rtPart2 = shiftMetadataIds(
-            stripRuntimeHeader(readFile(tunedRt), userIntrinsicSet(userIr2)),
-            (long)maxMetadataId(userIr2) + 1);
+        // same two-sided collision immunity as the main combine: shift the
+        // tuned runtime's metadata AND attribute-group ids above the user
+        // module's maxima (see the comments there)
+        std::string rtPart2 = shiftAttrGroupIds(
+            shiftMetadataIds(
+                stripRuntimeHeader(readFile(tunedRt), userIntrinsicSet(userIr2)),
+                (long)maxMetadataId(userIr2) + 1),
+            (long)maxAttrGroupId(userIr2) + 1);
         std::string combined2 = userIr2 +
             "\n; ---- freshet runtime (libfreshet, -O4 tuned) ----\n" +
             rtPart2;

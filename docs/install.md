@@ -102,7 +102,9 @@ resolved `LLVM_ROOT` so the C baseline compiles with the same backend.
 The installed files include:
 
 - `~/.local/bin/penstock` — compiler driver;
-- `~/.local/share/penstock/runtime/frt_rt.c` — bundled runtime source;
+- `~/.local/share/penstock/runtime/` — bundled runtime source tree
+  (`frt_rt.c` umbrella + `common/` + `platforms/{linux,windows,wasm,baremetal}/`,
+  installed as a whole directory);
 - `~/.local/lib/libfsh.a` and `~/.local/include/fsh/` — the C runtime API;
 - `~/.local/lib/cmake/Penstock/` — CMake package configuration and imported targets.
 

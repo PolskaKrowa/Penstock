@@ -110,7 +110,15 @@ the exact failing command underneath the message, so read the first
 
 The cache key covers the LLVM major, `-O` level and target triple, so a
 toolchain switch recompiles the runtime automatically; deleting
-`build/frt_rt_*.ll` forces a rebuild.
+`build/frt_rt_*.ll` (or `~/.cache/penstock/frt_rt_*.ll` when installed)
+forces a rebuild.
+
+- **Incomplete installed runtime** — `'platforms/linux/frt_platform.c'
+  file not found` (or `common/…`): an installed Penstock whose
+  `share/penstock/runtime/` holds only `frt_rt.c` (install rules from
+  before the runtime was decomposed into `common/` + `platforms/`).
+  Re-run `cmake --install build` with the fixed install rules, or copy
+  the whole `runtime/` directory from a checkout over the installed one.
 
 ## Documentation
 

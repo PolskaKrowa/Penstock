@@ -1,0 +1,52 @@
+// fsht-03:03 (user report: clang object emit failed "'%N' defined with
+// type 'i1' but expected 'i8'"): bool VALUES are i1 registers while
+// struct fields, enum payloads and call boundaries keep the i8 C ABI —
+// every store site must widen/narrow at the boundary.  This exercises
+// each boundary the report tripped: struct-literal bool fields (the
+// failing `store i8 <i1>`), [bool; N] literals with comparison elements,
+// field assignment, enum payloads and a parfor bool capture.
+struct S { on: bool }
+enum Flag { On(bool), Off }
+
+fn is_even(x: i64) -> bool { return x % 2 == 0; }
+
+fn main() {
+    // struct literal: bool field from a comparison and from a call
+    let s: S = S { on: 3 < 4 };
+    if (s.on) { print("lit-cmp "); } else { print("BAD "); }
+    let s2: S = S { on: is_even(10) };
+    if (s2.on) { print("lit-call "); } else { print("BAD "); }
+
+    // field assignment then read
+    let mut s3: S = S { on: false };
+    s3.on = 5 < 4;
+    if (s3.on) { print("BAD "); } else { print("fld-asn "); }
+
+    // [bool; N] literal with comparison elements
+    let flags: [bool; 3] = [1 < 2, 2 < 1, is_even(6)];
+    if (flags[0]) { print("a1 "); } else { print("BAD "); }
+    if (flags[1]) { print("BAD "); } else { print("a0 "); }
+    if (flags[2]) { print("a1 "); } else { print("BAD "); }
+
+    // enum payload bool from a comparison, matched back out
+    let f: Flag = On(7 < 8);
+    match (f) {
+        On(b) => { if (b) { print("enum1 "); } else { print("BAD "); } }
+        Off   => { print("BAD "); }
+    }
+
+    // Vec<bool> element from a comparison
+    let mut v: Vec<bool> = vec_new(bool, 2);
+    vec_push(&v, 9 < 10);
+    if (v[0]) { print("vec1 "); } else { print("BAD "); }
+
+    // parfor: captured bool READ + body-local bool
+    let gate: bool = true;
+    let mut hits: i64 = 0;
+    parfor (i in 0..8) [reduction(+:hits)] {
+        let local: bool = i % 2 == 0;
+        if (gate) { hits = hits + 1; }
+        if (local) { hits = hits + 10; }
+    }
+    print_i64(hits); println();
+}

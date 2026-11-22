@@ -1,7 +1,7 @@
 # ------------------------------------------------------------- installation
 # Installed layout is relocatable for the default relative GNUInstallDirs:
 #   <prefix>/bin/penstock
-#   <prefix>/share/penstock/runtime/frt_rt.c
+#   <prefix>/share/penstock/runtime/   frt_rt.c + common/ + platforms/ tree
 #   <prefix>/lib/libfsh.a + <prefix>/include/fsh/*.h
 # Runtime scratch/cache files go to a per-user cache directory after install.
 install(TARGETS penstock freshet-language-server
@@ -18,8 +18,16 @@ endif()
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/fsh/"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/fsh"
   FILES_MATCHING PATTERN "*.h")
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/runtime/frt_rt.c"
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/penstock/runtime")
+# fsht-03:03 (registry 10.03.02): the runtime is a TREE, not a single
+# file — the umbrella frt_rt.c #includes its platform layer
+# (platforms/<name>/frt_platform.c) and common/ support, all resolved
+# against the installed runtime dir (the driver compiles the umbrella with
+# -I <installed runtime dir>).  Installing ONLY frt_rt.c made the first
+# program compile after install die with "'platforms/linux/frt_platform.c'
+# file not found".  The whole tree ships, C sources and headers only.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/runtime/"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/penstock/runtime"
+  FILES_MATCHING PATTERN "*.c" PATTERN "*.h")
 # Phase 3 (report §6.3): the Freshet-facing stdlib module — installed where
 # builtinModulesDir() finds it (<prefix>/share/penstock/modules/fsh.fsht)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/modules/fsh.fsht"

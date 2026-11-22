@@ -342,6 +342,33 @@ if $PEN --emit-combined-ir="$TMP/a6.combined.ll" tests/pos_basics.fsht \
   else bad "Stage A2 --emit-combined-ir missing module"; fi
 else bad "Stage A2 --emit-combined-ir compile failed"; fi
 
+# fsht-data crash regression: the combined module is a textual concat of
+# two halves with independent `attributes #N` numbering.  A duplicate
+# `attributes #N` definition lets the runtime's later definition REPLACE
+# the user's — attaching e.g. clang-generated allocsize(...) to user
+# functions/calls, where LLVM's parser aborts with "Broken module found"
+# ('allocsize' element size argument must refer to an integer parameter /
+# out of bounds).  The driver shifts the runtime's group ids above the
+# user module's maximum, so NO index may be defined twice — the same
+# invariant the metadata shift already enforced for !N ids.
+if [ -f "$TMP/a6.combined.ll" ]; then
+  dupattr=$(grep -o '^attributes #[0-9]*' "$TMP/a6.combined.ll" | sort | uniq -d)
+  dupmeta=$(grep -o '^![0-9]* =' "$TMP/a6.combined.ll" | sort | uniq -d)
+  if [ -z "$dupattr" ] && [ -z "$dupmeta" ]; then
+    ok "combined module: attribute-group and metadata ids collision-free"
+  else
+    bad "combined module has duplicate ids: attr='$dupattr' meta='$dupmeta'"
+  fi
+  # and the runtime half must start above the user half's group maximum
+  umax=$(awk '/; ---- freshet runtime/{exit} /^attributes #/{sub("attributes #",""); if ($0+0 > m) m = $0+0} END{print m+0}' "$TMP/a6.combined.ll")
+  rmin=$(awk '/; ---- freshet runtime/{f=1} f && /^attributes #/{sub("attributes #",""); if (m == "" || $0+0 < m) m = $0+0; exit} END{print m+0}' "$TMP/a6.combined.ll")
+  if [ "$umax" -lt "$rmin" ]; then
+    ok "runtime attribute groups shifted above user maximum ($umax < $rmin)"
+  else
+    bad "runtime groups not shifted above user maximum ($umax >= $rmin)"
+  fi
+fi
+
 echo "== Stage B4: @alias semantics (report §2.2 B) =="
 # Sound @alias: caller passes distinct roots; compiler must emit noalias
 # on the user function's parameter signature.  We grep for `noalias`
@@ -1033,6 +1060,18 @@ run_err "F0307 &mut inside a parfor body" tests/neg_parfor_borrow_mut.fsht F0307
 echo "== fsht-03:01 negative typing rules =="
 run_err "F0201 mixed-width variant operands" tests/neg_checked_mixed_width.fsht F0201
 run_err "F0201 unresolved cast destination U" tests/neg_cast_unresolved.fsht F0201
+
+echo "== fsht-03:03 bool slot representation (user report: i1 vs i8) =="
+# bool VALUES are i1 registers; struct fields / enum payloads / call
+# boundaries keep the i8 C ABI.  The struct-literal field store wrote
+# `store i8 <i1>` (clang object emit failed: "'%N' defined with type 'i1'
+# but expected 'i8'"); array-literal adoption also let bool elements
+# against integer annotations through.  Regression: every boundary now
+# widens/narrows, and adoption type-checks its elements (nested
+# [[1, 2], [3, 4]] literals keep adopting recursively).
+run_ok "bool slots: literal fields, [bool; N], enum payload, parfor capture" tests/pos_bool_slots.fsht "lit-cmp lit-call fld-asn a1 a0 a1 enum1 vec1 48"
+run_err "F0201 bool elements against an integer array annotation" tests/neg_arrlit_bool_elem.fsht F0201
+run_err "F0201 integer elements against a bool array annotation" tests/neg_arrlit_int_to_bool.fsht F0201
 
 echo "== fsht-03:03 portable runtime (registry 10.03.02) =="
 # same-target compilation: the runtime .ll cache key carries the triple,

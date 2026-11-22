@@ -1,0 +1,8 @@
+// fsht-03:03: adoption must check elements — bools against an integer
+// array annotation used to reach IRgen and emit `store i8 <i1>` (clang
+// object emit then failed: "'%N' defined with type 'i1' but expected 'i8'")
+fn main() {
+    let a: [u8; 2] = [3 < 4, 4 < 3];
+    print_i64(a[0] as i64);
+    println();
+}
