@@ -1,0 +1,4 @@
+// conflicting twin: same symbol 'fopen', different return type.
+module extern_conflict_b;
+
+pub extern fn fopen(path: *u8, mode: *u8) -> i32;

@@ -563,17 +563,41 @@ bool irgenProgram(Program* p, const std::string& outLl) {
       << "declare float @" << llvmFmaxBase() << ".f32(float, float)\n";
 
   // ---------------- functions and imported C prototypes
+  // fsht-data crash fix: several modules can `extern fn` the SAME C symbol
+  // (Freshet-Data imports libc helpers in more than one file), and every
+  // imported FnDecl used to emit its own `declare` line.  LLVM's textual
+  // parser rejects ANY second declaration of one symbol — even a
+  // textually identical one — with "invalid redefinition of function
+  // 'fopen'", so the whole build died at object emit before the runtime
+  // half was even concatenated.  Emit exactly ONE declare per C symbol:
+  // identical re-declarations (same LLVM signature text) fold; a
+  // conflicting signature is reported with both modules named — the
+  // module could not be valid either way, one C symbol cannot carry two
+  // prototypes.
+  std::map<std::string, std::pair<std::string, std::string>> externSig;
   for (auto* f : p->fns) {
     if (f->imported) {
-      out << "declare " << G->llvmType(f->ret) << " @" << f->name << "(";
+      std::ostringstream ds;
+      ds << "declare " << G->llvmType(f->ret) << " @" << f->name << "(";
       for (size_t i = 0; i < f->params.size(); ++i) {
-        if (i) out << ", ";
+        if (i) ds << ", ";
         Type* pt = f->params[i].ty;
         if (pt && (pt->k == Type::STRUCT || pt->k == Type::SOA ||
-                   pt->k == Type::ENUM || pt->k == Type::ARRAY)) out << "ptr";
-        else out << G->llvmType(pt);
+                   pt->k == Type::ENUM || pt->k == Type::ARRAY)) ds << "ptr";
+        else ds << G->llvmType(pt);
       }
-      out << ")\n";
+      ds << ")\n";
+      auto it = externSig.find(f->name);
+      if (it == externSig.end()) {
+        externSig[f->name] = {ds.str(), f->module};
+        out << ds.str();
+      } else if (it->second.first != ds.str()) {
+        diag(Diag::Error, Code::Dup,
+             "conflicting extern declarations of '" + f->name +
+                 "' (module '" + it->second.second + "' vs '" + f->module +
+                 "') — one C symbol, two signatures; align the declarations",
+             f->loc);
+      }
       continue;
     }
     if (f->isGeneric) continue;   // Phase 2a: template, instances only

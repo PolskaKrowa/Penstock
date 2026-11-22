@@ -663,9 +663,9 @@ static std::string runtimeLl(const std::string& clangBin,
   return readFile(cache);
 }
 
-// strip module-level header lines; drop `declare @llvm.*` lines already
-// declared by the user module (user decls win; runtime bodies resolve to
-// them since intrinsic decls are semantically identical)
+// strip module-level header lines; drop the runtime half's `declare`
+// lines for symbols the user module already owns (one declare per symbol
+// must survive the concatenation — the rule below).
 //
 // §3 fix: ALSO drop the runtime's own named module metadata —
 // `!llvm.module.flags` (which on modern clang carries !"Dwarf Version",
@@ -675,8 +675,28 @@ static std::string runtimeLl(const std::string& clangBin,
 // and `!llvm.ident`.  The user module is the owner of module-level flags;
 // the runtime IR inherits them.  Numbered metadata nodes are kept because
 // runtime instructions reference them (!llvm.loop, !prof).
+//
+// fsht-data crash fix: the declare-drop rule is now GENERAL, not
+// @llvm.*-only.  The user module emits a plain `declare <ty> @name(...)`
+// for every `extern fn` (libc: fopen, malloc, fputs ...), and the runtime
+// half — compiled by clang from frt_rt.c against real libc headers —
+// declares the SAME symbols with clang's full attribute decoration
+// (`declare noalias noundef ptr @fopen(ptr noundef readonly ...) #N`).
+// LLVM's textual parser rejects ANY second declaration of one symbol,
+// even a textually identical or merely attribute-differing one, with
+// "invalid redefinition of function 'fopen'" — the whole build died at
+// object emit.  One declare per symbol must survive, and the USER's is
+// the right one: it is the prototype sema type-checked user calls
+// against, and attributes are optimisation hints only — dropping the
+// runtime's noundef/readonly/captures hints cannot change the function
+// TYPE, so the runtime's already-emitted call sites stay valid against
+// the user's plain declare (a genuinely mismatched prototype is C-level
+// UB that sema cannot see and LLVM rejects at the call sites).
+// Symbols the user module only DEFINES (not declares) also suppress the
+// runtime's declare — a declare of a defined symbol is a second
+// declaration of the same kind of collision.
 static std::string stripRuntimeHeader(const std::string& ll,
-                                      const std::set<std::string>& userIntrinsics) {
+                                       const std::set<std::string>& userOwned) {
   std::istringstream in(ll);
   std::ostringstream out;
   std::string line;
@@ -691,12 +711,15 @@ static std::string stripRuntimeHeader(const std::string& ll,
     if (t.rfind("!llvm.module.flags", 0) == 0) continue;
     if (t.rfind("!llvm.ident", 0) == 0) continue;
     if (t.rfind("declare ", 0) == 0) {
-      size_t at = t.find("@llvm.");
+      // the FIRST '@' of a declare line is the callee symbol; '(' ends it
+      size_t at = t.find('@');
       if (at != std::string::npos) {
         size_t e = t.find('(', at);
         if (e != std::string::npos) {
           std::string name = t.substr(at + 1, e - at - 1);
-          if (userIntrinsics.count(name)) continue;   // user already declares it
+          // user module owns this symbol's prototype — exactly one
+          // declare per symbol survives the concatenation
+          if (userOwned.count(name)) continue;
         }
       }
     }
@@ -866,15 +889,28 @@ static std::string shiftMetadataIds(const std::string& ll, long base) {
   return out;
 }
 
-// collect @llvm.* names declared by the user module
-static std::set<std::string> userIntrinsicSet(const std::string& ll) {
+// collect every symbol name the user module DECLARES or DEFINES: the
+// `@name` of each `declare`/`define` line up to its parameter list.  This
+// is the ownership set for the combine stage — the runtime half drops its
+// own `declare` for any of them (stripRuntimeHeader), so exactly one
+// declaration of each shared symbol survives.  The historical
+// @llvm.*-only variant left every NON-intrinsic shared symbol duplicated:
+// an `extern fn fopen` in the user module met the runtime's clang-
+// decorated `declare @fopen`, and the backend aborted with "invalid
+// redefinition of function 'fopen'".
+static std::set<std::string> userDeclaredSymbols(const std::string& ll) {
   std::set<std::string> s;
   std::istringstream in(ll);
   std::string line;
   while (std::getline(in, line)) {
     size_t a = line.find_first_not_of(" \t");
-    if (a == std::string::npos || line.compare(a, 8, "declare ") != 0) continue;
-    size_t at = line.find("@llvm.", a);
+    if (a == std::string::npos) continue;
+    bool isDeclare = line.compare(a, 8, "declare ") == 0;
+    bool isDefine = !isDeclare && line.compare(a, 7, "define ") == 0;
+    if (!isDeclare && !isDefine) continue;
+    // the FIRST '@' of a declare/define line is the symbol itself (no
+    // textual type or attribute before the name contains '@')
+    size_t at = line.find('@', a);
     if (at == std::string::npos) continue;
     size_t e = line.find('(', at);
     if (e == std::string::npos) continue;
@@ -1992,9 +2028,16 @@ int main(int argc, char** argv) {
   // `attributes #N` definition replaces the user's, attaching e.g.
   // allocsize to user functions where the LLVM >= 24 parser aborts with
   // "Broken module found".
+  //
+  // The same combine now owns declare uniqueness (userDeclaredSymbols /
+  // stripRuntimeHeader): the runtime half drops its `declare` for every
+  // symbol the user module declares or defines — the user's plain
+  // `declare ptr @fopen(ptr, ptr)` from `extern fn fopen` and the runtime's
+  // clang-decorated duplicate cannot coexist (LLVM rejects any second
+  // declare, "invalid redefinition of function 'fopen'").
   std::string rtPart = shiftAttrGroupIds(
       shiftMetadataIds(
-          stripRuntimeHeader(rtLl, userIntrinsicSet(userIr)),
+          stripRuntimeHeader(rtLl, userDeclaredSymbols(userIr)),
           (long)maxMetadataId(userIr) + 1),
       (long)maxAttrGroupId(userIr) + 1);
   std::string combined = userIr +
@@ -2180,10 +2223,11 @@ int main(int argc, char** argv) {
         std::string userIr2 = stripUserRtDecls(readFile(userLl));
         // same two-sided collision immunity as the main combine: shift the
         // tuned runtime's metadata AND attribute-group ids above the user
-        // module's maxima (see the comments there)
+        // module's maxima, and drop its declares for symbols the user
+        // module owns (see the comments there)
         std::string rtPart2 = shiftAttrGroupIds(
             shiftMetadataIds(
-                stripRuntimeHeader(readFile(tunedRt), userIntrinsicSet(userIr2)),
+                stripRuntimeHeader(readFile(tunedRt), userDeclaredSymbols(userIr2)),
                 (long)maxMetadataId(userIr2) + 1),
             (long)maxAttrGroupId(userIr2) + 1);
         std::string combined2 = userIr2 +

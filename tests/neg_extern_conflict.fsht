@@ -1,0 +1,7 @@
+// fsht-data crash fix regression (negative): two modules extern-declare
+// 'fopen' with conflicting signatures — must fail with F0205 instead of
+// emitting two incompatible `declare`s for one symbol.
+import extern_conflict_a;
+import extern_conflict_b;
+
+fn main() -> i32 { return 0; }

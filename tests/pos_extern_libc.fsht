@@ -1,0 +1,32 @@
+// fsht-data crash fix regression: `extern fn` declarations of libc symbols
+// the runtime library ALSO declares (@fopen, @fputs, @fclose — the runtime
+// calls fopen from its file I/O path) used to put two non-identical
+// `declare`s in the combined module:
+//     declare ptr @fopen(ptr, ptr)                                    <- user
+//     declare noalias noundef ptr @fopen(ptr noundef readonly ...) #N  <- runtime
+// and LLVM rejects any second declaration of one symbol — even an
+// attribute-differing one — with "invalid redefinition of function
+// 'fopen'" (clang failed on object emit).  The combine stage now keeps
+// exactly one declare per symbol, the user's.
+//
+// This program round-trips a file through the libc extern calls AND reads
+// it back through the fsh module, whose runtime implementation calls
+// @fopen itself — so both halves of the combined module resolve the
+// shared symbol against the surviving declare.
+extern fn fopen(path: *u8, mode: *u8) -> *u8;
+extern fn fputs(s: *u8, f: *u8) -> i32;
+extern fn fclose(f: *u8) -> i32;
+import fsh;
+
+fn main() {
+    // separate lets: two str_to_cstr results share a call-name root and
+    // the noalias contract flags same-root args — Freshet style is to
+    // bind each C string first (also what real callers do)
+    let path: *u8 = str_to_cstr("/tmp/rt_extern_libc.txt");
+    let mode: *u8 = str_to_cstr("w");
+    let text: *u8 = str_to_cstr("extern libc round-trip");
+    let f: *u8 = fopen(path, mode);
+    fputs(text, f);
+    fclose(f);
+    print(fsh::file_read("/tmp/rt_extern_libc.txt")); println();
+}

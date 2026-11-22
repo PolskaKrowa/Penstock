@@ -1,0 +1,6 @@
+// negative twin of libc_a.fsht: the SAME C symbol with a DIFFERENT
+// signature — one symbol, two prototypes; the module could not be valid
+// either way, so the compiler reports the conflict (F0205).
+module extern_conflict_a;
+
+pub extern fn fopen(path: *u8, mode: *u8) -> *u8;

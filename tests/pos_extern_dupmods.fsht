@@ -1,0 +1,17 @@
+// fsht-data crash fix regression: two imported modules both extern-
+// declare @fopen/@fclose (identical signatures — folds to one declare),
+// and the runtime library declares @fopen too (its own file I/O path —
+// dropped at combine, the user's declare wins).  The write goes through
+// libc_a's wrapper (its call site), the read through the fsh module (the
+// runtime's call sites) — both resolve against the single surviving
+// declare of the shared symbol.
+import libc_a;
+import libc_b;
+import fsh;
+
+fn main() {
+    let rc: i32 = libc_a::write_line("/tmp/rt_extern_dupmods.txt",
+                                      "two modules, one fopen");
+    print_i64(rc); println();                       // fclose result: 0
+    print(fsh::file_read("/tmp/rt_extern_dupmods.txt")); println();
+}

@@ -1,0 +1,6 @@
+// the same C symbols, declared again in a second module (see libc_a.fsht)
+// — folds with libc_a's declarations into ONE declare per symbol.
+module libc_b;
+
+pub extern fn fopen(path: *u8, mode: *u8) -> *u8;
+pub extern fn fclose(f: *u8) -> i32;

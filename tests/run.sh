@@ -877,6 +877,22 @@ else bad "multi-input compilation (two .fsht on the CLI)"; fi
 run_ok "fn pointers + C callback (qsort)" tests/pos_fnptr.fsht "5|20|9|8|9 7 5 3 2 1 "
 run_err "thread indirect call in parfor" tests/neg_fnptr_parfor.fsht "F0307"
 
+# --- extern fn of libc symbols the runtime ALSO declares (fsht-data crash
+# fix): @fopen is declared by both halves — the user's plain declare and
+# the runtime's clang-decorated one.  LLVM rejects any second declaration
+# of one symbol ("invalid redefinition of function 'fopen'"), so exactly
+# one declare must survive the combine.  Round-trip through the libc
+# externs AND the fsh module (the runtime's own @fopen call path).
+run_ok "extern libc shared with runtime declare" tests/pos_extern_libc.fsht "extern libc round-trip"
+# two imported modules extern-declaring the SAME C symbol (identical
+# signatures fold into one declare) + the runtime declare dropped
+run_okf "extern dup across modules: one declare" tests/pos_extern_dupmods.fsht "0|two modules, one fopen" "-Itests/mods"
+# conflicting signatures for one C symbol: F0205, not a broken module
+if $PEN -Itests/mods tests/neg_extern_conflict.fsht -o "$TMP/nxc" 2>"$TMP/err" \
+    || ! grep -q "F0205" "$TMP/err"; then
+  bad "F0205 conflicting extern declarations"
+else ok "F0205 conflicting extern declarations (F0205)"; fi
+
 # --- parfor break/continue (§12/§14): lane-local semantics
 run_ok "parfor break/continue (lane-local)" tests/pos_parfor_break.fsht "62500"
 
