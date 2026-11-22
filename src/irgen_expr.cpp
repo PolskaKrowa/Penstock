@@ -693,8 +693,12 @@ std::string genExpr(Expr* e) {
         std::string a = genSoaFieldAddr(e);
         if (e->ty->k == Type::STRUCT) return a;
         std::string r = G->t();
-        G->out << "  " << r << " = load " << G->llvmType(e->ty) << ", ptr " << a
-               << "\n";
+        // fsht-03:03: scalar field values load in the VALUE representation
+        // (bools are i1 registers — llvmType(BOOL) is the slot ABI; a
+        // bool SoA field consumed as i8 fed comparisons `icmp ne i8` with
+        // mismatched operand types)
+        G->out << "  " << r << " = load " << G->scalarCodegenTy(e->ty)
+               << ", ptr " << a << "\n";
         return r;
       }
       if (e->ty->k == Type::STRUCT || e->ty->k == Type::ENUM ||
@@ -796,6 +800,33 @@ std::string genExpr(Expr* e) {
           if (!typesEquivalent(lt, cmpTy)) a = genCastInline(e->lhs, cmpTy, a);
           if (!typesEquivalent(rt, cmpTy)) b = genCastInline(e->rhs, cmpTy, b);
         }
+        // fsht-03:03 (user report: `icmp ne i8 %4, %8` — "'%4' defined
+        // with type 'i1' but expected 'i8'"): BOOL comparisons run in
+        // i1.  bool VALUES are i1 registers (bindings, literals,
+        // comparisons, field/array/Vec-element loads, narrowed call
+        // results); llvmType(BOOL) is the i8 C ABI of SLOTS (struct
+        // fields, params, enum payloads) — writing the icmp at the
+        // slot ABI produced `icmp eq i8 <i1>, <i1>` and the backend
+        // rejected the module.  A non-bool operand here can only be a
+        // CONSTANT of another type (sema's literal exemption admits
+        // `flag != 0`): convert it to its i1 truth value first so both
+        // operands and the icmp type agree.
+        if (cmpTy->k == Type::BOOL || (rt && rt->k == Type::BOOL)) {
+          auto toI1 = [&](Type* t, const std::string& v) {
+            if (!t || t->k == Type::BOOL) return v;
+            std::string w = G->t();
+            if (t->isFloat())
+              G->out << "  " << w << " = fcmp une " << G->llvmType(t)
+                     << " " << v << ", 0.0\n";
+            else
+              G->out << "  " << w << " = icmp ne " << G->llvmType(t)
+                     << " " << v << ", 0\n";
+            return w;
+          };
+          a = toI1(lt, a);
+          b = toI1(rt, b);
+          cmpTy = Type::simple(Type::BOOL);
+        }
         // predicate is chosen from the FINAL comparison type: a signedness
         // change through promotion (i32 x u64 -> u64) must select ult/slt
         // accordingly
@@ -814,7 +845,12 @@ std::string genExpr(Expr* e) {
           else if (op == ">") cmp = cmpTy->isSigned() ? "sgt" : "ugt";
           else cmp = cmpTy->isSigned() ? "sge" : "uge";
         }
-        std::string ty = (cmpTy->isPtr()) ? std::string("ptr") : G->llvmType(cmpTy);
+        // comparison operand type: pointers compare as ptr, bools as i1
+        // (the VALUE representation — see the i1 normalisation above),
+        // everything else at llvmType
+        std::string ty = (cmpTy->isPtr()) ? std::string("ptr")
+                        : (cmpTy->k == Type::BOOL) ? std::string("i1")
+                        : G->llvmType(cmpTy);
         bool isCmpFloat = cmpTy->isFloat() && !cmpTy->isPtr();
         std::string r = G->t();
         if (isCmpFloat)

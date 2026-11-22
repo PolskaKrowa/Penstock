@@ -1072,6 +1072,12 @@ echo "== fsht-03:03 bool slot representation (user report: i1 vs i8) =="
 run_ok "bool slots: literal fields, [bool; N], enum payload, parfor capture" tests/pos_bool_slots.fsht "lit-cmp lit-call fld-asn a1 a0 a1 enum1 vec1 48"
 run_err "F0201 bool elements against an integer array annotation" tests/neg_arrlit_bool_elem.fsht F0201
 run_err "F0201 integer elements against a bool array annotation" tests/neg_arrlit_int_to_bool.fsht F0201
+# follow-up report (same family): `a != b` over bools emitted the icmp at
+# the i8 slot ABI (`icmp ne i8 <i1>, <i1>` — clang object emit failed);
+# comparisons now run in the i1 value representation, with non-bool
+# constant operands (the `flag != 0` literal exemption) normalised to
+# i1 first.  SoA bool field loads also moved to the value representation.
+run_ok "bool comparisons: every producer pair, i1 value representation" tests/pos_bool_cmp.fsht "ne-ok eq-ok t1 t2 t3 fld1 fld2 arr1 vec1 vec2 call1 call2 int1 int2 int3 and1 or1 3 enum1 soa1 soa2 soa3 3.0 3"
 
 echo "== fsht-03:03 portable runtime (registry 10.03.02) =="
 # same-target compilation: the runtime .ll cache key carries the triple,

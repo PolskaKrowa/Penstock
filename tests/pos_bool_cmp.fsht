@@ -1,0 +1,93 @@
+// fsht-03:03 (user report: clang object emit failed "'%N' defined with
+// type 'i1' but expected 'i8'" on `icmp ne i8 %4, %8`): BOOL comparisons
+// run in the VALUE representation (i1 registers) — the comparison used
+// to be written at llvmType(BOOL) = the i8 slot ABI, so any `a == b` /
+// `a != b` over bool operands emitted `icmp eq/ne i8 <i1>, <i1>` and the
+// backend rejected the module.  Regression: every bool producer compared
+// against every other — bindings, literals, struct fields, [bool; N]
+// elements, Vec<bool> elements (i8 heap bytes), call results, the
+// int-literal exemption (`flag != 0`), compound &&/|| conditions, a
+// while-condition, and SoA bool field loads (which previously produced
+// the i8 slot representation instead of the i1 value representation).
+struct S { on: bool }
+enum Flag { On(bool), Off }
+struct P { x: f64, on: bool }
+
+fn flip(x: i64) -> bool { return x % 2 == 0; }
+
+fn main() {
+    // two bool bindings
+    let a: bool = 3 < 4;
+    let b: bool = 4 < 3;
+    if (a != b) { print("ne-ok "); } else { print("BAD "); }
+    if (a == b) { print("BAD "); } else { print("eq-ok "); }
+
+    // bool vs literals (both spellings, both predicates)
+    if (a == true) { print("t1 "); } else { print("BAD "); }
+    if (false == b) { print("t2 "); } else { print("BAD "); }
+    if (a != false) { print("t3 "); } else { print("BAD "); }
+
+    // struct fields (the i8 slot ABI producer)
+    let s: S = S { on: true };
+    let t: S = S { on: false };
+    if (s.on != t.on) { print("fld1 "); } else { print("BAD "); }
+    if (s.on == true) { print("fld2 "); } else { print("BAD "); }
+
+    // [bool; N] elements
+    let arr: [bool; 2] = [true, false];
+    if (arr[0] != arr[1]) { print("arr1 "); } else { print("BAD "); }
+
+    // Vec<bool> elements (i8 heap bytes)
+    let mut v: Vec<bool> = vec_new(bool, 2);
+    vec_push(&v, true);
+    vec_push(&v, false);
+    if (v[0] != v[1]) { print("vec1 "); } else { print("BAD "); }
+    if (v[1] == false) { print("vec2 "); } else { print("BAD "); }
+
+    // call-returned bools (narrowed at the call boundary)
+    if (flip(4) == flip(6)) { print("call1 "); } else { print("BAD "); }
+    if (flip(4) != flip(5)) { print("call2 "); } else { print("BAD "); }
+
+    // int-literal exemption: flag != 0 / flag == 0 (both operand orders)
+    if (a != 0) { print("int1 "); } else { print("BAD "); }
+    if (b == 0) { print("int2 "); } else { print("BAD "); }
+    if (0 != a) { print("int3 "); } else { print("BAD "); }
+
+    // compound conditions
+    if (a != b && s.on != t.on) { print("and1 "); } else { print("BAD "); }
+    if (a == b || v[0] != v[1]) { print("or1 "); } else { print("BAD "); }
+
+    // while on a bool comparison
+    let mut n: i64 = 0;
+    let mut go: bool = true;
+    let limit: i64 = 3;
+    while (go != false) {
+        n = n + 1;
+        if (n == limit) { go = false; }
+    }
+    print_i64(n); print(" ");
+
+    // enum payload binding (match-arm trunc producer)
+    let f: Flag = On(2 < 3);
+    match (f) {
+        On(bb) => { if (bb == true) { print("enum1 "); } else { print("BAD "); } }
+        Off     => { print("BAD "); }
+    }
+
+    // SoA bool fields: loads now produce the i1 value representation
+    let ps: soa(P) = soa_new(P, 4);
+    defer soa_free(ps);
+    for (i in 0..4) { ps[i].x = (i as f64) * 0.5; }
+    ps[0].on = true;
+    ps[1].on = false;
+    ps[2].on = true;
+    ps[3].on = true;
+    if (ps[0].on != ps[1].on) { print("soa1 "); } else { print("BAD "); }
+    if (ps[2].on == ps[3].on) { print("soa2 "); } else { print("BAD "); }
+    if (ps[0].on != false) { print("soa3 "); } else { print("BAD "); }
+    print_f64(ps[0].x + ps[1].x + ps[2].x + ps[3].x, 1); print(" ");
+    let mut hits: i64 = 0;
+    for (i in 0..4) { if (ps[i].on != false) { hits = hits + 1; } }
+    print_i64(hits);
+    println();
+}
