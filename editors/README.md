@@ -13,5 +13,5 @@ The LSP executable is built by the existing CMake target:
 cmake --build build --target freshet-language-server --parallel
 ```
 
-The current LSP feature set is diagnostics, hover, document symbols, go to definition, references and rename. Completion and semantic-token support are not implemented, so both editors use syntax definitions for baseline syntax highlighting.
+The current LSP feature set is diagnostics, hover, document symbols, go to definition, references and rename, completion, inlay hints, document + range formatting ("Format Document" / "Format Selection", the same token-preserving engine as `penstock fmt`) and semantic tokens (types, function arguments, locals, fields, enum variants, module/import names). The syntax definitions still provide baseline keyword/string/comment highlighting when the server is not running.
 

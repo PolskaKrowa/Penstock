@@ -142,6 +142,27 @@ async function restartLanguageClient(context) {
   await startLanguageClient(context);
 }
 
+// The palette commands "Freshet: Format Document" / "Freshet: Format
+// Selection" delegate to VS Code's built-in editor actions.  The language
+// client registers the Document/RangeFormattingEditProviders from the
+// server's capabilities, so those actions run the server-side formatter
+// (the same token-preserving engine as `penstock fmt`).  Wrapping them in
+// branded commands mirrors how the C/C++ extension exposes formatting.
+function runEditorFormatAction(command) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'freshet') {
+    vscode.window.showInformationMessage(
+      'Freshet formatting only runs in Freshet (.fsht) editors.'
+    );
+    return;
+  }
+  vscode.commands.executeCommand(command).then(undefined, (error) => {
+    vscode.window.showErrorMessage(
+      `Freshet format failed: ${error?.message || error}`
+    );
+  });
+}
+
 async function activate(context) {
   outputChannel = vscode.window.createOutputChannel('Freshet Language Server');
   context.subscriptions.push(outputChannel);
@@ -151,6 +172,17 @@ async function activate(context) {
     () => restartLanguageClient(context)
   );
   context.subscriptions.push(restartCommand);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('freshet.formatDocument', () =>
+      runEditorFormatAction('editor.action.formatDocument')
+    )
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('freshet.formatSelection', () =>
+      runEditorFormatAction('editor.action.formatSelection')
+    )
+  );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {

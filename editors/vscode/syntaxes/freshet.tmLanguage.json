@@ -99,10 +99,25 @@
         },
         {
           "name": "meta.type.freshet",
-          "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(struct|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.freshet" },
             "2": { "name": "entity.name.type.freshet" }
+          }
+        },
+        {
+          "name": "meta.namespace.freshet",
+          "match": "^\\s*(module|import)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.freshet" },
+            "2": { "name": "entity.name.namespace.freshet" }
+          }
+        },
+        {
+          "name": "meta.namespace.path.freshet",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=::)",
+          "captures": {
+            "1": { "name": "entity.name.namespace.freshet" }
           }
         }
       ]

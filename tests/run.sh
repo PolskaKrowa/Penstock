@@ -971,6 +971,52 @@ if $PEN fmt "$TMP/fmt.fsht" >/dev/null 2>&1 \
   ok "formatter: reformat + idempotence + compiled equivalence"
 else bad "formatter: reformat + idempotence + compiled equivalence"; fi
 
+# --- formatter edge: a toplevel struct literal followed by `;` (mid-edit
+# shape — such globals are rejected by sema as F0207, but `fmt` is
+# token-level and must still lay them out sanely): the `;` after the
+# literal belongs to the SAME declaration, so the formatted file must not
+# grow an orphan `;` pseudo-declaration on its own blank-line-separated
+# line.
+printf 'struct Pt { x: f64, y: f64 }\nlet p: Pt = Pt { x: 1.5, y: 2.5 };\nfn main() {\n    print_f64(p.x, 1); println();\n}\n' > "$TMP/fmtg.fsht"
+if $PEN fmt "$TMP/fmtg.fsht" >/dev/null 2>&1 \
+   && $PEN fmt --check "$TMP/fmtg.fsht" >/dev/null 2>&1 \
+   && ! grep -q '^;' "$TMP/fmtg.fsht" \
+   && grep -q 'let p: Pt = Pt { x: 1.5, y: 2.5 };' "$TMP/fmtg.fsht" \
+   && ! grep -q '\n\n;' "$TMP/fmtg.fsht"; then
+  ok "formatter: struct-literal global stays one declaration"
+else bad "formatter: struct-literal global stays one declaration"; fi
+
+# --- formatter style regression (user report): the formatter used to
+# (a) print generic angles with spaces (`Span < f64 >`), (b) space the
+# call/index brackets (`ptr [i]`), (c) space unary `!` and the postfix
+# `?`, (d) collapse long fn headers onto one line, (e) insert blank lines
+# between module/import one-liners, and (f) move a fn's leading comments
+# below the header.  All shapes are asserted on the formatted copy; the
+# file also still compiles and runs (clang-format-inspired layout:
+# bin-packed parameters, `) -> Ret {` header close, one blank line
+# separating expanded blocks, comments stay ahead of the declaration).
+cp tests/pos_fmt_style.fsht "$TMP/fmts.fsht"
+if $PEN fmt "$TMP/fmts.fsht" >/dev/null 2>&1 \
+   && $PEN fmt --check "$TMP/fmts.fsht" >/dev/null 2>&1 \
+   && [ "$(sed -n 2p "$TMP/fmts.fsht")" = "import geometry;" ] \
+   && [ "$(sed -n 3p "$TMP/fmts.fsht")" = "import util;" ] \
+   && grep -q '^pub fn element_axial_results_3d($' "$TMP/fmts.fsht" \
+   && grep -q '^) -> Result<f64, i64> {$' "$TMP/fmts.fsht" \
+   && grep -q 'coordinates_m: Span<f64>, connectivity: Span<u64>' "$TMP/fmts.fsht" \
+   && grep -q 'ptr\[2 \* element\]' "$TMP/fmts.fsht" \
+   && grep -q '!finite_f64(ux1)' "$TMP/fmts.fsht" \
+   && grep -q 'safe_div(1.0, length)?;' "$TMP/fmts.fsht" \
+   && grep -q 'Vector3 { x: ux1, y: ux2, z: ux1 }' "$TMP/fmts.fsht" \
+   && ! grep -q 'Span <' "$TMP/fmts.fsht" \
+   && ! grep -q 'ptr \[' "$TMP/fmts.fsht" \
+   && ! grep -q '! finite_f64' "$TMP/fmts.fsht" \
+   && ! grep -q ') ?' "$TMP/fmts.fsht" \
+   && awk '/^fn norm3/{print prev; exit} {prev=$0}' "$TMP/fmts.fsht" | grep -q 'formatter moved it inside the body' \
+   && $PEN -Itests/mods "$TMP/fmts.fsht" -o "$TMP/fmtsb" 2>/dev/null \
+   && [ "$("$TMP/fmtsb" 2>/dev/null)" = "$(printf '0.61\n2.00')" ]; then
+  ok "formatter: clang-style layout (angles/brackets/unary/? + packed header)"
+else bad "formatter: clang-style layout (angles/brackets/unary/? + packed header)"; fi
+
 # --- -g debug info (§10.3): DWARF line table + symbol resolution
 if $PEN -g -O0 tests/pos_debug_g.fsht -o "$TMP/dbg" 2>"$TMP/err"; then
   if objdump --dwarf=decodedline "$TMP/dbg" 2>/dev/null | grep -q "pos_debug_g.fsht"; then
@@ -1029,6 +1075,33 @@ elif python3 scripts/lsp_completion_inlay_check.py "$PEN_LSP" >/dev/null 2>"$TMP
 else
   bad "LSP: completion + inlay hints over stdio JSON-RPC"
   sed -n '1,8p' "$TMP/lspcomperr"
+fi
+
+# LSP document + range formatting (§10.2 editor surface): "Format
+# Document" / "Format Selection" backed by the same token-preserving
+# formatter as `penstock fmt` — one whole-document edit, house-style
+# result, idempotence, selection snapped to whole declarations only,
+# FormattingOptions honoured.
+if [ ! -x "$PEN_LSP" ]; then
+  bad "LSP: document + range formatting (server not built)"
+elif python3 scripts/lsp_format_check.py "$PEN_LSP" >/dev/null 2>"$TMP/lspfmterr"; then
+  ok "LSP: document + range formatting over stdio JSON-RPC"
+else
+  bad "LSP: document + range formatting over stdio JSON-RPC"
+  sed -n '1,8p' "$TMP/lspfmterr"
+fi
+
+# LSP semantic tokens: reference-accurate colouring (types, functions,
+# parameters, locals, struct fields, enum variants, module/import names)
+# decoded from textDocument/semanticTokens/full and checked against the
+# exact expected identifier spans.
+if [ ! -x "$PEN_LSP" ]; then
+  bad "LSP: semantic tokens (server not built)"
+elif python3 scripts/lsp_semtok_check.py "$PEN_LSP" >/dev/null 2>"$TMP/lspsemtokerr"; then
+  ok "LSP: semantic tokens over stdio JSON-RPC"
+else
+  bad "LSP: semantic tokens over stdio JSON-RPC"
+  sed -n '1,8p' "$TMP/lspsemtokerr"
 fi
 
 echo "== optimisation-audit: §10.2/§10.3 differential + property tests =="

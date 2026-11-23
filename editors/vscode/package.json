@@ -2,7 +2,7 @@
   "name": "freshet-language-support",
   "displayName": "Freshet Language Support",
   "description": "Syntax highlighting and language-server support for the Freshet language and Penstock compiler.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "penstock-project",
   "license": "MIT",
   "engines": {
@@ -47,6 +47,28 @@
       {
         "command": "freshet.restartLanguageServer",
         "title": "Freshet: Restart Language Server"
+      },
+      {
+        "command": "freshet.formatDocument",
+        "title": "Freshet: Format Document"
+      },
+      {
+        "command": "freshet.formatSelection",
+        "title": "Freshet: Format Selection"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "freshet.formatDocument",
+        "key": "shift+alt+f",
+        "mac": "shift+alt+f",
+        "when": "editorTextFocus && editorLangId == freshet"
+      },
+      {
+        "command": "freshet.formatSelection",
+        "key": "ctrl+k ctrl+f",
+        "mac": "cmd+k cmd+f",
+        "when": "editorTextFocus && editorLangId == freshet"
       }
     ],
     "configuration": {

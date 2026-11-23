@@ -1,0 +1,34 @@
+module fmt_style;
+import geometry;
+import util;
+
+// fmt-style regression: comment block stays above the fn header (the old
+// formatter moved it inside the body).
+fn   norm3 (v:Vector3)->f64{ return sqrt(v.x*v.x+v.y*v.y+v.z*v.z); }
+
+fn finite_f64(x:f64)->bool{ return x>-1.0e30&&x<1.0e30; }
+
+fn safe_div(a:f64,b:f64)->Result<f64,i64>{
+if(b==0.0){return Err(1001);}
+return Ok(a/b);
+}
+
+pub fn element_axial_results_3d(coordinates_m:Span<f64>,connectivity:Span<u64>,displacement:Span<f64>,young_modulus_pa:Span<f64>,cross_section_area_m2:Span<f64>,element:u64)->Result<f64,i64>{
+if(element>=connectivity.len/2){return Err(1001);}
+let a:u64=connectivity.ptr[2*element];
+let ux1:f64=displacement.ptr[3*a];let ux2:f64=displacement.ptr[3*a+1];
+if(!finite_f64(ux1)||!finite_f64(ux2)){return Err(1002);}
+let length:f64=norm3(Vector3{x:ux1,y:ux2,z:ux1});
+let inv:f64=safe_div(1.0,length)?;
+let area:f64=young_modulus_pa.ptr[element];
+return Ok(area*inv);
+}
+
+struct Vector3 { x: f64, y: f64, z: f64 }
+
+fn main(){
+let r:Result<f64,i64> =element_axial_results_3d(span([1.5,2.5,3.5,4.5]),span([0u64,1u64]),span([1.5,2.5,3.5,4.5]),span([2.0,2.0]),span([4.0,4.0]),0);
+match(r){Ok(v)=>{print_f64(v,2);println();}Err(e)=>{print_i64(e);println();}}
+let g:Point=Point{x:1.0,y:2.0};
+print_f64(geometry::visible(g),2);println();
+}

@@ -1398,6 +1398,27 @@ Program* parseModuleFile(const std::string& path,
 // (or with --check, would be) reformatted
 bool formatSourceFile(const std::string& path, bool checkOnly);
 
+// In-memory formatter surface for the language server (LSP
+// textDocument/formatting + textDocument/rangeFormatting; report §10.2).
+// `formatSourceText` returns the full formatted document; `*ok` (the
+// pointer may be null) is false when the token-preserving safety gate
+// refuses, in which case the returned text must NOT be applied.
+std::string formatSourceText(const std::string& src, int tabSize,
+                             bool insertSpaces, bool* ok);
+
+// Formats ONLY the toplevel declarations intersecting [startOff, endOff)
+// of `src`.  The result replaces exactly the byte span [start, end);
+// bytes outside it are untouched.  `ok` is false when the selection covers
+// no declaration or the safety gate refuses.
+struct RangeFormatResult {
+  size_t start = 0, end = 0;   // byte span of the document to replace
+  std::string text;            // the replacement for those bytes
+  bool ok = false;
+};
+RangeFormatResult formatSourceRange(const std::string& src, size_t startOff,
+                                    size_t endOff, int tabSize,
+                                    bool insertSpaces);
+
 // Phase 3 (report §6.2): project manifest (penstock.toml) loader —
 // returns false with diagnostics on parse errors
 bool loadProjectManifest(const std::string& path);
