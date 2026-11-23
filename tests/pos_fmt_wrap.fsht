@@ -1,0 +1,24 @@
+// fmt regression (user report): scientific-notation literals must survive
+// formatting as ONE token — the old tokenizer split a signed exponent
+// literal into three tokens and the spacing pass then emitted code that no
+// longer compiled.  Long calls wrap like clang-format: break after the
+// opener, bin-pack the arguments on continuation lines, close with `);`.
+module fmt_wrap;
+
+fn assemble_truss_2d(node_count: u64, element_count: u64, coordinates: Span<f64>, connectivity: Span<u64>, youngs: Span<f64>, areas: Span<f64>) -> Result<u64, i64> {
+    if (element_count != connectivity.len / 2) { return Err(1001); }
+    let penalty: f64 = 1.0e-4 * 2.5e+3 + 1.5E-3;
+    let mask: u64 = 0x1F;
+    if (penalty < mask as f64) { return Ok(node_count + element_count); }
+    return Ok(node_count + youngs.len + areas.len + coordinates.len);
+}
+
+fn main() {
+    let coordinates: Span<f64> = span([1.0e-4, 2.0e0, 3.5e+2]);
+    let connectivity: Span<u64> = span([0u64, 1u64, 2u64, 3u64]);
+    let youngs: Span<f64> = span([2.0e11, 1.0e11, 9.0e10, 8.0e10]);
+    let areas: Span<f64> = span([4.0e-4, 5.0e-4, 6.0e-4, 7.0e-4]);
+    let assembled: Result<u64, i64> = assemble_truss_2d(coordinates.len / 3, connectivity.len / 2, coordinates, connectivity, youngs, areas);
+    match (assembled) { Ok(v) => { print_i64(v as i64); } Err(e) => { print_i64(e); } }
+    println();
+}

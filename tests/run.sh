@@ -1017,6 +1017,31 @@ if $PEN fmt "$TMP/fmts.fsht" >/dev/null 2>&1 \
   ok "formatter: clang-style layout (angles/brackets/unary/? + packed header)"
 else bad "formatter: clang-style layout (angles/brackets/unary/? + packed header)"; fi
 
+# --- formatter regression (user report): the fmt tokenizer split
+# scientific-notation literals (`1.0e-4` -> `1.0e` / `-` / `4`) so the
+# spacing pass emitted code that no longer compiled, and long call
+# argument lists were joined onto one line.  Asserted on the formatted
+# copy: signed-exponent literals survive glued (decimal, hex, and
+# suffix forms), the long call breaks after `(` and bin-packs its
+# arguments on continuation lines, every line fits the 80-column limit,
+# and the file still compiles and runs (so the output is valid code).
+cp tests/pos_fmt_wrap.fsht "$TMP/fmtw.fsht"
+if $PEN fmt "$TMP/fmtw.fsht" >/dev/null 2>&1 \
+   && $PEN fmt --check "$TMP/fmtw.fsht" >/dev/null 2>&1 \
+   && grep -q '1.0e-4 \* 2.5e+3 + 1.5E-3' "$TMP/fmtw.fsht" \
+   && grep -q 'span(\[2.0e11, 1.0e11, 9.0e10, 8.0e10\])' "$TMP/fmtw.fsht" \
+   && grep -q 'span(\[4.0e-4, 5.0e-4, 6.0e-4, 7.0e-4\])' "$TMP/fmtw.fsht" \
+   && ! grep -qE '(e|E) [-+] [0-9]' "$TMP/fmtw.fsht" \
+   && ! grep -q 'assemble_truss_2d(coordinates' "$TMP/fmtw.fsht" \
+   && grep -q 'assemble_truss_2d($' "$TMP/fmtw.fsht" \
+   && grep -q '^ *coordinates.len / 3, connectivity.len / 2, coordinates,$' "$TMP/fmtw.fsht" \
+   && grep -q '^ *connectivity, youngs, areas);$' "$TMP/fmtw.fsht" \
+   && awk 'length > 80 { bad = 1 } END { exit bad }' "$TMP/fmtw.fsht" \
+   && $PEN "$TMP/fmtw.fsht" -o "$TMP/fmtwb" 2>/dev/null \
+   && [ "$("$TMP/fmtwb" 2>/dev/null)" = "3" ]; then
+  ok "formatter: scientific notation + long-call wrapping (clang-format)"
+else bad "formatter: scientific notation + long-call wrapping (clang-format)"; fi
+
 # --- -g debug info (§10.3): DWARF line table + symbol resolution
 if $PEN -g -O0 tests/pos_debug_g.fsht -o "$TMP/dbg" 2>"$TMP/err"; then
   if objdump --dwarf=decodedline "$TMP/dbg" 2>/dev/null | grep -q "pos_debug_g.fsht"; then

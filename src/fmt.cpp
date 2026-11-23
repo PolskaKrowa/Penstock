@@ -7,7 +7,12 @@
 //
 // Design (compiler-aware, token-level):
 //   * A dedicated tokeniser re-reads the source keeping COMMENTS as trivia
-//     tokens, so nothing the user wrote is ever dropped.
+//     tokens, so nothing the user wrote is ever dropped.  Number literals
+//     are lexed exactly like the compiler lexer — decimal with optional
+//     fraction and SIGNED EXPONENT (`1.0e-4`, `2.5e+3`, `1.5E-3`), `0x`
+//     hex, u/i/f suffixes (`5u64`) — so a scientific-notation literal is
+//     ONE token and the spacing pass can never split it into invalid code
+//     (`1.0e - 4`, which the old alnum+dot scan produced).
 //   * Spacing is decided per adjacent token PAIR (clang-format's
 //     TokenAnnotator role), not by blind rules on single characters:
 //       - generic angles hug the name and their contents — `Span<f64>`,
@@ -31,6 +36,15 @@
 //         parameters on continuation lines (one extra indent), closing
 //         with `) -> Ret {` — the same for struct/enum/struct-literal
 //         bodies and their fields;
+//       - long statements wrap like clang-format too (the engine used to
+//         emit any statement, however long, on ONE line): a call/index
+//         argument list that no longer fits breaks after `(` and
+//         bin-packs its arguments on continuation lines (two extra
+//         indents), the closing bracket hugging the last argument
+//         (`... span(lengths, element_count));`); a binary operator whose
+//         following operand run would not fit breaks AFTER the operator
+//         (BreakBeforeBinaryOperators = false) with one extra indent —
+//         the 80-column limit is a limit again;
 //       - blank lines: toplevel declarations are separated by one blank
 //         line, but runs of one-line `module`/`import`/`extern` (and other
 //         single-line `;`-declarations) stay tightly packed; inside
@@ -43,7 +57,9 @@
 //   * SAFETY: the formatter refuses to produce a program whose token
 //     stream (comments/whitespace stripped) differs from the input's —
 //     the file is only rewritten when the formatted text re-lexes to the
-//     exact same tokens.  On any doubt the original file is kept.
+//     exact same tokens.  On any doubt the original file is kept.  The
+//     gate's lexer now mirrors the compiler's literal syntax, so a
+//     mangled number (the old `1.0e - 4` bug) can never pass the gate.
 #include "common.h"
 #include <fstream>
 #include <sstream>
@@ -122,11 +138,50 @@ bool lexForFmt(const std::string& src, std::vector<FTok>& out) {
       out.push_back(t);
       continue;
     }
+    // numbers, lexed EXACTLY like the compiler lexer (lexer.cpp): decimal
+    // with optional fraction and SIGNED EXPONENT (`1.0e-4`, `2.5e+3`,
+    // `1e9`, `1.5E-3`), `0x` hex, and the u/i/f suffixes (`5u64`).  The
+    // old scan (alnum + `.` + `_`) split `1.0e-4` into `1.0e` / `-` / `4`
+    // and the binary-operator spacing then emitted the invalid
+    // `1.0e - 4` — and the safety gate's own lexer split it the same way
+    // on BOTH sides, so the damage slipped through.  Mirroring the real
+    // literal syntax makes scientific notation ONE token (and `3.` /
+    // `0..n` token boundaries match the compiler too).
     if (isdigit((unsigned char)c) ||
         (c == '.' && p + 1 < end && isdigit((unsigned char)p[1]))) {
       const char* s = p;
-      while (p < end && (isalnum((unsigned char)*p) || *p == '.' || *p == '_'))
-        ++p;
+      if (c == '0' && p + 1 < end && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        while (p < end && isxdigit((unsigned char)*p)) ++p;
+      } else {
+        while (p < end && isdigit((unsigned char)*p)) ++p;
+        if (p < end && *p == '.' && p + 1 < end &&
+            isdigit((unsigned char)p[1])) {
+          ++p;
+          while (p < end && isdigit((unsigned char)*p)) ++p;
+        }
+        if (p < end && (*p == 'e' || *p == 'E') && p + 1 < end &&
+            (isdigit((unsigned char)p[1]) ||
+             ((p[1] == '+' || p[1] == '-') && p + 2 < end &&
+              isdigit((unsigned char)p[2])))) {
+          ++p;                          // the e / E
+          if (p < end && (*p == '+' || *p == '-')) ++p;
+          while (p < end && isdigit((unsigned char)*p)) ++p;
+        }
+      }
+      // suffixes u8/u16/u32/u64/usize/i8/i16/i32/i64/f32/f64, matched in
+      // the compiler's order with a word-boundary guard
+      static const char* sfx[] = { "u8",  "u16", "u32", "u64", "usize",
+                                   "i8",  "i16", "i32", "i64", "f32",
+                                   "f64" };
+      for (auto* sf : sfx) {
+        size_t n = strlen(sf);
+        if ((size_t)(end - p) >= n && strncmp(p, sf, n) == 0 &&
+            (p + n == end || !fIsIdentChar(p[n]))) {
+          p += n;
+          break;
+        }
+      }
       FTok t; t.text = std::string(s, p); t.kind = Token::INT; t.line = line;
       t.off = (size_t)(s - base);
       out.push_back(t);
@@ -243,6 +298,7 @@ struct Fmt {
   std::string out;
   int depth = 0;
   int col = 0;                 // current output column
+  bool freshLine = true;       // line still empty beyond its indent
   std::vector<FTok> pendingComments;
   // One indentation level.  The house style is four spaces; the language
   // server passes the editor's FormattingOptions through here instead
@@ -270,6 +326,7 @@ struct Fmt {
     while (!out.empty() && out.back() == ' ') out.pop_back();
     out += '\n';
     col = 0;
+    freshLine = true;
   }
   void indent(int d) {
     for (int i = 0; i < d; ++i) {
@@ -281,11 +338,13 @@ struct Fmt {
     if (col > 0 && !out.empty() && out.back() != ' ' && out.back() != '\n') {
       out += ' ';
       ++col;
+      freshLine = false;
     }
   }
   void write(const std::string& s) {
     out += s;
     col += (int)s.size();
+    freshLine = false;
   }
 
   // flush pending comments at the current indent (own lines, never
@@ -431,6 +490,15 @@ struct Fmt {
       if (toks[j].isLineComment || toks[j].isBlockComment) continue;
       if (toks[j].text == "{") { ++d; continue; }
       if (toks[j].text == "}") { if (--d == 0) return j; }
+    }
+    return SIZE_MAX;
+  }
+  size_t matchBracket(size_t open) {
+    int d = 0;
+    for (size_t j = open; j < toks.size(); ++j) {
+      if (toks[j].isLineComment || toks[j].isBlockComment) continue;
+      if (toks[j].text == "[") { ++d; continue; }
+      if (toks[j].text == "]") { if (--d == 0) return j; }
     }
     return SIZE_MAX;
   }
@@ -600,7 +668,10 @@ struct Fmt {
         return;               // declaration complete
       }
       if (c->text == ";") { write(";"); advance(); return; }
-      emitTok();
+      // long globals wrap like statements: operators break after
+      // themselves, call argument lists bin-pack
+      if (tryBreakAfterOperator()) continue;
+      if (!tryBreakCallGroup(SIZE_MAX)) emitTok();
     }
   }
 
@@ -704,14 +775,134 @@ struct Fmt {
   void emitPackedList(size_t endIdx) {
     while (pos < endIdx) {
       size_t chunkEnd = nextTopLevelComma(pos, endIdx);
-      int cw = spanWidth(pos, chunkEnd);
-      if (col + cw > limit) {               // does not fit: wrap
+      int cw = spanWidth(pos, chunkEnd);   // includes the leading space
+      // after the previous `,` — so the remaining trailer is the comma
+      // itself: +1, and the line never exceeds the column limit
+      if (!freshLine && col + cw + 1 > limit) {     // does not fit: wrap
         nl();
         indent(depth);
       }
-      while (pos < chunkEnd) emitTok(chunkEnd);
+      // still too long for a line of its own (measured at the chunk's
+      // home indent, whether or not it just wrapped): the chunk breaks
+      // INSIDE — its argument list bin-packs (recursive
+      // BinPackArguments).  A chunk that fits is emitted linearly, its
+      // nested groups hugging inline; the outer comma is always the
+      // preferred break point.
+      bool breakInside = (int)(indentUnit.size() * depth) + cw + 2 > limit;
+      while (pos < chunkEnd) {
+        if (breakInside && !tryBreakCallGroup(chunkEnd)) emitTok(chunkEnd);
+        else emitTok(chunkEnd);
+      }
       if (chunkEnd < endIdx) emitTok();    // the separating comma
     }
+  }
+
+  // clang-format's BinPackArguments: a call/index ARGUMENT LIST that no
+  // longer fits on the current line breaks after its opener and
+  // bin-packs its arguments on continuation lines — two extra indent
+  // levels, the house argument-list continuation indent — with the
+  // closing bracket hugging the last argument
+  // (`... span(lengths, element_count));`).  Groups WITHOUT a top-level
+  // comma stay inline: parenthesised expressions and single
+  // struct-literal arguments keep their `{` on the statement flow, where
+  // the brace paths lay them out.  A comment inside the group vetoes
+  // breaking (the group is emitted verbatim instead).
+  bool tryBreakCallGroup(size_t endIdx) {
+    FTok* c = cur();
+    if (!c || (c->text != "(" && c->text != "[")) return false;
+    size_t pi = prevTokIdx(pos);
+    if (pi == SIZE_MAX) return false;
+    const FTok& pv = toks[pi];
+    bool callish = pv.kind == Token::IDENT && !ctrlKw(pv.text);
+    if (pv.text == ")" || pv.text == "]") callish = true;   // f(x)(y), a[i](
+    if (pv.hugAngle) callish = true;                       // name<T>(
+    if (c->text == "[" && (pv.text == "=" || pv.text == "(" ||
+                           pv.text == "," || pv.text == "return"))
+      callish = true;                                      // array literal
+    if (!callish) return false;
+    size_t openIdx = pos;
+    size_t closeIdx = c->text == "(" ? matchParen(openIdx)
+                                     : matchBracket(openIdx);
+    if (closeIdx == SIZE_MAX || closeIdx >= endIdx) return false;
+    if (closeIdx == openIdx + 1) return false;             // `()`: hug
+    // must be an argument list: at least one top-level comma inside
+    if (nextTopLevelComma(openIdx + 1, closeIdx) == closeIdx) return false;
+    for (size_t j = openIdx + 1; j < closeIdx; ++j)
+      if (toks[j].isLineComment || toks[j].isBlockComment) return false;
+    int w = spanWidth(openIdx, closeIdx + 1);              // `(args)`
+    if (col + w + 2 <= limit) return false;                // fits: keep
+    emitTok();                     // `(` / `[` hugs the callee
+    depth += 2;
+    nl();
+    indent(depth);
+    emitPackedList(closeIdx);
+    depth -= 2;
+    emitTok();                     // `)` / `]` hugs the last argument
+    return true;
+  }
+
+  // clang-format breaks AFTER a binary operator (LLVM style:
+  // BreakBeforeBinaryOperators = false) when the operand run that
+  // follows — measured up to the next break opportunity at the same
+  // bracket depth (another binary operator, a call/index opener, a
+  // closing bracket, or the statement terminator) — would not fit on
+  // the current line; the continuation gets ONE extra indent level
+  // (ContinuationIndentWidth 4).
+  bool tryBreakAfterOperator() {
+    static const std::set<std::string> ops = {
+      "+", "-", "*", "/", "%", "=", "==", "!=", "<=", ">=", "&&", "||",
+      "<<", ">>", "->", "=>", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+      "^=", "<<=", ">>=",
+    };
+    FTok* c = cur();
+    if (!c || !ops.count(c->text)) return false;
+    if (isUnaryAt(pos)) return false;          // prefix -/+/&/* hug
+    size_t next = pos + 1;
+    while (next < toks.size() &&
+           (toks[next].isLineComment || toks[next].isBlockComment))
+      ++next;
+    if (next >= toks.size()) return false;    // nothing follows: keep
+    int w = 0;
+    int paren = 0, brk = 0, brace = 0;
+    for (size_t j = next; j < toks.size(); ++j) {
+      const FTok& t = toks[j];
+      if (t.isLineComment || t.isBlockComment) continue;
+      const std::string& tx = t.text;
+      if (paren == 0 && brk == 0 && brace == 0) {
+        if ((ops.count(tx) && !isUnaryAt(j)) || tx == "{" || tx == "}" ||
+            tx == ")" || tx == "]")
+          break;                        // next break opportunity
+        if (tx == "(" || tx == "[") {
+          // an ARGUMENT LIST breaks after its opener (hook A below), so
+          // it ends this run at its callee — `= callee(` stays on the
+          // operator's line and the list breaks after `(`.  Other
+          // bracket groups (casts, parenthesised expressions) emit
+          // linearly and their width counts toward the run.
+          size_t close = tx == "(" ? matchParen(j) : matchBracket(j);
+          if (close == SIZE_MAX) break;
+          if (nextTopLevelComma(j + 1, close) != close) break;
+          w += spanWidth(j, close + 1);
+          j = close;                    // skip past the balanced group
+          continue;
+        }
+      }
+      if (tx == "(") ++paren;
+      else if (tx == ")") { if (paren == 0) break; --paren; }
+      else if (tx == "[") ++brk;
+      else if (tx == "]") { if (brk == 0) break; --brk; }
+      else if (tx == "{") ++brace;
+      else if (tx == "}") { if (brace == 0) break; --brace; }
+      w += (int)tx.size();
+      if (j > next && spaceBetween(j)) ++w;
+      if (tx == ";") break;            // statement terminator (width kept)
+    }
+    // `col` already holds everything before the operator; +2 is the space
+    // on each side of it, +w the operand run that would follow
+    if (col + (int)c->text.size() + 2 + w <= limit) return false;
+    emitTok();                          // operator, at the line's end
+    nl();
+    indent(depth + 1);                 // continuation indent
+    return true;
   }
 
   // inside a header brace (struct/enum body or struct literal): one line
@@ -912,7 +1103,14 @@ struct Fmt {
         nl();
         return;
       }
-      emitTok();
+      // clang-format-style wrapping for long statements (the engine used
+      // to emit any statement, however long, on ONE line): a binary
+      // operator whose following operand run would not fit breaks AFTER
+      // the operator (one extra indent); a call/index argument list that
+      // no longer fits breaks after its opener and bin-packs its
+      // arguments (two extra indents).
+      if (tryBreakAfterOperator()) continue;
+      if (!tryBreakCallGroup(SIZE_MAX)) emitTok();
     }
   }
 
