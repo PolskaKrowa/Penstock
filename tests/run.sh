@@ -637,6 +637,18 @@ run_err "match non-exhaustive" tests/neg_match_nonex.fsht F0204
 echo "== Phase 2: generics + strings + errors (report §4) =="
 run_ok "generics (fns + structs + constraints)" tests/pos_generics.fsht "2.0|5|1.0|1.5 7|3 1.5|10|7.5|1|10|2.5"
 run_err "generic constraint violation" tests/neg_genericconstraint.fsht F0203
+
+# --- fsht-data crash fix (user report: pinContextTo segfault on an I/O
+# heavy program): semaProgram's struct/enum/fn-body loops iterated
+# p->structs/p->enums/p->fns with range-for while their own BODIES append
+# (prelude creation, generic instantiation) — push_back past capacity
+# reallocates and the cached iterators walk freed memory.  These three
+# regressions make the realloc deterministic: power-of-two decl counts
+# put the mid-loop instantiation push exactly past the vector capacity.
+run_ok "sema realloc: struct fields with prelude/generic types" tests/pos_sema_realloc_structs.fsht "256"
+run_ok "sema realloc: enum payloads with generic types" tests/pos_sema_realloc_enums.fsht "512"
+run_ok "sema realloc: generic call instantiation mid body-loop" tests/pos_sema_realloc_fns.fsht "510"
+
 run_ok "strings: str views + String + fmt" tests/pos_strings.fsht "hello|5|65 67|world|5|eq ne|abcdef|6|count: 42|12345|3.14|hello, freshet!|pi 3"
 run_ok "Option/Result + ? propagation" tests/pos_optres.fsht "5|1001|2|none|26|1001|42|none|7"
 

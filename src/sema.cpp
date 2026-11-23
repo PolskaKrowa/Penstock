@@ -889,7 +889,30 @@ bool semaProgram(Program* p, bool requireMain) {
   }
 
   // 2. bind field types
-  for (auto* sd : p->structs) {
+  //
+  // fsht-data crash fix (user report: pinContextTo segfault): this loop's
+  // BODY appends to p->structs.  Binding a field type can create the
+  // prelude types on demand (String/Reader/Writer — ensurePreludeString
+  // etc.) and instantiate generic templates (Vec<u8>, Pair<i64, f64> ...) —
+  // every one of those pushes onto p->structs (generics.cpp), and a
+  // push_back past capacity REALLOCATES the vector.  The historical
+  // range-for cached its iterators at loop start, so after the realloc it
+  // walked FREED memory and crashed inside pinContextTo reading a dangling
+  // StructDef (ASan: heap-use-after-free, sema.cpp loop head).  I/O-heavy
+  // programs hit this deterministically: their records are full of String /
+  // Vec / Result fields, and the first prelude creation mid-loop reallocs.
+  //
+  // Iterate by INDEX over the snapshot count instead — the vector object
+  // itself stays valid across reallocation (only its heap block moves), so
+  // p->structs[si] is always a live pointer.  Visiting only the structs that
+  // existed when the loop began preserves the historical visit-set exactly:
+  // a range-for never reaches elements appended after end() was captured,
+  // and instantiations appended mid-loop are already fully bound and
+  // layout-computed at creation (instantiateStruct binds fields through
+  // bindEncType and calls computeStructLayout itself).
+  const size_t nStructs = p->structs.size();
+  for (size_t si = 0; si < nStructs; ++si) {
+    StructDef* sd = p->structs[si];
     pinContextTo(sd->module);
     if (sd->isGeneric) continue;   // fields bind per instantiation
     for (size_t i = 0; i < sd->fields.size(); ++i) {
@@ -904,7 +927,17 @@ bool semaProgram(Program* p, bool requireMain) {
     computeStructLayout(sd);
   }
   // 2b. bind enum variant payload types + layouts
-  for (auto* ed : p->enums) {
+  //
+  // fsht-data crash fix: the SAME realloc hazard as the struct loop above
+  // — binding a variant payload type can instantiate the prelude enum
+  // templates (Option<i64>, Result<Reader, IoError> ...) and push onto
+  // p->enums mid-loop, and the cached range-for iterators then dangle.  A
+  // payload of Option<...>/Result<...> is exactly the I/O program shape
+  // (ASan: heap-use-after-free at this loop head).  Snapshot-count index
+  // iteration; mid-loop instantiations are fully laid out at creation.
+  const size_t nEnums = p->enums.size();
+  for (size_t ei = 0; ei < nEnums; ++ei) {
+    EnumDef* ed = p->enums[ei];
     pinContextTo(ed->module);
     if (ed->isGeneric) continue;
     for (auto& v : ed->variants)
@@ -980,7 +1013,19 @@ bool semaProgram(Program* p, bool requireMain) {
   if (!hasMain && executableOutput && requireMain)
     diag(Diag::Error, Code::Main, "no 'fn main()' found", p->file, 0, 0);
 
-  for (auto* f : p->fns) {
+  // fsht-data crash fix (companion to the struct/enum loop fixes above):
+  // this loop's body can APPEND to p->fns — a call inside a function body
+  // instantiates a generic function (instantiateGenericFn pushes the cloned
+  // instance onto prog->fns), and a push past capacity reallocates the
+  // vector, dangling the cached range-for iterators (ASan: heap-use-after-
+  // free at this loop head on a 512-fn program whose 513th entry is the
+  // first generic instance).  Snapshot-count index iteration preserves the
+  // historical visit-set exactly: instances appended mid-loop were never
+  // visited here (range-for caches end()), and they are consumed by the
+  // pendingGenericBodies worklist below — no double body-sema.
+  const size_t nFns = p->fns.size();
+  for (size_t fi = 0; fi < nFns; ++fi) {
+    FnDecl* f = p->fns[fi];
     auto mit = S->fnMap.find(f->name);
     bool keep = false;
     if (mit != S->fnMap.end())
