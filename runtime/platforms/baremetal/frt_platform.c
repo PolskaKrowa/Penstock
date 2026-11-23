@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include "common/frt_platform.h"
+#include "../../common/frt_platform.h"
 
 /* facility flags for the common core */
 #define FRT_PAL_DSTK_GUARD 0
