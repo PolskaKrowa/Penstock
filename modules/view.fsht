@@ -1,0 +1,140 @@
+// view — rank-generic grid views over flat memory.
+//
+// The ch. 7 surface is Span<T>: one-dimensional and contiguous, so 3D
+// indexing is hand-rolled arithmetic (Freshet-Fluid's
+// `row * (nx + 1) + col`).  A View<T, R> carries shape and strides next
+// to a flat Span<T> so the accessor below is ONE multiplication chain
+// the bounds-check eliminator can see through — and the library
+// guarantees ROW-MAJOR construction, i.e. the inner dimension is
+// unit-stride (the vectorisable one).
+//
+// Rank is a const generic (fsht-02:03), so the strides/shape arrays are
+// [usize; R] fixed arrays with compile-time bounds.
+//
+// Indexing sugar needs operator overloading (registry
+// fsht-04:01-01.05.01, not scheduled); until then the accessor
+// functions below are the library surface:
+//
+//   let v: View<f64, 3> = view_new3(span(x, nx*ny*nz), nx, ny, nz);
+//   parfor (k in 0..nz) { ... view_at3(v, i, j, k) ... }
+//   let inner: View<f64, 2> = view_interior2(plane, 1);
+//
+// (The multi-index loop form `parfor (k, j) in (0..nz, 0..ny)` is a
+// spec proposal — see the registry draft — until it is ratified
+// the single-index parfor over the collapsed linear index composes with
+// these accessors.)
+module view;
+
+// The view itself: data + shape + strides.  R is the rank; shape and
+// strides are length-R arrays.  All views constructed by this module
+// are ROW-MAJOR (strides[R-1] == 1 — the unit-stride inner dimension
+// the vectoriser wants).
+pub struct View<T, const R: usize> {
+    data: Span<T>,
+    shape: [usize; R],
+    strides: [usize; R],
+}
+
+// ---- construction (row-major; inner dimension unit stride) --------------
+// Rank 1: the shape is the length; strides = [1].
+pub fn view_new1(data: Span<f64>) -> View<f64, 1> {
+    return View { data: data, shape: [data.len],
+                   strides: [1] };
+}
+
+pub fn view_new2(data: Span<f64>, n0: usize, n1: usize) -> View<f64, 2> {
+    return View { data: data, shape: [n0, n1],
+                   strides: [n1, 1] };
+}
+
+pub fn view_new3(data: Span<f64>, n0: usize, n1: usize, n2: usize)
+        -> View<f64, 3> {
+    return View { data: data, shape: [n0, n1, n2],
+                   strides: [n1 * n2, n2, 1] };
+}
+
+// ---- accessors ------------------------------------------------------------
+// The linear index is the dot product of the multi-index with the
+// strides; bounds checks fire per axis (checked builds) and the BCE
+// pass proves them away inside a parfor whose bounds match the shape.
+
+pub fn view_at1(v: View<f64, 1>, i: usize) -> f64 {
+    return v.data.ptr[v.strides[0] * i];
+}
+
+pub fn view_at2(v: View<f64, 2>, i: usize, j: usize) -> f64 {
+    return v.data.ptr[v.strides[0] * i + v.strides[1] * j];
+}
+
+pub fn view_at3(v: View<f64, 3>, i: usize, j: usize, k: usize) -> f64 {
+    return v.data.ptr[v.strides[0] * i + v.strides[1] * j +
+                     v.strides[2] * k];
+}
+
+pub fn view_set1(borrowed mut v: View<f64, 1>, i: usize, x: f64) {
+    v.data.ptr[v.strides[0] * i] = x;
+}
+
+pub fn view_set2(borrowed mut v: View<f64, 2>, i: usize, j: usize, x: f64) {
+    v.data.ptr[v.strides[0] * i + v.strides[1] * j] = x;
+}
+
+pub fn view_set3(borrowed mut v: View<f64, 3>, i: usize, j: usize, k: usize,
+                 x: f64) {
+    v.data.ptr[v.strides[0] * i + v.strides[1] * j + v.strides[2] * k] = x;
+}
+
+// ---- sub-views -------------------------------------------------------------
+// A 2D view of the k-plane of a 3D view (no copy — the plane shares the
+// storage; the returned view's data span starts at the plane origin).
+pub fn view_plane(v: View<f64, 3>, i: usize) -> View<f64, 2> {
+    return View {
+        data: span(v.data.ptr + v.strides[0] * i,
+                   v.shape[1] * v.shape[2]),
+        shape: [v.shape[1], v.shape[2]],
+        strides: [v.strides[1], v.strides[2]]
+    };
+}
+
+// The interior (halo-stripped) 2D view: every dimension loses `pad`
+// cells on each side.  The returned view's origin advances by pad along
+// every axis and its shape shrinks by 2*pad; the strides are unchanged
+// (a sub-view is NOT contiguous — that is the point: it aliases the
+// parent's storage without a copy).
+pub fn view_interior2(v: View<f64, 2>, pad: usize) -> View<f64, 2> {
+    let mut n0: usize = 0;
+    let mut n1: usize = 0;
+    if (v.shape[0] > 2 * pad) { n0 = v.shape[0] - 2 * pad; }
+    if (v.shape[1] > 2 * pad) { n1 = v.shape[1] - 2 * pad; }
+    return View {
+        data: span(v.data.ptr + v.strides[0] * pad + v.strides[1] * pad,
+                   v.data.len),
+        shape: [n0, n1],
+        strides: [v.strides[0], v.strides[1]]
+    };
+}
+
+// The interior 3D view (same rule).
+pub fn view_interior3(v: View<f64, 3>, pad: usize) -> View<f64, 3> {
+    let mut n0: usize = 0;
+    let mut n1: usize = 0;
+    let mut n2: usize = 0;
+    if (v.shape[0] > 2 * pad) { n0 = v.shape[0] - 2 * pad; }
+    if (v.shape[1] > 2 * pad) { n1 = v.shape[1] - 2 * pad; }
+    if (v.shape[2] > 2 * pad) { n2 = v.shape[2] - 2 * pad; }
+    return View {
+        data: span(v.data.ptr + v.strides[0] * pad + v.strides[1] * pad +
+                   v.strides[2] * pad, v.data.len),
+        shape: [n0, n1, n2],
+        strides: [v.strides[0], v.strides[1], v.strides[2]]
+    };
+}
+
+// ---- shape helpers ---------------------------------------------------------
+pub fn view_shape(v: View<f64, 3>, axis: usize) -> usize {
+    return v.shape[axis];
+}
+
+pub fn view_len(v: View<f64, 3>) -> usize {
+    return v.shape[0] * v.shape[1] * v.shape[2];
+}

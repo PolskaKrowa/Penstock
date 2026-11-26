@@ -62,6 +62,48 @@ void* frt_pal_dstk_reserve(uint64_t* usable, uint64_t want,
 /* rdtsc-style cycle counter (best effort; falls back to time) */
 uint64_t frt_pal_cycles(void);
 
+/* ---- machine query -- */
+/* The machine-profile surface the language exposes through the
+ * freshet.machine_* intrinsics and the `machine` stdlib module: one
+ * structure filled once (cached), value 0 = unknown/absent on this
+ * platform (ch. 25 §4: a query NEVER aborts a program).  Linux fills it
+ * from sysconf, /sys/devices/system/{cpu,node}, /proc/meminfo; other
+ * layers return all-zero (the documented "unknown" spelling). */
+typedef struct frt_machine {
+  int32_t cores_physical;   /* unique (pkg, core) pairs seen */
+  int32_t threads_logical; /* online logical CPUs */
+  int32_t smt;             /* 1 when any SMT sibling pair was found */
+  int32_t numa_nodes;      /* NUMA nodes with CPUs (>= 1; 0 = unknown) */
+  int64_t l1d_bytes;       /* per-core L1D, 0 = unknown */
+  int64_t l2_bytes;        /* per-core L2, 0 = unknown */
+  int64_t l3_bytes;        /* per-package L3, 0 = unknown */
+  int64_t page_bytes;      /* OS page size (always known, >= 1) */
+  int64_t mem_total_bytes;      /* 0 = unknown */
+  int64_t mem_available_bytes;   /* 0 = unknown */
+} frt_machine_t;
+/* fills *out; returns 1 (query performed) or 0 (nothing known).  Fields
+ * an individual platform cannot determine stay 0 = unknown. */
+int frt_pal_query_machine(frt_machine_t* out);
+
+/* ---- transparent huge-page hint ------------------------------- */
+/* best-effort MADV_HUGEPAGE (or host equivalent) over [p, p+n); a no-op
+ * on platforms without the facility.  Enabled for big allocations when
+ * the program opts in through FRT_HUGEPAGE=1 (frt_common.c). */
+void frt_pal_madvise_huge(void* p, uint64_t bytes);
+
+/* ---- NUMA topology + memory policy ---------------------------- */
+/* number of NUMA nodes that carry CPUs (>= 1 when known; 0 = unknown /
+ * single-socket-desktop reporting is still >= 1 node) */
+int frt_pal_numa_nodes(void);
+/* the NUMA node owning `cpu` (-1 = unknown) */
+int frt_pal_cpu_node(int cpu);
+/* set the CALLING thread's memory policy for subsequent first-touch
+ * allocations.  mode: 0 = default (system), 1 = local (bind to the
+ * current node), 2 = interleave (round-robin pages across nodes).
+ * Returns the mode actually applied (-1 = platform without the
+ * facility); best effort — cgroups may refuse. */
+int frt_pal_numa_policy(int mode);
+
 /* ---- files / streams ----------------------------------------------------- */
 /* 1 = the platform has a filesystem (FRT_TIMING/FRT_PROF_OUT write;
  * baremetal: 0 — they become parsed no-ops, ch. 25 §4) */
@@ -78,6 +120,21 @@ int frt_pal_remove(const char* path);
 void* frt_pal_stdin(void);
 int frt_pal_ferror_code(void);      /* errno / GetLastError -> IoError code */
 int frt_pal_eof(void* f);           /* non-zero when the stream is at EOF */
+
+/* ---- positioned I/O --
+ * pread/pwrite at an explicit offset (parallel regions writing disjoint
+ * file ranges), fsync/ftruncate (durable billion-voxel checkpoints), and
+ * read-only / read-write mmap windows over file contents.  Handles are
+ * the same FILE* stream objects the sequential layer hands out; offsets
+ * are absolute bytes.  Platforms without the facility return -1 / NULL
+ * and the language surfaces document the fallibility. */
+int64_t frt_pal_pread(void* f, void* buf, uint64_t n, int64_t off);
+int64_t frt_pal_pwrite(void* f, const void* buf, uint64_t n, int64_t off);
+int32_t frt_pal_fsync(void* f);
+int32_t frt_pal_ftruncate(void* f, int64_t size);
+void* frt_pal_mmap_ro(const char* path, uint64_t* lenOut);
+void* frt_pal_mmap_rw(const char* path, uint64_t* lenOut);
+int32_t frt_pal_munmap(void* p, uint64_t len);
 
 /* ---- args / env ----------------------------------------------------------- */
 uint64_t frt_pal_args_count(void);

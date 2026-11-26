@@ -254,7 +254,10 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
       oi.container = letTy && isContainerType(letTy);
       oi.owningShape = letTy && (typeNeedsDrop(letTy) || isHandleType(letTy));
       bool owning = oi.container || oi.owningShape;
+      // malloc_aligned is ownership-tracked like malloc (the
+      // alignment promise changes nothing about the lifetime rule)
       oi.owned = (s->init->k == Expr::CALL && (bareCallName(s->init) == "malloc" ||
+                                               bareCallName(s->init) == "malloc_aligned" ||
                                                bareCallName(s->init) == "soa_new")) ||
                  (owning && s->init->k == Expr::CALL &&
                   containerCtorCall(bareCallName(s->init))) ||
@@ -297,7 +300,8 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         auto it = ctx.vars.find(lv);
         if (it != ctx.vars.end() && it->second.owned &&
             (s->rhs->k != Expr::CALL ||
-             (s->rhs->name != "malloc" && s->rhs->name != "soa_new"))) {
+             (s->rhs->name != "malloc" && s->rhs->name != "malloc_aligned" &&
+              s->rhs->name != "soa_new"))) {
           diag(Diag::Warning, Code::OwnSuspicious,
                "rebinding owned '" + lv + "' without freeing the old value",
                s->loc);
@@ -310,6 +314,7 @@ static void ownStmt(OwnCtx& ctx, FnSema* fs, Stmt* s,
         oi.owningShape = asTy && (typeNeedsDrop(asTy) || isHandleType(asTy));
         bool owning = oi.container || oi.owningShape;
         oi.owned = (s->rhs->k == Expr::CALL && (bareCallName(s->rhs) == "malloc" ||
+                                                bareCallName(s->rhs) == "malloc_aligned" ||
                                                 bareCallName(s->rhs) == "soa_new")) ||
                    (owning && s->rhs->k == Expr::CALL &&
                     containerCtorCall(bareCallName(s->rhs))) ||

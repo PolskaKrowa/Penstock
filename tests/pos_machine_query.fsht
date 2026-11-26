@@ -1,0 +1,34 @@
+// acceptance: machine query, budget refusal, aligned allocation.
+fn main() {
+    // machine profile: every value must be plausible (non-zero knowns)
+    print("logical="); print_u64(freshet.threads_logical()); println();
+    print("physical="); print_u64(freshet.cores_physical()); println();
+    print("smt="); print_u64(freshet.smt()); println();
+    print("numa="); print_u64(freshet.numa_nodes()); println();
+    print("l1="); print_u64(freshet.l1d_bytes()); println();
+    print("l2="); print_u64(freshet.l2_bytes()); println();
+    print("l3="); print_u64(freshet.l3_bytes()); println();
+    print("page="); print_u64(freshet.page_bytes()); println();
+    print("memtot="); print_u64(freshet.mem_total_bytes()); println();
+    print("memavail="); print_u64(freshet.mem_available_bytes()); println();
+    // fallible allocation — request far more than the machine has;
+    // None is the refusal, and the program recovers instead of aborting
+    let huge: u64 = freshet.mem_total_bytes();
+    let big: Option<*f64> = try_malloc(f64, huge / 6);   // > available
+    match (big) {
+        Some(p) => { print("unexpected"); println(); }
+        None => { print("refused"); println(); }
+    }
+    // the normal path still allocates
+    let ok: Option<*f64> = try_malloc(f64, 16);
+    match (ok) {
+        Some(p) => { print("alloc-ok"); println(); free(p); }
+        None => { print("alloc-failed"); println(); }
+    }
+    // alignment control + assume_aligned
+    let mut v: *f64 = malloc_aligned(f64, 1024, 64);
+    freshet.assume_aligned(v, 64);
+    for (i in 0..1024) { v[i] = 0.5; }
+    print("aligned-ok"); println();
+    free(v);
+}

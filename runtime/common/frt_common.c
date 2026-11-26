@@ -98,6 +98,15 @@
 static _Atomic int64_t g_statSerialRegions = 0;
 static _Atomic int64_t g_statDispatchedRegions = 0;
 
+/* (see the perf block below for the implementation): per-thread
+ * hardware counters, declared early because run_task (above the perf
+ * block in file order) brackets task bodies with them */
+static int g_perfOn = 0;
+static __thread int g_pfInstr = -1, g_pfLLC = -1;
+static uint64_t frt_perf_read(int fd);
+static void timing_record_hw(uint64_t tag, uint64_t instr, uint64_t llc);
+static void perf_thread_open(void);
+
 /* ---------------- Stage R3: portable CPU intrinsics --------------------- */
 /* The historical runtime called __builtin_ia32_pause() and
  * __builtin_ia32_rdtsc() unconditionally, which made it x86-only.  Behind
@@ -115,6 +124,8 @@ static _Atomic int64_t g_statDispatchedRegions = 0;
 #endif
 
 uint64_t frt_rdtsc(void);   /* forward: used before definition */
+/* huge-page hint (defined in the memory section, used above) */
+static void frt_maybe_huge(void* p, uint64_t bytes);
 
 int32_t __frt_env_threads = 0;   /* external global referenced by IR */
 static int64_t g_chunkDefault = FRT_TUNED_CHUNK;   /* 0 = heuristic */
@@ -134,6 +145,7 @@ typedef struct {
   _Atomic int64_t* remaining;
   int32_t cls;               /* SMT lane class (FRT_CLS_*) */
   int64_t sp;                /* data-stack index base (%sp) */
+  uint64_t tag;              /* region tag for counter attribution */
 } frt_task_t;
 
 typedef struct {
@@ -188,7 +200,61 @@ void* frt_malloc(int64_t size, int64_t align) {
     fprintf(stderr, "freshet: out of memory (%lld bytes)\n", (long long)size);
     abort();
   }
+  frt_maybe_huge(p, (uint64_t)size);
   return p;
+}
+
+/* fallible
+ * allocation.  The historical frt_malloc abort()s on exhaustion, so a
+ * program could not REFUSE to run against an oversized workload
+ * (workspace_requirement-then-refuse needs exactly this).  try_malloc
+ * returns NULL instead; the language surface is the try_malloc(T, n)
+ * builtin returning Option<*T>.  Alignment/huge-page policy identical
+ * to the infallible path. */
+void* frt_try_malloc(int64_t size, int64_t align) {
+  if (size <= 0) size = 1;
+  if (align < 16) align = 16;
+  void* p = NULL;
+  if (posix_memalign(&p, (size_t)align, (size_t)size) != 0) return NULL;
+  frt_maybe_huge(p, (uint64_t)size);
+  return p;
+}
+
+/* explicit alignment control.  malloc(T, n) is aligned to
+ * max(16, alignof(T)) only — AVX2 wants 32B, AVX-512 and streaming
+ * stores want 64B (ch. 7 gives soa() planes 64B for the same reason).
+ * malloc_aligned(T, n, A) is the ownership-tracked form carrying the
+ * caller's alignment promise (validated power-of-two >= 16 at sema;
+ * clamped here for ABI safety). */
+void* frt_malloc_aligned(int64_t size, int64_t align) {
+  if (align < 16) align = 16;
+  if (align > 4096) align = 4096;   /* pathological promises are clamped */
+  void* p = NULL;
+  if (posix_memalign(&p, (size_t)align, (size_t)size) != 0) {
+    fprintf(stderr, "freshet: out of memory (%lld bytes, align %lld)\n",
+            (long long)size, (long long)align);
+    abort();
+  }
+  frt_maybe_huge(p, (uint64_t)size);
+  return p;
+}
+
+/* transparent huge-page hint.  Opt-in via FRT_HUGEPAGE=1 (or
+ * baked FRT_TUNED_HUGEPAGE from -O4); applies to large allocations so
+ * page-table pressure on 10^8..10^9-voxel workloads drops.  First touch
+ * still determines page placement (documented ch. 25 §4) — the hint only
+ * coalesces the pages AFTER the first-touch fault. */
+static int g_hugepage = -1;   /* -1 = env not consulted yet */
+static void frt_hugepage_init(void) {
+  if (g_hugepage >= 0) return;
+  g_hugepage = 0;
+  const char* hp = frt_getenv("FRT_HUGEPAGE");
+  if (hp && hp[0] == '1') g_hugepage = 1;
+}
+static void frt_maybe_huge(void* p, uint64_t bytes) {
+  if (bytes < (2ull << 20)) return;   /* THP only pays from ~2 MiB up */
+  frt_hugepage_init();
+  if (g_hugepage) frt_pal_madvise_huge(p, bytes);
 }
 
 void frt_free(void* p) { free(p); }
@@ -300,6 +366,41 @@ static int g_workerPref[FRT_MAX_THREADS];  /* per-worker preferred class */
 static _Atomic int64_t g_statPairedRegions = 0;
 static _Atomic int64_t g_memLaneChunks = 0;
 static _Atomic int64_t g_compLaneChunks = 0;
+
+/* ---------------- NUMA-aware worker placement -------------------
+ * Topology: the platform layer reports the number of NUMA nodes that
+ * carry CPUs and which node owns each logical cpu.  The pool's PIN ORDER
+ * is node-major: the cpu list handed to pinning visits node 0's cpus
+ * first, then node 1's, ... so workers 1..T-1 spread evenly over nodes
+ * BEFORE filling a second cpu of the same node.  A first-touch page of
+ * chunk c is therefore local to the node of the worker that dequeued it.
+ *
+ * Mapping guarantee (documented, and what FRT_AFFINITY=1 buys):
+ *   * close affinity: a region is partitioned into nchunks contiguous
+ *     [lo,hi) blocks that are ENQUEUED in ascending base order and
+ *     dequeued FIFO under the queue lock — every worker executes a
+ *     CONTIGUOUS SUBSEQUENCE of the region in source order.  The worker
+ *     that first-touches the pages of a block is the same worker that
+ *     touches them for the whole block (no other worker is writing
+ *     there: writes are write-conflict-free by the language contract).
+ *   * @reproducible: the block partition is a pure function of
+ *     (total, block size, maxctx), so a repeated region with the same
+ *     schedule lands the same blocks on the same worker order.
+ *
+ * Memory policy (env FRT_NUMA=local|interleave|off, default off):
+ *   * local   — every worker (and the main thread) sets MPOL_BIND to
+ *               its own node: first-touch allocations stay node-local.
+ *   * interleave — MPOL_INTERLEAVE round-robins pages across nodes
+ *               (bandwidth-bound streaming fallback when no locality
+ *               structure exists).
+ *   Both are best effort: cgroups/cpuset confinement can refuse (the
+ * platform layer reports the applied mode; the timing file's NU line
+ * records what actually took effect). */
+static int g_numaPolicy = 0;            /* 0 off, 1 local, 2 interleave */
+static int g_numaNodes = 0;              /* 0 = probed later / unknown */
+static int g_pinCpu[FRT_MAX_CPU];        /* node-major pinning order */
+static int g_nPinCpu = 0;
+static _Atomic int64_t g_statNumaPolicy = 0;   /* mode actually applied */
 
 /* parse a comma-separated cpu list with N and N-M ranges into out[]
  * ("0-3,7"); returns the element count, -1 on syntax error.  Pure and
@@ -430,7 +531,16 @@ static int pop_task(frt_task_t* out) {
 }
 
 static void run_task(frt_task_t* t) {
+  /* hardware counters bracket the task body on THIS thread and
+   * accumulate on the region's timing entry (tag-attributed; zeroes
+   * stay zeroes when the PMU is unavailable) */
+  uint64_t i0 = 0, l0 = 0;
+  if (g_perfOn) { i0 = frt_perf_read(g_pfInstr); l0 = frt_perf_read(g_pfLLC); }
   t->body(t->lo, t->hi, t->ctx, t->sp);
+  if (g_perfOn) {
+    uint64_t i1 = frt_perf_read(g_pfInstr), l1 = frt_perf_read(g_pfLLC);
+    timing_record_hw(t->tag, i1 - i0, l1 - l0);
+  }
   atomic_fetch_sub_explicit(t->remaining, 1, memory_order_release);
 }
 
@@ -438,6 +548,13 @@ static void* worker_main(void* arg) {
   int idx = (int)(intptr_t)arg;
   int pref = (idx >= 0 && idx < FRT_MAX_THREADS) ? g_workerPref[idx]
                                                  : FRT_CLS_ANY;
+  /* each worker owns its hardware-counter fds before it runs
+   * any task (best effort; failure turns the feature off) */
+  if (g_perfOn) perf_thread_open();
+  /* a pinned worker inherits its node's memory policy before it
+   * touches any first-touch page (the policy call is idempotent and
+   * per-thread — the main thread applies its own below) */
+  if (g_numaPolicy == 1) frt_pal_numa_policy(1);
   for (;;) {
     frt_task_t t;
     frt_pal_lock();
@@ -473,6 +590,31 @@ static void pin_thread(frt_pal_thread_t* th, int cpu) {
   frt_pal_pin_thread(th, cpu);
 }
 
+/* node-major cpu pin order — g_pinCpu[] lists node 0's cpus
+ * first, then node 1's, ... so consecutive workers land on distinct nodes
+ * before a node's second cpu is used.  Single-node (or unknown-topology)
+ * hosts degrade to ascending logical cpu order: the historical
+ * behaviour.  Pure topology walk; unit-testable through frt_pal_cpu_node. */
+static void build_numa_pin_order(void) {
+  int ncpu = frt_pal_ncpu();
+  if (ncpu > FRT_MAX_CPU) ncpu = FRT_MAX_CPU;
+  g_nPinCpu = 0;
+  int nodes = frt_pal_numa_nodes();
+  if (nodes <= 1) {
+    for (int c = 0; c < ncpu; ++c) g_pinCpu[g_nPinCpu++] = c;
+    return;   /* single node: ascending order (historical) */
+  }
+  for (int n = 0; n < nodes && g_nPinCpu < FRT_MAX_CPU; ++n)
+    for (int c = 0; c < ncpu && g_nPinCpu < FRT_MAX_CPU; ++c)
+      if (frt_pal_cpu_node(c) == n) g_pinCpu[g_nPinCpu++] = c;
+  /* unattributed cpus (node -1) keep a slot at the tail */
+  for (int c = 0; c < ncpu && g_nPinCpu < FRT_MAX_CPU; ++c) {
+    int seen = 0;
+    for (int k = 0; k < g_nPinCpu; ++k) if (g_pinCpu[k] == c) seen = 1;
+    if (!seen && frt_pal_cpu_node(c) < 0) g_pinCpu[g_nPinCpu++] = c;
+  }
+}
+
 static void init_pool_body(void) {
   int T = __frt_env_threads > 0 ? __frt_env_threads : nproc_count();
   if (T < 1) T = 1;
@@ -488,8 +630,14 @@ static void init_pool_body(void) {
    * (one thread keeps the shared ALU busy while the other waits on
    * memory). */
   if (g_smtOn) pin = 1;
+  /* node-major pin order — build the cpu list that visits node
+   * 0's cpus, then node 1's, ... (single-socket machines degrade to the
+   * historical ascending order).  Workers spread over nodes before
+   * doubling up within one. */
+  build_numa_pin_order();
   for (int i = 0; i < g_nworkers; i++) {
-    int cpu = (i + 1) % T;
+    int cpu = g_nPinCpu > 0 ? g_pinCpu[(i + 1) % g_nPinCpu]
+                            : (i + 1) % T;
     g_workerPref[i] = FRT_CLS_ANY;
     if (g_smtOn && cpu >= 0 && cpu < FRT_MAX_CPU) {
       int sib = g_smtSibling[cpu];
@@ -530,6 +678,16 @@ static void ensure_pool(void) {
 typedef struct {
   uint64_t tag, cycles;
   int64_t count, nthreads, nchunks;
+  /* (registry 10.06.01, numerical profiling): measured WALL time
+   * and ITERATIONS per region entry — the denominators of the report's
+   * measured bytes/s and FLOP/s (bytes/s = bytesPerIter * iters / ns).
+   * instr/llc are the per-thread hardware-counter deltas aggregated
+   * over the region's chunks (0 when FRT_PERF counters are off/unavail-
+   * able); they are MEASURED, kept separate from the compiler's static
+   * per-iteration census the report multiplies them with. */
+  uint64_t ns;
+  int64_t iters;
+  uint64_t instr, llc;
 } frt_timing_ent;
 static frt_timing_ent g_timing[4096];
 static int g_ntiming = 0;
@@ -537,6 +695,81 @@ static int g_timingOn = 0;
 /* fsht-03:03: the timing log lock reuses the platform queue lock (the
  * platform layer owns ALL mutexes; a dedicated one would grow the API
  * for a diagnostics-only path) */
+
+/* ---------------- per-thread hardware counters ---------------------
+ * FRT_PERF=1 opens cycles / instructions / LLC-miss counters per thread
+ * (each pool worker and the main thread own their fds; the counters are
+ * read around every task body and the per-region deltas accumulate on
+ * the region's timing entry).  Failure to open (no PMU access, a
+ * restricted container) degrades to counters-off — the timing file then
+ * reports zeros and the report marks hardware data absent, exactly as
+ * the policy demands: never invent a measured number. */
+static __thread int g_pfCyc = -1;   /* cycles fd (info-only; cycles come
+                                      * from rdtsc in the timing entries) */
+#if defined(__linux__)
+/* minimal perf_event_attr (we only set type/config/size/disabled+inherit
+ * flags=0 so the counter runs from open until read) */
+#include <sys/types.h>
+typedef struct {
+  uint32_t type;
+  uint64_t config;
+} frt_perf_min;
+static int frt_perf_open(uint32_t type, uint64_t config) {
+  /* perf_event_attr is 72+ bytes on modern kernels; use a zeroed 128-byte
+   * buffer and fill the first fields (size at offset 8) */
+  unsigned char attr[128];
+  memset(attr, 0, sizeof attr);
+  *(uint32_t*)(attr + 0) = type;
+  *(uint64_t*)(attr + 8) = config;   /* perf_event_attr.config */
+  *(uint32_t*)(attr + 16) = 4 + 64;  /* .size */
+  long fd = syscall(__NR_perf_event_open, attr, 0 /*self*/, -1 /*any cpu*/,
+                    -1 /*group*/, 0 /*flags*/);
+  return (int)fd;
+}
+static uint64_t frt_perf_read(int fd) {
+  uint64_t v = 0;
+  if (fd >= 0) {
+    ssize_t n = read(fd, &v, sizeof v);
+    (void)n;
+  }
+  return v;
+}
+static void perf_thread_open(void) {
+  g_pfCyc = frt_perf_open(0 /*PERF_TYPE_HARDWARE*/, 0 /*CPU_CYCLES*/);
+  g_pfInstr = frt_perf_open(0, 1 /*PERF_COUNT_HW_INSTRUCTIONS*/);
+  /* PERF_TYPE_HW_CACHE = 3; cache id LL=2, op MISS=1, result=3 -> config
+   * (LL | (1<<16) | (3<<24)) = 0x4000003b53? use the canonical spelling */
+  g_pfLLC = frt_perf_open(3, (2ULL) | (1ULL << 16) | (3ULL << 24));
+  if (g_pfCyc < 0 && g_pfInstr < 0 && g_pfLLC < 0) {
+    g_perfOn = 0;   /* no PMU access: counters off for this whole run */
+  }
+}
+#else
+static void perf_thread_open(void) { g_perfOn = 0; }
+static uint64_t frt_perf_read(int fd) { (void)fd; return 0; }
+#endif
+
+static void perf_thread_close(void) {
+  if (g_pfCyc >= 0) close(g_pfCyc);
+  if (g_pfInstr >= 0) close(g_pfInstr);
+  if (g_pfLLC >= 0) close(g_pfLLC);
+  g_pfCyc = g_pfInstr = g_pfLLC = -1;
+}
+
+/* aggregate per-region counter deltas under the queue lock (the same
+ * lock the timing table uses) */
+static void timing_record_hw(uint64_t tag, uint64_t instr, uint64_t llc) {
+  frt_pal_lock();
+  for (int i = 0; i < g_ntiming; i++) {
+    if (g_timing[i].tag == tag) {
+      g_timing[i].instr += instr;
+      g_timing[i].llc += llc;
+      frt_pal_unlock();
+      return;
+    }
+  }
+  frt_pal_unlock();
+}
 
 /* §6.12 body-cost-aware work cutoff: run inline when the ESTIMATED TOTAL
  * WORK fits — trip_count * body_cost <= FRT_WORK_CUTOFF (default 2048
@@ -567,11 +800,19 @@ static void region_run_inline(frt_range_t* r, void** ctxout) {
   void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
   memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
   ctxout[0] = ctx;
-  uint64_t t0 = 0;
-  if (g_timingOn) t0 = frt_rdtsc();
+  uint64_t t0 = 0, n0 = 0;
+  if (g_timingOn) { t0 = frt_rdtsc(); n0 = frt_pal_time_ns(); }
+  uint64_t i0 = 0, l0 = 0;
+  if (g_perfOn) { i0 = frt_perf_read(g_pfInstr); l0 = frt_perf_read(g_pfLLC); }
   r->body(r->lo, r->hi, ctx, r->sp0);
+  if (g_perfOn) {
+    uint64_t i1 = frt_perf_read(g_pfInstr), l1 = frt_perf_read(g_pfLLC);
+    timing_record_hw(r->tag, i1 - i0, l1 - l0);
+  }
   if (g_timingOn) {
     uint64_t dt = frt_rdtsc() - t0;
+    uint64_t dns = frt_pal_time_ns() - n0;
+    int64_t iters = r->hi - r->lo;
     frt_pal_lock();
     int found = 0;
     for (int i = 0; i < g_ntiming; i++) {
@@ -579,6 +820,8 @@ static void region_run_inline(frt_range_t* r, void** ctxout) {
         g_timing[i].cycles += dt;
         g_timing[i].count++;
         g_timing[i].nchunks += 1;
+        g_timing[i].ns += dns;
+        g_timing[i].iters += iters;
         found = 1;
         break;
       }
@@ -588,6 +831,8 @@ static void region_run_inline(frt_range_t* r, void** ctxout) {
       g_timing[g_ntiming].cycles = dt;
       g_timing[g_ntiming].count = 1;
       g_timing[g_ntiming].nchunks = 1;
+      g_timing[g_ntiming].ns = dns;
+      g_timing[g_ntiming].iters = iters;
       g_ntiming++;
     }
     frt_pal_unlock();
@@ -651,7 +896,7 @@ static void region_dispatch(frt_range_t* r, void** ctxout, int nchunks,
     void* ctx = frt_malloc(r->ctx_size > 0 ? r->ctx_size : 64, 64);
     memcpy(ctx, r->ctx_template, (size_t)r->ctx_size);
     ctxout[c] = ctx;
-    frt_task_t t = {r->body, clo, chi, ctx, remaining, cls, r->sp0};
+    frt_task_t t = {r->body, clo, chi, ctx, remaining, cls, r->sp0, r->tag};
     push_task(t);
   }
   if (g_smtOn) {
@@ -680,15 +925,21 @@ static void help_drain(_Atomic int64_t* remaining) {
 }
 
 /* timing-table update for a dispatched region (Stage R2: under
- * g_timing_mu so concurrent regions cannot race the slot array) */
-static void timing_record(const frt_range_t* r, uint64_t dt, int nchunks) {
+ * g_timing_mu so concurrent regions cannot race the slot array).
+ * the entry gains measured WALL ns and the region's iteration
+ * count — the denominators of the report's measured bytes/s and FLOP/s */
+static void timing_record(const frt_range_t* r, uint64_t dt, uint64_t dns,
+                          int nchunks) {
   if (!g_timingOn) return;
+  int64_t iters = r->hi - r->lo;
   frt_pal_lock();
   for (int i = 0; i < g_ntiming; i++) {
     if (g_timing[i].tag == r->tag) {
       g_timing[i].cycles += dt;
       g_timing[i].count++;
       g_timing[i].nchunks += nchunks;
+      g_timing[i].ns += dns;
+      g_timing[i].iters += iters;
       frt_pal_unlock();
       return;
     }
@@ -698,6 +949,8 @@ static void timing_record(const frt_range_t* r, uint64_t dt, int nchunks) {
     g_timing[g_ntiming].cycles = dt;
     g_timing[g_ntiming].count = 1;
     g_timing[g_ntiming].nchunks = nchunks;
+    g_timing[g_ntiming].ns = dns;
+    g_timing[g_ntiming].iters = iters;
     g_ntiming++;
   }
   frt_pal_unlock();
@@ -732,8 +985,8 @@ int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
   _Atomic int64_t remaining = nchunks;
   atomic_fetch_add(&g_activeRegions, 1);
 
-  uint64_t t0 = 0;
-  if (g_timingOn) t0 = frt_rdtsc();
+  uint64_t t0 = 0, n0 = 0;
+  if (g_timingOn) { t0 = frt_rdtsc(); n0 = frt_pal_time_ns(); }
 
   region_dispatch(r, ctxout, nchunks, bs, &remaining, laneClassOf(r));
 
@@ -744,9 +997,9 @@ int32_t frt_parfor(frt_range_t* r, void** ctxout, int32_t maxctx) {
 
   /* Stage R2: timing-table update is now under g_timing_mu so concurrent
    * parfor regions (nested or sibling) cannot race on the slot array or
-   * on g_ntiming. */
+   * on g_ntiming.  Wall-ns rides along. */
   if (g_timingOn)
-    timing_record(r, frt_rdtsc() - t0, nchunks);
+    timing_record(r, frt_rdtsc() - t0, frt_pal_time_ns() - n0, nchunks);
   return nchunks;
 }
 
@@ -789,7 +1042,8 @@ int64_t frt_parfor_pair(frt_range_t* a, void** ctxA,
     return (int64_t)(uint32_t)nA;
   }
 
-  uint64_t t0 = 0;
+  uint64_t t0 = 0, n0 = 0;
+  if (g_timingOn) { t0 = frt_rdtsc(); n0 = frt_pal_time_ns(); }
   if (g_timingOn) t0 = frt_rdtsc();
 
   /* serial cutoff per region, in source order */
@@ -851,9 +1105,10 @@ int64_t frt_parfor_pair(frt_range_t* a, void** ctxA,
   atomic_fetch_add(&g_statPairedRegions, 1);
   if (g_timingOn) {
     /* one wall-clock entry under the FIRST region's tag; the pair note
-     * (SI line) separates paired regions from ordinary ones */
-    timing_record(a, frt_rdtsc() - t0, nA + nB + (inlineA ? 1 : 0) +
-                                           (inlineB ? 1 : 0));
+     * (SI line) separates paired regions from ordinary ones.  The wall-ns
+     * rides along exactly like the single-region path */
+    timing_record(a, frt_rdtsc() - t0, frt_pal_time_ns() - n0,
+                  nA + nB + (inlineA ? 1 : 0) + (inlineB ? 1 : 0));
   }
   /* an inline region reports nchunks == 1 exactly like frt_parfor would
    * (the caller's combine loop then visits its single ctx) */
@@ -978,15 +1233,25 @@ static void frt_timing_write(void) {
   }
   FILE* f = fopen(out, "w");
   if (!f) return;
-  fprintf(f, "FRESHET-TIMING 1\n");
+  /* v2 extends the PF line with <wall-ns> <iters> <instr>
+   * <llc-miss> — measured wall time (the report's bytes/s and FLOP/s
+   * denominator), measured iteration count (multiplied by the
+   * compiler's static per-iter census) and the per-thread hardware
+   * counter deltas (0 = counters off/unavailable).  v1 files parse
+   * identically because the reader keys on the header. */
+  fprintf(f, "FRESHET-TIMING 2\n");
   frt_pal_lock();
   for (int i = 0; i < g_ntiming; i++) {
-    fprintf(f, "PF %llx %llx %lld %lld %d\n",
+    fprintf(f, "PF %llx %llx %lld %lld %d %llu %lld %llu %llu\n",
             (unsigned long long)g_timing[i].tag,
             (unsigned long long)g_timing[i].cycles,
             (long long)g_timing[i].count,
             (long long)g_timing[i].nchunks,
-            g_pinFails);
+            g_pinFails,
+            (unsigned long long)g_timing[i].ns,
+            (long long)g_timing[i].iters,
+            (unsigned long long)g_timing[i].instr,
+            (unsigned long long)g_timing[i].llc);
   }
   frt_pal_unlock();
   /* §10.1 scheduler stats: how many regions ran inline (under the serial
@@ -1004,7 +1269,103 @@ static void frt_timing_write(void) {
             (long long)atomic_load(&g_memLaneChunks),
             (long long)atomic_load(&g_compLaneChunks));
   }
+  /* NUMA topology + the memory policy the main thread actually
+   * got applied (0 = off, 1 = local, 2 = interleave, -1 = refused by
+   * the host; nodes>1 with policy 0 is the historical default). */
+  fprintf(f, "NU %d %d\n", g_numaNodes,
+          (int)atomic_load(&g_statNumaPolicy));
   frt_pal_fclose(f);
+}
+
+/* ---------------- positioned I/O / mapped windows ----------------
+ * The runtime ABI parfor regions use for disjoint file ranges and
+ * billion-voxel checkpoints: pread/pwrite at an absolute offset (the
+ * FILE* comes from the sequential layer), fsync/ftruncate for durability
+ * and preallocation, and read-only / read-write mmap windows.  The
+ * language reaches these through `extern fn` declarations (the runtime
+ * is linked into every binary) — (registry 05.08.01 extension)
+ * carries the stdlib spelling.
+ */
+int64_t frt_pread(void* f, void* buf, uint64_t n, int64_t off) {
+  return frt_pal_pread(f, buf, n, off);
+}
+int64_t frt_pwrite(void* f, const void* buf, uint64_t n, int64_t off) {
+  return frt_pal_pwrite(f, buf, n, off);
+}
+int32_t frt_fsync(void* f) { return frt_pal_fsync(f); }
+int32_t frt_ftruncate(void* f, int64_t size) {
+  return frt_pal_ftruncate(f, size);
+}
+void* frt_mmap_ro(const char* path, uint64_t* lenOut) {
+  return frt_pal_mmap_ro(path, lenOut);
+}
+void* frt_mmap_rw(const char* path, uint64_t* lenOut) {
+  return frt_pal_mmap_rw(path, lenOut);
+}
+int32_t frt_munmap(void* p, uint64_t len) { return frt_pal_munmap(p, len); }
+
+/* ---------------- machine profile -------------------------------- */
+/* One query, cached for the process; accessors below hand the fields to
+ * the language's freshet.machine_* intrinsics (ch. 25 §4: the query is
+ * observable, side-effect-free and never aborts; 0 = unknown). */
+static frt_machine_t g_machine;
+static int g_machineValid = 0;
+static void frt_machine_init(void) {
+  if (g_machineValid) return;
+  g_machineValid = 1;
+  g_machine.page_bytes = 0;
+  frt_pal_query_machine(&g_machine);
+  if (g_machine.page_bytes <= 0)
+    g_machine.page_bytes = (int64_t)frt_pal_page_size();
+  if (g_machine.threads_logical <= 0)
+    g_machine.threads_logical = frt_pal_ncpu();
+  if (g_machine.numa_nodes <= 0) g_machine.numa_nodes = 1;
+}
+int32_t frt_query_machine(frt_machine_t* out) {
+  frt_machine_init();
+  if (!out) return 0;
+  *out = g_machine;
+  return 1;
+}
+int64_t frt_cores_physical(void)   { frt_machine_init(); return g_machine.cores_physical; }
+int64_t frt_threads_logical(void)  { frt_machine_init(); return g_machine.threads_logical; }
+int64_t frt_smt_on(void)           { frt_machine_init(); return g_machine.smt; }
+int64_t frt_numa_nodes(void)       { frt_machine_init(); return g_machine.numa_nodes; }
+int64_t frt_l1d_bytes(void)        { frt_machine_init(); return g_machine.l1d_bytes; }
+int64_t frt_l2_bytes(void)         { frt_machine_init(); return g_machine.l2_bytes; }
+int64_t frt_l3_bytes(void)         { frt_machine_init(); return g_machine.l3_bytes; }
+int64_t frt_page_bytes(void)       { frt_machine_init(); return g_machine.page_bytes; }
+int64_t frt_mem_total_bytes(void)      { frt_machine_init(); return g_machine.mem_total_bytes; }
+int64_t frt_mem_available_bytes(void)  { frt_machine_init(); return g_machine.mem_available_bytes; }
+
+/* ---------------- ISA ladder for --march-levels -------------------
+ * The canonical ladder the compiler's --march-levels versions index:
+ *   1 = x86-64 (baseline), 2 = x86-64-v2, 3 = x86-64-v3 (AVX2+FMA),
+ *   4 = x86-64-v4 (AVX-512).  frt_march_level() reports the HIGHEST
+ * ladder rung the running CPU supports (CPUID via the compiler's
+ * __builtin_cpu_supports, which the backend compiles against the real
+ * target).  Non-x86 targets report the baseline (1) — the compiler
+ * rejects --march-levels for them at the driver level.  The ifunc
+ * resolver the compiler emits selects the best REQUESTED rung <= this.
+ */
+static int32_t g_marchLevel = -1;
+int32_t frt_march_level(void) {
+  if (g_marchLevel >= 0) return g_marchLevel;
+#if defined(__x86_64__) || defined(__i386__)
+  if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+      __builtin_cpu_supports("avx512cd") && __builtin_cpu_supports("avx512dq") &&
+      __builtin_cpu_supports("avx512vl"))
+    g_marchLevel = 4;
+  else if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+    g_marchLevel = 3;
+  else if (__builtin_cpu_supports("sse4.2"))
+    g_marchLevel = 2;
+  else
+    g_marchLevel = 1;
+#else
+  g_marchLevel = 1;   /* baseline on non-x86 targets */
+#endif
+  return g_marchLevel;
 }
 
 /* ---------------- init --------------------------------------------------- */
@@ -1044,6 +1405,15 @@ void frt_init(void) {
     g_timingOn = 1;
     atexit(frt_timing_write);
   }
+  /* (registry 10.06.01): hardware counters per thread.  Off by
+   * default; FRT_PERF=1 opts in.  Opening on the MAIN thread here
+   * (workers open theirs at start); a refused PMU turns the feature
+   * off for the whole run — the report then honestly prints absent. */
+  const char* pf = frt_getenv("FRT_PERF");
+  if (pf && pf[0] == '1') {
+    g_perfOn = 1;
+    perf_thread_open();
+  }
   /* mem & vectorisation stage: SMT memory/compute interleave.  Off by
    * default; when enabled, the sysfs topology is probed once and the
    * worker pool gains lane preferences (see the SMT lanes block).  The
@@ -1052,6 +1422,20 @@ void frt_init(void) {
   if (si && si[0] == '1') {
     g_smtInterleave = 1;
     detect_smt();
+  }
+  /* FRT_NUMA=local|interleave (anything else = off).  The main
+   * thread applies the policy NOW, before the program's first touch of
+   * any big allocation; the pool workers apply theirs at thread start.
+   * g_numaNodes is cached for the report/timing line. */
+  {
+    const char* np = frt_getenv("FRT_NUMA");
+    if (np && np[0] == 'l') g_numaPolicy = 1;        /* local */
+    else if (np && np[0] == 'i') g_numaPolicy = 2;   /* interleave */
+    g_numaNodes = frt_pal_numa_nodes();
+    if (g_numaNodes > 1) {
+      int applied = frt_pal_numa_policy(g_numaPolicy);
+      atomic_store(&g_statNumaPolicy, applied);
+    }
   }
 }
 

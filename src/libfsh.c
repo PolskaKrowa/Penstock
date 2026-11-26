@@ -442,19 +442,64 @@ int64_t fsh_random_range_i64(uint64_t seed, uint64_t stream, uint64_t counter,
   return lo + (int64_t)(u % range);
 }
 
-/* ---------------- SIMD (scalar fallback) ---------------------------- */
-#if !FSH_HAS_NATIVE_SIMD
+/* ---------------- SIMD ------------------------------------------------
+ * the native
+ * backends (libfsh_simd_x86.c / libfsh_simd_arm.c) now exist.  When one
+ * links beside this TU (cmake adds it for the host), it is compiled with
+ * -DFSH_LIBFSH_SIMD_EXTERNAL and this scalar fallback is skipped — the
+ * backend owns the symbols.  Without a backend, this fallback is the
+ * complete portable surface (all four widths, fused ops via libm fma()
+ * so the single-rounding contract holds even on the scalar rung). */
+#if !defined(FSH_LIBFSH_SIMD_EXTERNAL)
+fsh_f64x2 fsh_load_f64x2(const double* p) {
+  fsh_f64x2 v; memcpy(v.v, p, sizeof v.v); return v;
+}
+fsh_f64x2 fsh_loadu_f64x2(const double* p) {
+  fsh_f64x2 v; memcpy(v.v, p, sizeof v.v); return v;
+}
+void fsh_store_f64x2(double* p, fsh_f64x2 v) { memcpy(p, v.v, sizeof v.v); }
+void fsh_storeu_f64x2(double* p, fsh_f64x2 v) { memcpy(p, v.v, sizeof v.v); }
 fsh_f64x4 fsh_load_f64x4(const double* p) {
-  fsh_f64x4 v; for (int i = 0; i < 4; ++i) v.v[i] = p[i]; return v;
+  fsh_f64x4 v; memcpy(v.v, p, sizeof v.v); return v;
 }
 fsh_f64x4 fsh_loadu_f64x4(const double* p) {
-  fsh_f64x4 v; for (int i = 0; i < 4; ++i) v.v[i] = p[i]; return v;
+  fsh_f64x4 v; memcpy(v.v, p, sizeof v.v); return v;
 }
-void fsh_store_f64x4(double* p, fsh_f64x4 v) {
-  for (int i = 0; i < 4; ++i) p[i] = v.v[i];
+void fsh_store_f64x4(double* p, fsh_f64x4 v) { memcpy(p, v.v, sizeof v.v); }
+void fsh_storeu_f64x4(double* p, fsh_f64x4 v) { memcpy(p, v.v, sizeof v.v); }
+fsh_f32x4 fsh_load_f32x4(const float* p) {
+  fsh_f32x4 v; memcpy(v.v, p, sizeof v.v); return v;
 }
-void fsh_storeu_f64x4(double* p, fsh_f64x4 v) {
-  for (int i = 0; i < 4; ++i) p[i] = v.v[i];
+fsh_f32x4 fsh_loadu_f32x4(const float* p) {
+  fsh_f32x4 v; memcpy(v.v, p, sizeof v.v); return v;
+}
+void fsh_store_f32x4(float* p, fsh_f32x4 v) { memcpy(p, v.v, sizeof v.v); }
+void fsh_storeu_f32x4(float* p, fsh_f32x4 v) { memcpy(p, v.v, sizeof v.v); }
+fsh_f32x8 fsh_load_f32x8(const float* p) {
+  fsh_f32x8 v; memcpy(v.v, p, sizeof v.v); return v;
+}
+fsh_f32x8 fsh_loadu_f32x8(const float* p) {
+  fsh_f32x8 v; memcpy(v.v, p, sizeof v.v); return v;
+}
+void fsh_store_f32x8(float* p, fsh_f32x8 v) { memcpy(p, v.v, sizeof v.v); }
+void fsh_storeu_f32x8(float* p, fsh_f32x8 v) { memcpy(p, v.v, sizeof v.v); }
+
+fsh_f64x2 fsh_add_f64x2(fsh_f64x2 a, fsh_f64x2 b) {
+  fsh_f64x2 r; for (int i = 0; i < 2; ++i) r.v[i] = a.v[i] + b.v[i]; return r;
+}
+fsh_f64x2 fsh_sub_f64x2(fsh_f64x2 a, fsh_f64x2 b) {
+  fsh_f64x2 r; for (int i = 0; i < 2; ++i) r.v[i] = a.v[i] - b.v[i]; return r;
+}
+fsh_f64x2 fsh_mul_f64x2(fsh_f64x2 a, fsh_f64x2 b) {
+  fsh_f64x2 r; for (int i = 0; i < 2; ++i) r.v[i] = a.v[i] * b.v[i]; return r;
+}
+fsh_f64x2 fsh_div_f64x2(fsh_f64x2 a, fsh_f64x2 b) {
+  fsh_f64x2 r; for (int i = 0; i < 2; ++i) r.v[i] = a.v[i] / b.v[i]; return r;
+}
+fsh_f64x2 fsh_fma_f64x2(fsh_f64x2 a, fsh_f64x2 b, fsh_f64x2 c) {
+  fsh_f64x2 r;
+  for (int i = 0; i < 2; ++i) r.v[i] = fma(a.v[i], b.v[i], c.v[i]);
+  return r;
 }
 fsh_f64x4 fsh_add_f64x4(fsh_f64x4 a, fsh_f64x4 b) {
   fsh_f64x4 r; for (int i = 0; i < 4; ++i) r.v[i] = a.v[i] + b.v[i]; return r;
@@ -469,27 +514,45 @@ fsh_f64x4 fsh_div_f64x4(fsh_f64x4 a, fsh_f64x4 b) {
   fsh_f64x4 r; for (int i = 0; i < 4; ++i) r.v[i] = a.v[i] / b.v[i]; return r;
 }
 fsh_f64x4 fsh_fma_f64x4(fsh_f64x4 a, fsh_f64x4 b, fsh_f64x4 c) {
-  fsh_f64x4 r; for (int i = 0; i < 4; ++i) r.v[i] = a.v[i] * b.v[i] + c.v[i];
+  fsh_f64x4 r;
+  for (int i = 0; i < 4; ++i) r.v[i] = fma(a.v[i], b.v[i], c.v[i]);
   return r;
 }
-double fsh_hsum_f64x4(fsh_f64x4 v) {
-  double s = 0; for (int i = 0; i < 4; ++i) s += v.v[i]; return s;
+fsh_f32x4 fsh_add_f32x4(fsh_f32x4 a, fsh_f32x4 b) {
+  fsh_f32x4 r; for (int i = 0; i < 4; ++i) r.v[i] = a.v[i] + b.v[i]; return r;
 }
-#else
-/* Native SIMD implementations are future work in separate per-target .c
- * files (libfsh_simd_x86.c, libfsh_simd_arm.c); the scalar fallback above
- * is the MVP default.  A future build can compile the native backends and
- * link them in. */
-fsh_f64x4 fsh_load_f64x4(const double* p);
-fsh_f64x4 fsh_loadu_f64x4(const double* p);
-void fsh_store_f64x4(double* p, fsh_f64x4 v);
-void fsh_storeu_f64x4(double* p, fsh_f64x4 v);
-fsh_f64x4 fsh_add_f64x4(fsh_f64x4 a, fsh_f64x4 b);
-fsh_f64x4 fsh_sub_f64x4(fsh_f64x4 a, fsh_f64x4 b);
-fsh_f64x4 fsh_mul_f64x4(fsh_f64x4 a, fsh_f64x4 b);
-fsh_f64x4 fsh_div_f64x4(fsh_f64x4 a, fsh_f64x4 b);
-fsh_f64x4 fsh_fma_f64x4(fsh_f64x4 a, fsh_f64x4 b, fsh_f64x4 c);
-double fsh_hsum_f64x4(fsh_f64x4 v);
+fsh_f32x4 fsh_mul_f32x4(fsh_f32x4 a, fsh_f32x4 b) {
+  fsh_f32x4 r; for (int i = 0; i < 4; ++i) r.v[i] = a.v[i] * b.v[i]; return r;
+}
+fsh_f32x4 fsh_fma_f32x4(fsh_f32x4 a, fsh_f32x4 b, fsh_f32x4 c) {
+  fsh_f32x4 r;
+  for (int i = 0; i < 4; ++i) r.v[i] = fmaf(a.v[i], b.v[i], c.v[i]);
+  return r;
+}
+fsh_f32x8 fsh_add_f32x8(fsh_f32x8 a, fsh_f32x8 b) {
+  fsh_f32x8 r; for (int i = 0; i < 8; ++i) r.v[i] = a.v[i] + b.v[i]; return r;
+}
+fsh_f32x8 fsh_mul_f32x8(fsh_f32x8 a, fsh_f32x8 b) {
+  fsh_f32x8 r; for (int i = 0; i < 8; ++i) r.v[i] = a.v[i] * b.v[i]; return r;
+}
+fsh_f32x8 fsh_fma_f32x8(fsh_f32x8 a, fsh_f32x8 b, fsh_f32x8 c) {
+  fsh_f32x8 r;
+  for (int i = 0; i < 8; ++i) r.v[i] = fmaf(a.v[i], b.v[i], c.v[i]);
+  return r;
+}
+double fsh_hsum_f64x2(fsh_f64x2 v) { return v.v[0] + v.v[1]; }
+double fsh_hsum_f64x4(fsh_f64x4 v) {
+  return (v.v[0] + v.v[1]) + (v.v[2] + v.v[3]);
+}
+float fsh_hsum_f32x4(fsh_f32x4 v) {
+  return (v.v[0] + v.v[1]) + (v.v[2] + v.v[3]);
+}
+float fsh_hsum_f32x8(fsh_f32x8 v) {
+  float lo = (v.v[0] + v.v[1]) + (v.v[2] + v.v[3]);
+  float hi = (v.v[4] + v.v[5]) + (v.v[6] + v.v[7]);
+  return lo + hi;
+}
+int fsh_simd_level(void) { return 0; }   /* scalar rung: no backend */
 #endif
 
 void fsh_prefetch_r(const void* p) {

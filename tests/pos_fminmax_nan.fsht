@@ -1,0 +1,32 @@
+// acceptance: scalar fmin/fmax + reduction(min:/max:) link and run
+// across the LLVM 19-23 matrix, with NaN and signed-zero goldens.
+fn pick(a: f64, b: f64, c: i64) -> f64 {
+    if (c == 1) { return a; }
+    return b;
+}
+fn main() {
+    let nan: f64 = 0.0 / 0.0;
+    // scalar builtins: minnum/maxnum ignore quiet-NaN operands
+    print_i64(fmin(nan, 1.0) as i64); println();
+    print_i64(fmin(1.0, nan) as i64); println();
+    print_i64(fmax(nan, 1.0) as i64); println();
+    print_i64(fmin(2.0, 5.0) as i64); println();
+    print_i64(fmax(2.0, 5.0) as i64); println();
+    // float parfor reductions over dyadic values (exact in f64)
+    let mut mn: f64 = 100.0;
+    let mut mx: f64 = -100.0;
+    parfor (i in 0..8) [reduction(min:mn)] {
+        mn = fmin(mn, (i as f64) * 0.25);
+    }
+    parfor (i in 0..8) [reduction(max:mx)] {
+        mx = fmax(mx, (i as f64) * 0.25);
+    }
+    print_i64((mn * 4.0) as i64); println();
+    print_i64((mx * 4.0) as i64); println();
+    // NaN-ignoring reduction: one NaN element, rest finite
+    let mut m2: f64 = 100.0;
+    parfor (i in 0..4) [reduction(min:m2)] {
+        m2 = fmin(m2, pick(nan, (i as f64), i as i64));
+    }
+    print_i64((m2 * 1.0) as i64); println();
+}

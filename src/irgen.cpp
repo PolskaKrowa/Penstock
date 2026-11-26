@@ -96,6 +96,34 @@ declare { double, i32 } @frt_parse_f64(ptr, i64)
 declare i64 @frt_sm64_next(ptr)
 declare i64 @frt_page_size()
 declare i64 @frt_gcd_i64(i64, i64)
+; fallible and
+; explicitly-aligned allocation + the machine-profile query runtime.
+; try_malloc returns NULL on exhaustion (the Option<*T> builtin wraps it);
+; malloc_aligned carries the caller's alignment promise (>= 16); the
+; machine accessors read the cached frt_machine_t (0 = unknown, ch. 25).
+declare ptr @frt_try_malloc(i64, i64)
+declare ptr @frt_malloc_aligned(i64, i64)
+declare i64 @frt_cores_physical()
+declare i64 @frt_threads_logical()
+declare i64 @frt_smt_on()
+declare i64 @frt_numa_nodes()
+declare i64 @frt_l1d_bytes()
+declare i64 @frt_l2_bytes()
+declare i64 @frt_l3_bytes()
+declare i64 @frt_page_bytes()
+declare i64 @frt_mem_total_bytes()
+declare i64 @frt_mem_available_bytes()
+; the ifunc resolver's CPUID-backed ISA ladder probe (1=x86-64
+; .. 4=x86-64-v4; non-x86 reports the baseline)
+declare i32 @frt_march_level()
+; assume_aligned lowers to llvm.assume of the alignment predicate
+; (vectorisers then drop peel/remainder code for the promised alignment)
+declare void @llvm.assume(i1)
+; the fma builtin — exact single-rounding a*b+c (llvm.fma exists
+; on the whole 19-23 matrix; @reproducible regions pin strict FP so the
+; result stays bit-identical across thread counts)
+declare double @llvm.fma.f64(double, double, double)
+declare float @llvm.fma.f32(float, float, float)
 ; fsht-03:02 (ch. 24 §4): the String migration's new operations
 declare void @frt_string_clone(ptr, ptr)
 declare void @frt_string_clear(ptr)
@@ -554,9 +582,11 @@ bool irgenProgram(Program* p, const std::string& outLl) {
 
   // ---------------- runtime decls
   out << RUNTIME_DECLS << "\n";
-  // Backend-matrix FP min/max (LLVM 19-23): LLVM 19 spells them
-  // llvm.minnum/llvm.maxnum, LLVM 20+ llvm.fmin/llvm.fmax — emit the
-  // resolved backend's spelling (g_backendLlvmMajor, common.h).
+  // Backend-matrix FP min/max (LLVM 19-23): llvm.minnum /
+  // llvm.maxnum exist on every LLVM of the matrix (see common.h's
+  // corrected note); the historical >= 20 arm selected the non-existent
+  // llvm.fmin/llvm.fmax spelling and the link failed with
+  // "undefined reference to llvm.fmin.f64".
   out << "declare double @" << llvmFminBase() << ".f64(double, double)\n"
       << "declare double @" << llvmFmaxBase() << ".f64(double, double)\n"
       << "declare float @" << llvmFminBase() << ".f32(float, float)\n"
@@ -608,6 +638,47 @@ bool irgenProgram(Program* p, const std::string& outLl) {
 
   // ---------------- parfor chunk fns
   for (auto& c : G->chunkFns) out << c;
+
+  // ---------------- ifunc resolvers for --march-levels ----------
+  // Every region N emitted .L0 (baseline) plus .L1..Lk versions.  The
+  // @__pf_body_N symbol becomes an IFUNC whose resolver asks the
+  // runtime's CPUID ladder probe (frt_march_level: 1=x86-64 ..
+  // 4=x86-64-v4) and selects the best REQUESTED rung the CPU supports —
+  // one artefact runs on a desktop AVX2 machine and an AVX-512 server
+  // on their own best paths.  The link materialises this as an
+  // IRELATIVE relocation; static and PIE links both resolve it.
+  if (g_opts.marchLevels.size() > 1) {
+    static const std::map<std::string, int> ladder = {
+      {"x86-64", 1}, {"x86-64-v2", 2}, {"x86-64-v3", 3}, {"x86-64-v4", 4},
+    };
+    for (int N = 0; N < G->parforCounter; ++N) {
+      std::vector<int> rungs;   // ladder indices, baseline first
+      for (auto& lvl : g_opts.marchLevels) {
+        auto it = ladder.find(lvl);
+        if (it != ladder.end()) rungs.push_back(it->second);
+      }
+      if (rungs.empty() || rungs[0] == 0) continue;
+      std::string name = "__pf_body_" + std::to_string(N);
+      out << "@" << name << " = ifunc void (i64, i64, ptr, i64), ptr @"
+          << name << ".resolver\n";
+      out << "define internal ptr @" << name << ".resolver() {\n";
+      out << "entry:\n";
+      out << "  %lv = call i32 @frt_march_level()\n";
+      // chain from the highest requested rung down: acc = baseline ptr;
+      // acc = select(cpu >= rung) ? version@rung : acc
+      std::string acc = "@" + name + ".L0";
+      for (size_t i = 1; i < rungs.size(); ++i) {
+        std::string cnd = "%lv" + std::to_string(i);
+        out << "  " << cnd << " = icmp uge i32 %lv, " << rungs[i] << "\n";
+        std::string sel = "%pf" + std::to_string(i);
+        out << "  " << sel << " = select i1 " << cnd << ", ptr @" << name
+            << ".L" << i << ", ptr " << acc << "\n";
+        acc = sel;
+      }
+      out << "  ret ptr " << acc << "\n";
+      out << "}\n\n";
+    }
+  }
 
   // ---------------- profile data globals + registration patch
   std::string body = out.str();

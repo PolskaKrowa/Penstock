@@ -13,6 +13,7 @@
 #include <memory>
 #include <cassert>
 #include <functional>
+#include <type_traits>   // pickVisible's trait-impl exemption
 #include "diag_codes.h"
 
 namespace freshet {
@@ -582,8 +583,9 @@ struct Expr {
 struct ParForClause {
   enum K { REDUCTION, THREADS, CHUNK, AFFINITY, COLLAPSE };
   K k;
-  std::string redOp;      // "+", "*", min, max
+  std::string redOp;      // "+", "*", min, max — and argmin/argmax
   std::string var;        // reduction accumulator name
+  std::string var2;        // argmin/argmax INDEX accumulator name
   Expr* e = nullptr;      // threads/chunk expr
   int ival = 0;           // collapse
   std::string sval;       // affinity: "close"|"spread"
@@ -616,6 +618,12 @@ struct Stmt {
   std::string tyName;   // late-bound struct/soa type name
   std::string op2;      // assignment operator ("=", "+=", ...)
   bool pDescending = false;  // parfor i in a..b by -1
+  // `parfor i in
+  // a..b by S` with a compile-time positive stride S (colour smoothers:
+  // the eight-colour sweep is `i in c..n by 2`).  The chunk fn's
+  // induction adds S per latch; the runtime's block partition over
+  // [a,b) is unchanged (every grid value belongs to exactly one block).
+  Expr* pstep = nullptr;      // INT literal > 0
   // LET
   std::string var; Type* annTy = nullptr; bool mut = false; bool hasAnn = false;
   Expr* init = nullptr;
@@ -733,6 +741,12 @@ struct FnDecl {
   std::string retTyName;
   Stmt* body = nullptr;
   bool strictfp = false;    // @strictfp: disable fast-math
+  // @fma_contract —
+  // permit ONLY floating-point contraction (a*b+c into one rounded FMA)
+  // inside this function; NO reassociation and NO NaN/signed-zero
+  // relaxation.  The third row of ch. 13's mode table; strictly weaker
+  // than @fastmath, orthogonal to @strictfp (which still wins).
+  bool fmaContract = false;
   // Policy §8 Option A: fast-math is now OPT-IN. The language default is
   // IEEE-754-like strict per-operation semantics; `@fastmath` on a fn (or
   // `--fast-math` globally) re-enables the relaxed contract.
@@ -961,6 +975,18 @@ struct Options {
   std::string targetTriple;
   bool portable = false;            // --portable: baseline x86-64, no -march=native
 
+  // ---- one artefact,
+  // many machines.  --march-levels=x86-64-v3,x86-64-v4 emits, for every
+  // parfor CHUNK FUNCTION (the hot kernels), one version per level plus a
+  // baseline version, and dispatches through an ifunc resolver that asks
+  // the runtime (frt_march_level, CPUID-backed) for the best supported
+  // level.  The module-level -march becomes the FIRST (baseline) entry so
+  // all non-versioned code stays compatible with the weakest machine.
+  // Entries must be strictly ascending on the canonical ladder
+  // x86-64 < x86-64-v2 < x86-64-v3 < x86-64-v4; the flag is x86-only
+  // (the resolver's CPUID probe is an x86 facility, ch. 25).
+  std::vector<std::string> marchLevels;
+
   // ---- report §7: performance-diagnostics policy -----------------------
   // Default: correctness diagnostics are errors, performance diagnostics
   // are warnings — a slow-but-correct program compiles.  `--strict-
@@ -1144,17 +1170,39 @@ bool emitCHeader(Program* p, const std::string& path);
 
 // Resolved backend LLVM major (0 = not probed yet).  main.cpp scrapes it
 // from the backend clang --version once per invocation, before IRgen.
-// The backend matrix spans LLVM 19-23, and a few intrinsic spellings
-// changed across it — notably FP min/max: LLVM 19 spells them
-// llvm.minnum/llvm.maxnum; LLVM 20+ renamed them llvm.fmin/llvm.fmax
-// (19's parser treats the new spelling as an unknown external symbol
-// and the link fails with "undefined reference to llvm.fmin.f64").
+//
+// CORRECTED spelling
+// matrix, verified against LLVM itself (the historical comment below was
+// wrong): LLVM 19..23 ALL spell the NaN-quiet FP min/max intrinsics
+// `llvm.minnum` / `llvm.maxnum`.  No LLVM release ever renamed them to
+// `llvm.fmin` / `llvm.fmax` — those identifiers DO NOT EXIST as
+// intrinsics: the LLVM parser happily accepts a declaration of
+// `@llvm.fmin.f64` (any `llvm.`-prefixed declare parses), but the
+// code generator does not recognise it as an intrinsic, so it lowers to
+// an indirect call against an unresolved external symbol and the link
+// fails with "undefined reference to llvm.fmin.f64" — exactly the
+// failure Freshet-Scientific 0.2.1/0.3.0 hit with `reduction(min:/max:)`
+// and the scalar fmin/fmax builtins on LLVM 20-23 backends.
+//
+// What LLVM 20+ DID add is the *different* pair
+// `llvm.minimumnum` / `llvm.maximumnum` (IEEE 754-2019 minimumNumber/
+// maximumNumber semantics: a quiet NaN operand loses to the number,
+// signalling NaN behaviour defined).  That is a semantics CHANGE, not a
+// rename, so it must not be selected blindly; `minnum`/`maxnum` keep the
+// documented ch. 13 semantics on the whole 19-23 matrix and are the
+// spelling used everywhere below (see also irgen_call.cpp: the scalar
+// `fmin`/`fmax` builtins, the `clamp` lowering, and irgen_parfor.cpp:
+// float reduction combine — all previously split between two spellings).
 extern int g_backendLlvmMajor;
 inline const char* llvmFminBase() {
-  return g_backendLlvmMajor >= 20 ? "llvm.fmin" : "llvm.minnum";
+  // llvm.minnum exists on every LLVM of the supported matrix
+  // (19..23); the >= 20 arm of the historical version switch selected
+  // the non-existent llvm.fmin spelling.
+  return "llvm.minnum";
 }
 inline const char* llvmFmaxBase() {
-  return g_backendLlvmMajor >= 20 ? "llvm.fmax" : "llvm.maxnum";
+  // llvm.maxnum, likewise.
+  return "llvm.maxnum";
 }
 // Stage B5: consult after runStrictChecks().  Returns true iff the given
 // @alias pair on `fn` was violated by at least one caller in this
@@ -1349,6 +1397,27 @@ D* pickVisible(const std::vector<D*>& cands, const std::string& name,
     // directly-imported module
     bool vis = d->module.empty() || d->module == currentLookupModule() ||
                (d->isPub && moduleVisibleFrom(d->module));
+    // a TRAIT IMPL
+    // member function is visible wherever its mangled name is known.
+    // Impl members are addressed exclusively through trait resolution
+    // (rewriteTraitCallsInBody / resolveTraitMethodCall), which is a
+    // GLOBAL registry lookup, not an import-graph lookup — the call
+    // sites arise inside GENERIC INSTANCE bodies that sema binds under
+    // the TEMPLATE's module (numerics), while the impl fn lives in the
+    // implementing module (mechanics).  The intended architecture
+    // (Freshet-Scientific: Mechanics implements operators, Numerics
+    // hosts the generic CG) has mechanics import numerics, never the
+    // reverse, so the historical visibility filter made every such impl
+    // unreachable with F0004 ("lives in module 'mechanics', which is not
+    // imported here") and forced solver authors to define operator
+    // types inside the solver's own module.  The visibility gate for an
+    // impl is instead: the trait and the target TYPE are nameable from
+    // the module that declared them (checked where the impl block is
+    // declared), and the fn is marked pub by the 1c pass below.  This
+    // exemption applies ONLY to impl members (isTraitImpl) — ordinary
+    // cross-module fns keep the full import rule.
+    if constexpr (std::is_same_v<D, FnDecl>)
+      vis = vis || (d->isTraitImpl && d->isPub);
     if (vis) { if (!found) found = d; ++nvis; }
   }
   if (nvis == 1) return found;

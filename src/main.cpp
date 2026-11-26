@@ -55,6 +55,12 @@ static const char* USAGE =
     "  --no-precompute    disable finite-domain mapping / algorithm rewriting\n"
     "  --evo-runtime-tune opt into the legacy execute-and-time -O4 tuner\n"
     "  -march=<target>    CPU target (default native)\n"
+    "  --march-levels=l1,l2,...  function multi-versioning for the hot\n"
+    "                    kernels (parfor chunk fns): one version per ISA\n"
+    "                    rung + an ifunc resolver (CPUID dispatch at load).\n"
+    "                    Rungs: x86-64 < x86-64-v2 < x86-64-v3 (AVX2) <\n"
+    "                    x86-64-v4 (AVX-512); the first entry is the module\n"
+    "                    baseline, so ONE binary runs on desktop and server.\n"
     "  --keep-ir          keep intermediate .ll next to the output\n"
     "  --ir-out=<file>    write IR to <file> and stop (like -S)\n"
     "  --run              run the produced binary (passes through argv)\n"
@@ -1271,6 +1277,21 @@ int main(int argc, char** argv) {
       continue;
     }
     if (a.rfind("-march=", 0) == 0) { g_opts.march = a.substr(7); continue; }
+    // --march-levels=l1,l2,... — one artefact, many machines: the
+    // parfor chunk fns (hot kernels) are emitted once per ISA rung and
+    // dispatched through an ifunc resolver backed by the runtime's CPUID
+    // ladder probe.  Entries must be strictly ascending on the ladder
+    // x86-64 < x86-64-v2 < x86-64-v3 < x86-64-v4; validated (and the
+    // x86-ness of the target checked) after the target probe resolves.
+    if (a.rfind("--march-levels=", 0) == 0) {
+      std::string spec = a.substr(15);
+      g_opts.marchLevels.clear();
+      std::stringstream ss(spec);
+      std::string item;
+      while (std::getline(ss, item, ','))
+        if (!item.empty()) g_opts.marchLevels.push_back(item);
+      continue;
+    }
     if (a == "--keep-ir") { g_opts.keepIr = true; continue; }
     if (a.rfind("--ir-out=", 0) == 0) { g_opts.irOut = a.substr(9); continue; }
     if (a == "--run") { g_opts.run = true; continue; }
@@ -1616,8 +1637,11 @@ int main(int argc, char** argv) {
     }
   }
   g_backend = "LLVM " + (llvmVer.empty() ? "<unknown>" : llvmVer) + " (" + llvmRoot + ")";
-  // backend-matrix spellings (common.h llvmFminBase/llvmFmaxBase): LLVM 19
-  // vs 20+ intrinsic names differ; record the major before IRgen runs
+  // backend-matrix spellings (common.h llvmFminBase/llvmFmaxBase): corrected
+  // the historical belief that LLVM 20+ renamed llvm.minnum —
+  // the intrinsic is llvm.minnum/llvm.maxnum on the whole 19..23 matrix
+  // (g_backendLlvmMajor stays scraped for the runtime IR cache key and
+  // the report); record the major before IRgen runs
   g_backendLlvmMajor = atoi(llvmMajor.c_str());
 
   // ---------------------------------------- 0.4 fsht-03:03 target matrix
@@ -1728,6 +1752,47 @@ int main(int argc, char** argv) {
                 tr.c_str());
     }
     if (g_opts.portable && g_opts.march == "native") g_opts.march = "x86-64";
+    // validation: rung spellings, strict ascent, x86-ness of the
+    // resolved target; the module-level march becomes the BASELINE rung
+    // so every non-versioned function stays compatible with the weakest
+    // machine the artefact targets.
+    if (!g_opts.marchLevels.empty()) {
+      static const std::map<std::string, int> ladder = {
+        {"x86-64", 1}, {"x86-64-v2", 2}, {"x86-64-v3", 3}, {"x86-64-v4", 4},
+      };
+      int prev = 0;
+      bool ok = true;
+      for (auto& lvl : g_opts.marchLevels) {
+        auto it = ladder.find(lvl);
+        if (it == ladder.end()) {
+          diag(Diag::Error, Code::UnsupportedTarget,
+               "unknown --march-levels entry '" + lvl + "' — the ladder is "
+               "x86-64, x86-64-v2, x86-64-v3 (AVX2+FMA), x86-64-v4 "
+               "(AVX-512)", "", 0, 0);
+          ok = false;
+          break;
+        }
+        if (it->second <= prev) {
+          diag(Diag::Error, Code::UnsupportedTarget,
+               "--march-levels must be strictly ascending on the ladder "
+               "(got '" + lvl + "' after a higher/equal rung)", "", 0, 0);
+          ok = false;
+          break;
+        }
+        prev = it->second;
+      }
+      bool x86 = g_targetTriple.rfind("x86_64", 0) == 0 ||
+                 g_targetTriple.rfind("x86-64", 0) == 0 ||
+                 g_targetTriple.find("amd64") != std::string::npos;
+      if (!x86) {
+        diag(Diag::Error, Code::UnsupportedTarget,
+             "--march-levels is an x86-64 facility (CPUID dispatch); target "
+             "is '" + g_targetTriple + "'", "", 0, 0);
+        ok = false;
+      }
+      if (!ok) { printDiags(); return 1; }
+      g_opts.march = g_opts.marchLevels.front();
+    }
   }
 
   // --------------------------------------------- 0.6 §11.2 LLVM IR PGO
@@ -1771,6 +1836,9 @@ int main(int argc, char** argv) {
     std::string key = std::string("penstock|") + FRESHET_VERSION +
                       "|O" + std::to_string(g_opts.optLevel) +
                       "|m=" + g_opts.march +
+                      (g_opts.marchLevels.empty() ? "" : "|lv=" +
+                       [&]{ std::string s; for (auto& l : g_opts.marchLevels)
+                              s += (s.empty() ? "" : ",") + l; return s; }()) +
                       "|t=" + g_targetTriple +   // §12: --target switch = rebuild
                       "|out=" + g_opts.output +
                       (g_opts.debugInfo ? "|g" : "") +

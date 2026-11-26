@@ -86,6 +86,54 @@ run_ok "hello/basics" tests/pos_basics.fsht "10.00|hi"
 run_ok "for-range" tests/pos_range.fsht "10"
 run_ok "parfor reduction" tests/pos_parfor.fsht "8000000"
 run_ok "defer+free ownership" tests/pos_defer.fsht "45"
+# scalar fmin/fmax and
+# reduction(min:/max:) lower to llvm.minnum/llvm.maxnum — the spelling that
+# exists on every LLVM 19..23 — with NaN-ignoring goldens.  (The historical
+# >= 20 arm of the version switch emitted llvm.fmin, which codegen treated
+# as an unresolved external: "undefined reference to llvm.fmin.f64".)
+run_ok "fmin/fmax + reduction(min/max) NaN goldens" tests/pos_fminmax_nan.fsht "1|1|1|2|5|0|7|0"
+# the three reported
+# reference-compiler defects.  (b) trait impls resolve cross-module (the
+# Mechanics->Numerics direction), (a) main may instantiate generics, and
+# (c) `borrowed mut` aggregate parameters write back at every exit.
+run_ok "trait impl visible cross-module" tests/pos_trait_xmodule.fsht "42|32" "-Itests/mods"
+run_ok "generic instantiation directly in main" tests/pos_generic_main.fsht "42|4"
+run_ok "borrowed mut aggregate write-back" tests/pos_borrow_mut_writeback.fsht "2|15|15|101"
+# machine query + fallible/aligned allocation.
+# The machine-dependent lines are not pinned; the behavioural goldens are
+# the budget-refusal (None, no abort), the recovered allocation and the
+# aligned path — the run.sh harness checks the FULL stdout, so the
+# machine values are validated by the standalone C harness instead
+# (see the PEN verification notes); this .fsht is the language-surface
+# regression (compile + no abort + correct branches).
+run_ok "machine query + try_malloc + malloc_aligned" tests/pos_machine_query.fsht "*" ""
+# fma builtin (exact single rounding — the golden
+# differs from the two-rounding naive evaluation at the last ulp) and the
+# @fma_contract contraction-only mode (fadd/fmul carry the `contract`
+# flag; nothing else is relaxed).
+run_ok "fma builtin + @fma_contract" tests/pos_fma.fsht "0.005000000000000001|0.005000000000000002|0.0050000004|2.00"
+# one artefact, many machines — parfor chunk fns
+# multi-versioned per ISA rung + ifunc dispatch (CPUID at load).  The
+# checksum is march-independent; the -S .ll inspection (ifunc + L0/L1/L2
+# versions with target-features) is asserted in the IR-level checks.
+run_okf "march levels (FMV hot kernels)" tests/pos_march_levels.fsht "256.00" "--march-levels=x86-64-v2,x86-64-v3,x86-64-v4"
+# `by <positive constant>` strides + a REAL
+# lowering for the historical `by -1` (parsed, never lowered — such a
+# parfor silently ran zero iterations).  Goldens: 1..8 by 2 -> 4 values;
+# 7..0 by -1 -> 7 values; 1..16 by 3 -> 1+4+7+10+13 = 35.
+run_ok "parfor by-step + descending" tests/pos_parfor_by.fsht "4|7|35"
+# argmin/argmax value+index reductions with stable
+# tie-breaking (the first occurrence wins a value tie).  Goldens: min
+# 0.0 at 4; the 1.0 tie resolves to index 1; max 5.0 at 0.
+run_ok "argmin/argmax reductions" tests/pos_argmin.fsht "0.00|4|1|5.00|0"
+# rank-generic grid views (modules/view.fsht) —
+# shape/strides + accessors + halo-stripped interior sub-views over the
+# SAME storage.  Goldens: at3(1,2,1)=2.75; plane(1) at2(2,1)=2.75;
+# interior2(pad 1) of a 4x6 grid -> shape 2x4, element (1,1) = 3.50.
+run_okf "rank-generic grid views" tests/pos_view.fsht "2.75|2.75|2|4|3.50" "-Itests/mods -Imodules"
+# intentional narrowing cast — narrow_cast(x) is
+# the context-typed `as` with the F0211 warning silent.
+run_ok "narrow_cast mixed-precision store" tests/pos_narrow_cast.fsht "1.50|3.50"
 # report §7: performance diagnostics are warnings by default;
 # --strict-performance restores the historical hard errors
 run_warn "F0402 runtime div (warn-first)" tests/neg_arith.fsht F0402

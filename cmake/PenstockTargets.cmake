@@ -132,9 +132,34 @@ set_target_properties(freshet-language-server PROPERTIES
 # for CMakeFiles/libfsh.dir/ and the build fails with
 #   "No rule to make target 'CMakeFiles/libfsh.dir/build'"
 # which is the symptom the user hits when project() enables only CXX.
-add_library(libfsh STATIC
-  src/libfsh.c
-  runtime/frt_rt.c)
+# native SIMD
+# backends for fsh_simd.h.  Exactly ONE backend TU links beside libfsh.c,
+# chosen by the host processor; it is compiled at the BASELINE
+# instruction set (every ISA-specific function carries its own
+# __attribute__((target(...))) and dispatch is ifunc-resolved at load —
+# one object serves scalar, SSE2, AVX2+FMA and AVX-512 CPUs).  libfsh.c
+# is then compiled with FSH_LIBFSH_SIMD_EXTERNAL so its scalar fallback
+# does not double-define the symbols; without a backend (other hosts)
+# libfsh.c's fallback is the complete surface.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64|i[3-6]86)")
+  set(FSH_SIMD_BACKEND src/libfsh_simd_x86.c)
+  set(FSH_SIMD_EXTERNAL_DEF FSH_LIBFSH_SIMD_EXTERNAL)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64|ARM64|arm)")
+  set(FSH_SIMD_BACKEND src/libfsh_simd_arm.c)
+  set(FSH_SIMD_EXTERNAL_DEF FSH_LIBFSH_SIMD_EXTERNAL)
+endif()
+if(FSH_SIMD_BACKEND)
+  add_library(libfsh STATIC
+    src/libfsh.c
+    ${FSH_SIMD_BACKEND}
+    runtime/frt_rt.c)
+  target_compile_definitions(libfsh PRIVATE ${FSH_SIMD_EXTERNAL_DEF})
+  message(STATUS "libfsh SIMD backend: ${FSH_SIMD_BACKEND}")
+else()
+  add_library(libfsh STATIC
+    src/libfsh.c
+    runtime/frt_rt.c)
+endif()
 target_include_directories(libfsh PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/fsh>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

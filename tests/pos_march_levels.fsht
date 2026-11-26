@@ -1,0 +1,10 @@
+fn main() {
+    let mut s: f64 = 0.0;
+    let x: *f64 = malloc(f64, 1024);
+    defer free(x);
+    for (i in 0..1024) { x[i] = 0.25; }
+    parfor (i in 0..1024) [reduction(+:s)] {
+        s = s + x[i];
+    }
+    print_f64(s, 2); println();
+}

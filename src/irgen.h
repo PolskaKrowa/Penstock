@@ -58,6 +58,29 @@ struct IrGen {
   std::vector<std::string> deferStack;     // IR text of deferred calls
   int parforCounter = 0;
 
+  // ---- borrowed-mut write-back
+  // of `borrowed mut` AGGREGATE parameters at function exit.
+  // The passing convention copies an aggregate parameter into the
+  // callee's own alloca ("by-address parameter: the callee sees its own
+  // copy", irgen_stmt.cpp).  For a `borrowed mut` parameter the
+  // mutations must become visible to the CALLER's place when the
+  // borrow ends — i.e. at every function exit.  Each entry is
+  // (paramIRName, calleeSlot, byteSize); populated by emitFunction for
+  // STRUCT/ENUM/ARRAY params declared `borrowed mut`, and flushed by
+  // emitBorrowedMutWritebacks() from emitDeferredAll() AFTER the user
+  // defers (a `defer reader_close(&mut r)` mutates the borrowed value
+  // too and its effect must propagate as well) and before the ret.
+  // Scalars/pointers pass by value or alias directly and need nothing.
+  struct BorrowMutWB { std::string param, slot; uint64_t bytes; };
+  std::vector<BorrowMutWB> borrowMutWB;
+  void emitBorrowedMutWritebacks() {
+    for (auto& wb : borrowMutWB) {
+      out << "  call void @llvm.memcpy.p0.p0.i64(ptr %" << wb.param
+          << "param, ptr " << wb.slot << ", i64 " << wb.bytes
+          << ", i1 false)\n";
+    }
+  }
+
   // ---- data stacks (goose port: bump-pointer scope memory) -------------
   // per-function emission state: the current stack-index expression base
   // ("%sp" for a stack-using fn, "0" for entries and plain callers) and
@@ -93,10 +116,19 @@ struct IrGen {
   // reassociated — bitwise-identical results for any thread count.
   int forceStrictFp = 0;
   std::string fflag() const {
-    if (forceStrictFp > 0) return "";
+    if (forceStrictFp > 0) return "";   // @reproducible: bit-exact strict
     bool fast = g_opts.fastMathGlobal || (curFn && curFn->fastmath);
     if (curFn && curFn->strictfp) fast = false;
-    return fast ? "fast" : "";
+    if (fast) return "fast";
+    // @fma_contract —
+    // contraction WITHOUT reassociation/NaN relaxation.  The LLVM IR
+    // spelling is the per-instruction `contract` fast-math flag, which
+    // allows exactly fadd/fsub/fmul/fdiv/frem (and calls returning float,
+    // e.g. llvm.fma) to fuse into one rounded FMA, while the value of
+    // every OTHER operation — reassociation, NaN/signed-zero/algebraic
+    // relaxation — stays strict.  @strictfp above still wins outright.
+    if (curFn && curFn->fmaContract) return "contract";
+    return "";
   }
 
   // ---------------- module-level pools
@@ -144,7 +176,20 @@ struct IrGen {
   int curDbgLine = -1;
   bool curFnIsChunkFn = false;
   std::vector<std::string> chunkFns;       // deferred chunk fn texts
-  std::vector<std::tuple<uint64_t,std::string,int>> parforTags; // (tag, fn, line)
+  // parfor region registry — the report correlates the runtime timing
+  // file's PF <tag> lines back to fn:line, and carries the
+  // STATIC per-iteration flops/bytes census the roofline table needs:
+  // measured bytes/s = bytesPerIter * iters / measured-ns, kept clearly
+  // separate from anything a hardware counter reports.
+  struct ParforTag {
+    uint64_t tag = 0;
+    std::string fn;
+    int line = 0;
+    int64_t flopsPerIter = 0;   // float arithmetic ops per iteration
+    int64_t bytesPerIter = 0;   // bytes of memory traffic per iteration
+    int64_t bodyCost = 0;       // the §6.12 dispatch-cost class
+  };
+  std::vector<ParforTag> parforTags;
 
   // ---------------- helpers
   std::string t() { return "%" + std::to_string(tmp++); }

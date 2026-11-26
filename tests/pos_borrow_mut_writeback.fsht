@@ -1,0 +1,36 @@
+// `borrowed mut` AGGREGATE parameters write back.  The
+// historical lowering copied the aggregate in ("the callee sees its own
+// copy") and never copied out, so every mutation inside the callee was
+// silently discarded after the call (Freshet-Scientific VALIDATION 0.2.1:
+// "borrowed mut aggregate parameters do not write back").  The write-back
+// now runs at EVERY function exit, after the deferred statements.
+struct Counter { n: u64 }
+
+pub fn bump(borrowed mut c: Counter) {
+    c.n = c.n + 1;
+}
+
+pub fn bump_and_return_early(borrowed mut c: Counter) -> u64 {
+    c.n = c.n + 10;
+    return c.n;
+}
+
+pub fn close_like(borrowed mut c: Counter) {
+    defer bump(&mut c);
+    c.n = c.n + 100;
+}
+
+fn main() {
+    let mut a: Counter = Counter { n: 1 };
+    bump(&mut a);
+    print_u64(a.n); println();                       // 2
+
+    let mut b: Counter = Counter { n: 5 };
+    let r: u64 = bump_and_return_early(&mut b);
+    print_u64(b.n); println();                        // 15 (value return + WB)
+    print_u64(r); println();                          // 15
+
+    let mut d: Counter = Counter { n: 0 };
+    close_like(&mut d);
+    print_u64(d.n); println();                       // 101 (defer runs, then WB)
+}

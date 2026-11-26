@@ -119,7 +119,8 @@ namespace freshet {
   X(DstkEscape,       "F0926", "dstk-escape",         "stack allocation escapes its scope", false) \
   X(DstkMisuse,       "F0927", "dstk-misuse",         "invalid use of data-stack memory", false) \
   X(SumRed,           "F0928", "sum-reduction",       "float sum reduction regrouped for vectorisation", true) \
-  X(Basecase,         "F0929", "basecase",            "recursive base case inlined at call site", true)
+  X(Basecase,         "F0929", "basecase",            "recursive base case inlined at call site", true) \
+  X(VecVerdict,       "F0930", "vec-verdict",         "parfor kernel not vectorised (@hpc_strict / --strict-performance make it an error)", false)
 
 enum class Code {
 #define X(name, id, slug, title, remark) name,

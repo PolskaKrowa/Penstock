@@ -209,6 +209,9 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
   varAllocas.clear();
   symAllocas.clear();
   g_tempDrops.clear();
+  // fresh write-back table for this function's `borrowed mut`
+  // aggregate parameters (flushed at every exit by emitDeferredAll)
+  borrowMutWB.clear();
 
   // PGO function counter
   int fnSite = f->profIdx;
@@ -381,7 +384,8 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
     if (pt && (pt->k == Type::STRUCT || pt->k == Type::ENUM ||
                pt->k == Type::ARRAY)) {
       // by-address parameter: the callee sees its own copy (spec §4)
-      out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << slotOf(pm.name, pm.loc)
+      std::string slot = slotOf(pm.name, pm.loc);
+      out << "  call void @llvm.memcpy.p0.p0.i64(ptr " << slot
           << ", ptr %" << pm.name << "param, i64 " << typeSizeOf(pt)
           << ", i1 false)\n";
       // fsht-02:01: a by-value Vec<T> parameter moves its ownership in
@@ -390,7 +394,16 @@ void IrGen::emitFunction(FnDecl* f, FnSema* fs) {
       // `borrowed` / `borrowed mut` parameters never drop — the caller
       // owns the storage and keeps it (ch. 24 §1).
       if (!pm.borrowed && !pm.borrowedMut)
-        pushContainerDrop(slotOf(pm.name, pm.loc), pt);
+        pushContainerDrop(slot, pt);
+      // `borrowed mut` aggregates must WRITE BACK at every
+      // function exit — the caller's place is the authority of record
+      // for the borrow (ch. 24 §1); the historical lowering copied in
+      // and never copied out, so mutations inside the callee were
+      // silently discarded.  Scalar/pointer `borrowed mut` params are
+      // either passed by value (no aggregate state) or alias the
+      // caller's storage directly and need no write-back.
+      if (pm.borrowedMut)
+        borrowMutWB.push_back({pm.name, slot, typeSizeOf(pt)});
     } else {
       // scalars, pointers, SOA descriptors (a ptr value) and pair
       // aggregates all store directly
@@ -478,6 +491,12 @@ void emitDeferredAll() {
   for (auto it = g_defers.rbegin(); it != g_defers.rend(); ++it) {
     emitDeferCall(it->expr);
   }
+  // `borrowed mut` aggregate parameters write back to the
+  // caller's place now that every deferred statement has run — a defer
+  // like `reader_close(&mut r)` is exactly a mutation of the borrowed
+  // value that must survive the call (ch. 24 §1: mutations through a
+  // mutable borrow are visible to the caller after the call).
+  G->emitBorrowedMutWritebacks();
   emitDstkRestores(0);   // the frame's data stacks die with the return
   // fsht-02:01: user defers may have freed (and nulled) containers —
   // run every pending scope-exit drop after them; null sources make the

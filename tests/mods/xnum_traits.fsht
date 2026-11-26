@@ -1,0 +1,18 @@
+// corpus module: a generic SOLVER module in the shape of
+// Freshet-Numerics (pub trait + pub generic fn bound by it).  The impl
+// deliberately lives in the CALLER's module (tests/pos_trait_xmodule.fsht)
+// — the Freshet-Mechanics -> Freshet-Numerics dependency direction.
+module xnum_traits;
+
+pub trait Op {
+    fn apply(a: Self, x: f64) -> f64;
+}
+
+pub fn run<T: Op>(a: T, x: f64) -> f64 {
+    return Op::apply(a, x);
+}
+
+pub fn run_twice<T: Op>(a: T, x: f64) -> f64 {
+    let r: f64 = run(a, x);
+    return run(a, r);
+}

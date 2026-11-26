@@ -32,16 +32,51 @@ static const int MAXCTX = 64;
 // call census of one iteration; the runtime turns it into an estimated
 // total (trip_count * body_cost) and runs small-work regions inline.
 // The weights mirror the profitability model's documented approximation.
-static int64_t estimateParforBodyCost(Stmt* body) {
-  int64_t ops = 0, mem = 0, calls = 0;
+// the census now
+// separates the dispatch-cost class (unchanged semantics) from the
+// STATIC flops/bytes estimates the numerical profiling report
+// (registry 10.06.01) needs for its roofline table: measured
+// bytes/s = bytesPerIter * iters / measured-ns, measured FLOP/s =
+// flopsPerIter * iters / measured-ns — always labelled [static model,
+// measured time], never confused with hardware-counter truth.
+struct BodyCensus {
+  int64_t ops = 0, mem = 0, calls = 0;      // cost-class inputs (unchanged)
+  int64_t flops = 0;                        // float arithmetic per iteration
+  int64_t bytes = 0;                        // bytes of traffic per iteration
+  int64_t cost() const { return 1 + ops + 2 * mem + 16 * calls; }
+};
+static BodyCensus censusParforBody(Stmt* body) {
+  BodyCensus c;
   std::function<void(Expr*)> walkE = [&](Expr* e) {
     if (!e) return;
     if (e->k == Expr::CALL) {
-      ++calls;
+      ++c.calls;
+      // a math builtin is one (fused) float op of throughput-relevant
+      // weight; fma counts twice (two products one add, per FLOP counting)
+      static const std::set<std::string> fpBuiltin = {
+        "sqrt", "sin", "cos", "exp", "log", "pow", "fmin", "fmax",
+        "fabs", "floor", "ceil", "round", "clamp", "fma",
+      };
+      if (fpBuiltin.count(e->name)) c.flops += e->name == "fma" ? 2 : 1;
     } else if (e->k == Expr::INDEX || e->k == Expr::FIELD) {
-      if (e->k == Expr::INDEX || e->ptrDeref) ++mem;
+      if (e->k == Expr::INDEX || e->ptrDeref) {
+        ++c.mem;
+        // traffic model: sizeof(element) when the sema type is known,
+        // 8 bytes otherwise; an INDEX read AND its use store as two
+        // separate expression sites, so each site counts once
+        uint64_t esz = 8;
+        if (e->ty && e->ty->isNum()) esz = e->ty->bits() / 8;
+        else if (e->ty && (e->ty->k == Type::STRUCT ||
+                           e->ty->k == Type::ENUM))
+          esz = typeSizeOf(e->ty) > 0 ? typeSizeOf(e->ty) : 8;
+        c.bytes += (int64_t)esz;
+      }
     } else if (e->k == Expr::BIN) {
-      ++ops;
+      ++c.ops;
+      // float arithmetic: one FLOP each (the *throughput* measure the
+      // roofline denominates; fdiv weighs more in reality but the
+      // static model documents the counting rule, not exactness)
+      if (e->ty && e->ty->isFloat()) c.flops += 1;
     }
     for (auto* a : e->args) walkE(a);
     walkE(e->lhs);
@@ -74,8 +109,11 @@ static int64_t estimateParforBodyCost(Stmt* body) {
     }
   };
   walkS(body);
-  // cost units: ~1 per cheap op, 2 per memory op, 16 per call
-  return 1 + ops + 2 * mem + 16 * calls;
+  return c;
+}
+static int64_t estimateParforBodyCost(Stmt* body) {
+  // unchanged semantics: the §6.12 dispatch-cost class
+  return censusParforBody(body).cost();
 }
 
 // identifiers referenced in body that live in the enclosing function.
@@ -139,11 +177,75 @@ static void collectCaptured(Stmt* body, const std::string& pvar,
 static std::string neutralConst(const std::string& op, Type* t) {
   if (op == "*" && t->isFloat())
     return t->k == Type::F32 ? "0x3F800000" : "0x3FF0000000000000";
-  if (op == "min") return t->k == Type::F32 ? "0x7F800000" : "0x7FF0000000000000";
-  if (op == "max") return t->k == Type::F32 ? "0xFF800000" : "0xFFF0000000000000";
+  if (op == "min" || op == "argmin")
+    return t->k == Type::F32 ? "0x7F800000" : "0x7FF0000000000000";
+  if (op == "max" || op == "argmax")
+    return t->k == Type::F32 ? "0xFF800000" : "0xFFF0000000000000";
   if (op == "*") return "1";
   if (t->isFloat()) return "0.0";
   return "0";
+}
+
+// is this reduction op a (value, index) pair form?
+static bool isArgRed(const std::string& op) {
+  return op == "argmin" || op == "argmax";
+}
+
+// the clause of reduction index k (the clause vector interleaves
+// reduction/threads/chunk/affinity entries, so reds[k] is NOT clauses[k]
+// in general — match on the accumulator var)
+static const ParForClause& clauseOfRed(Stmt* pf, size_t k,
+                                        const std::string& var) {
+  static ParForClause none;
+  size_t seen = 0;
+  for (auto& c : pf->clauses) {
+    if (c.k != ParForClause::REDUCTION) continue;
+    if (seen == k && c.var == var) return c;
+    if (c.var == var) return c;
+    ++seen;
+  }
+  return none;
+}
+static std::string argRedIndexVar(Stmt* pf, size_t k,
+                                  const std::string& var) {
+  const ParForClause& c = clauseOfRed(pf, k, var);
+  return c.var2.empty() ? var + std::string("_i") : c.var2;
+}
+
+// pair combine for argmin/argmax — lexicographic (value, then
+// index: the smaller index wins a value tie, which makes the result the
+// FIRST occurrence in iteration order and keeps @reproducible
+// deterministic across thread counts).  Inputs are the two pair slots:
+// (accv, acci) vs (v, i); output (r, ri).
+static void combineArgOp(const std::string& op, Type* t,
+                         const std::string& accv, const std::string& acci,
+                         const std::string& v, const std::string& i,
+                         std::ostringstream& o, const std::string& fflag,
+                         std::string* rOut, std::string* riOut) {
+  std::string ity = t->k == Type::F32 ? "float" : "double";
+  std::string cmpOp = op == "argmin" ? "olt" : "ogt";
+  // SSA names allocated in EMISSION order (cva..better, then r/ri),
+  // fresh from G's counter — multiple arg reductions cannot collide
+  std::string cva = G->t(), tie = G->t(), imin = G->t(), tiei = G->t(),
+              better = G->t();
+  std::string r = G->t(), ri = G->t();
+  if (rOut) *rOut = r;
+  if (riOut) *riOut = ri;
+  o << "  " << cva << " = fcmp " << cmpOp << " " << ity << " " << v
+    << ", " << accv << "\n";
+  o << "  " << tie << " = fcmp oeq " << ity << " " << v << ", " << accv
+    << "\n";
+  o << "  " << imin << " = icmp ult i64 " << i << ", " << acci << "\n";
+  // better value OR (equal value AND smaller index): the FIRST
+  // occurrence in iteration order wins a value tie — stable, and
+  // @reproducible keeps it identical across thread counts
+  o << "  " << tiei << " = and i1 " << tie << ", " << imin << "\n";
+  o << "  " << better << " = or i1 " << cva << ", " << tiei << "\n";
+  o << "  " << r << " = select i1 " << better << ", " << ity << " " << v
+    << ", " << ity << " " << accv << "\n";
+  o << "  " << ri << " = select i1 " << better << ", i64 " << i
+    << ", i64 " << acci << "\n";
+  (void)fflag;
 }
 
 static void combineOp(const std::string& op, Type* t, const std::string& acc,
@@ -155,7 +257,9 @@ static void combineOp(const std::string& op, Type* t, const std::string& acc,
     else if (op == "-") o << "  " << r << " = fsub " << fflag << " " << ty << " " << acc << ", " << v << "\n";
     else if (op == "*") o << "  " << r << " = fmul " << fflag << " " << ty << " " << acc << ", " << v << "\n";
     else if (op == "min")
-      // backend matrix LLVM 19-23: llvm.minnum on 19, llvm.fmin on 20+
+      // backend matrix LLVM 19-23: llvm.minnum on EVERY LLVM of
+      // the matrix (the historical "llvm.fmin on 20+" spelling does not
+      // exist as an intrinsic; it linked as an unresolved external)
       o << "  " << r << " = call " << fflag << " " << ty << " @"
         << llvmFminBase() << "."
         << (t->k == Type::F32 ? "f32" : "f64") << "(" << ty << " " << acc
@@ -195,15 +299,30 @@ static void genCollapsedInner(Stmt* pf) {
     G->out << "  " << iA << " = alloca i64\n";
     G->varAllocas[pf->pvar] = iA;
   }
+  // stride + descending shape of the collapsed inner (lo is
+  // the UPPER end for a descending range: ivar starts there and walks
+  // down past hi, which is the exclusive lower end)
+  int64_t istep = pf->pstep ? (int64_t)pf->pstep->ival : 1;
+  bool idesc = pf->pDescending;
   G->out << "  store i64 " << lo << ", ptr " << iA << "\n";
   int hdr = G->bb++, body = G->bb++, latch = G->bb++, exit = G->bb++;
   G->out << "  br label %" << G->l(hdr) << "\n";
   G->terminate();
   G->out << G->l(hdr) << ":\n";
   G->curLabelTerminated = false;
+  // the collapsed inner honours its own stride and descending
+  // shape — `parfor (j in c..n by 2)` inside a collapsed nest is the
+  // eight-colour smoother's exact form (istep/idesc declared above the
+  // init store)
   std::string cv = G->t(), cnd = G->t();
   G->out << "  " << cv << " = load i64, ptr " << iA << "\n";
-  G->out << "  " << cnd << " = icmp slt i64 " << cv << ", " << hi << "\n";
+  if (idesc) {
+    G->out << "  " << cnd << " = icmp sgt i64 " << cv << ", " << hi
+           << "\n";
+  } else {
+    G->out << "  " << cnd << " = icmp slt i64 " << cv << ", " << hi
+           << "\n";
+  }
   // §5 policy: no forced vectorise metadata by default (only @vectorize
   // on the parfor, or --force-vectorize, turns it back on)
   int lm = G->vectorizeLoopMeta(pf->vectorizeHint);
@@ -226,7 +345,11 @@ static void genCollapsedInner(Stmt* pf) {
   G->curLabelTerminated = false;
   std::string cv2 = G->t(), nv = G->t();
   G->out << "  " << cv2 << " = load i64, ptr " << iA << "\n";
-  G->out << "  " << nv << " = add i64 " << cv2 << ", 1\n";
+  if (idesc) {
+    G->out << "  " << nv << " = sub i64 " << cv2 << ", " << istep << "\n";
+  } else {
+    G->out << "  " << nv << " = add i64 " << cv2 << ", " << istep << "\n";
+  }
   G->out << "  store i64 " << nv << ", ptr " << iA << "\n";
   G->out << "  br label %" << G->l(hdr) << "\n";
   G->out << G->l(exit) << ":\n";
@@ -237,6 +360,16 @@ static void genCollapsedInner(Stmt* pf) {
 struct PfRegion {
   Stmt* pf = nullptr;
   int N = 0;
+  BodyCensus census;                 // static flops/bytes per iter
+  // stride + descending shape.  Positive stride: the chunk fn
+  // latch adds `step` (the runtime's block partition over [lo,hi) is
+  // unchanged).  Descending (by -1): the runtime range is the INDEX
+  // range [0, plo-phi) and the user value is plo - index; the base
+  // (plo, evaluated ONCE caller-side) rides in the region context at
+  // descBaseOff so every worker derives the same values.
+  int64_t step = 1;
+  bool descending = false;
+  int64_t descBaseOff = -1;          // offset of the descending base slot
   std::string rng, ctxout, nchunks;
   std::vector<std::pair<std::string, std::string>> reds;   // (op, var)
   std::set<std::string> redVars;
@@ -258,6 +391,11 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
     if (c.k == ParForClause::AFFINITY) r->affinity = c.sval;
   }
   for (auto& red : r->reds) r->redVars.insert(red.second);
+  // the index accumulator is a reduction var too (capturable,
+  // never a plain captured write)
+  for (auto& c : pf->clauses)
+    if (c.k == ParForClause::REDUCTION && !c.var2.empty())
+      r->redVars.insert(c.var2);
   collectCaptured(pf->body, pf->pvar, r->bodyDeclared, r->redVars,
                   r->captured);
   r->accBase = alignUp(8 * r->captured.size(), 64);
@@ -265,12 +403,30 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
                    ? 64
                    : r->accBase + 64 * r->reds.size();
 
+  r->step = pf->pstep ? (int64_t)pf->pstep->ival : 1;
+  r->descending = pf->pDescending;
+
   std::string lo = genExpr(pf->plo);
   if (pf->plo->ty && pf->plo->ty->bits() < 64)
     lo = genCastInline(pf->plo, Type::simple(Type::I64), lo);
   std::string hi = genExpr(pf->phi);
   if (pf->phi->ty && pf->phi->ty->bits() < 64)
     hi = genCastInline(pf->phi, Type::simple(Type::I64), hi);
+
+  // descending: the runtime iterates the INDEX range [0, count)
+  // where count = plo - phi; the user value is plo - index.  The base is
+  // evaluated ONCE here (the historical pDescending flag was parsed but
+  // never lowered — a parfor over a descending range silently ran ZERO
+  // iterations) and travels in the region context.
+  std::string ploV = lo, phiV = hi;
+  if (r->descending) {
+    std::string cnt = G->t();
+    G->out << "  " << cnt << " = sub i64 " << ploV << ", " << phiV << "\n";
+    lo = "0";
+    hi = cnt;
+    r->descBaseOff = (int64_t)(r->accBase + 64 * r->reds.size());
+    r->ctxSize = (uint64_t)(r->descBaseOff + 8);
+  }
 
   // ctx template
   std::string tmpl = G->t();
@@ -302,6 +458,24 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
            << (r->accBase + 64 * k) << "\n";
     G->out << "  store " << G->llvmType(at) << " "
            << neutralConst(r->reds[k].first, at) << ", ptr " << s << "\n";
+    // the argmin/argmax slot ALSO initialises its index half
+    // (offset +8, 0 = "no index yet") — the value half's +inf/-inf
+    // neutral guarantees the first real element wins both halves
+    if (isArgRed(r->reds[k].first)) {
+      std::string s2 = G->t();
+      G->out << "  " << s2 << " = getelementptr i8, ptr " << s
+             << ", i64 8\n";
+      G->out << "  store i64 0, ptr " << s2 << "\n";
+    }
+  }
+  // descending: the base value rides in the context (after the
+  // reduction slots) — one evaluation, every worker derives identical
+  // iteration values
+  if (r->descending) {
+    std::string s = G->t();
+    G->out << "  " << s << " = getelementptr i8, ptr " << tmpl << ", i64 "
+           << r->descBaseOff << "\n";
+    G->out << "  store i64 " << ploV << ", ptr " << s << "\n";
   }
 
   // range struct
@@ -353,11 +527,25 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
   setI32(40, std::to_string((int)r->ctxSize));
   uint64_t tag = hashName(fn->name + ":" + std::to_string(pf->loc.line));
   setI64(48, std::to_string(tag));
-  G->parforTags.push_back({tag, fn->name, pf->loc.line});
+  // the region registry carries the static census alongside
+  // fn:line so the report can compute measured FLOP/s and bytes/s from
+  // the timing file's iteration counts and measured wall time
+  {
+    IrGen::ParforTag pt;
+    pt.tag = tag;
+    pt.fn = fn->name;
+    pt.line = pf->loc.line;
+    pt.flopsPerIter = r->census.flops;
+    pt.bytesPerIter = r->census.bytes;
+    pt.bodyCost = r->census.cost();
+    G->parforTags.push_back(pt);
+  }
   // §6.12 (optimisation-audit): per-iteration body-cost class at offset
   // 64.  0 = legacy IR (pure iteration-count cutoff); the estimator
-  // always returns >= 1 for a real body.
-  setI64(64, std::to_string(estimateParforBodyCost(pf->body)));
+  // always returns >= 1 for a real body.  The same walk fills
+  // the static flops/bytes census the report's roofline table needs.
+  r->census = censusParforBody(pf->body);
+  setI64(64, std::to_string(r->census.cost()));
   {
     std::string s = G->t();
     G->out << "  " << s << " = getelementptr i8, ptr " << r->rng
@@ -397,10 +585,33 @@ static void parforPrepRegion(Stmt* pf, int N, FnDecl* fn, FnSema* fs,
   G->out << "  " << r->ctxout << " = alloca [" << MAXCTX << " x ptr]\n";
 }
 
+// --march-levels feature sets (cumulative, per the canonical
+// ladder).  Baseline versions carry no target-features (the module's
+// -march == the first/baseline level); each additional level adds the
+// ISA features a compiler may use for that rung.
+static std::string marchLevelFeatures(const std::string& lvl) {
+  if (lvl == "x86-64-v2")
+    return "+sse4.2,+popcnt,+aes,+pclmul,+cx16";
+  if (lvl == "x86-64-v3")
+    return "+avx2,+fma,+bmi,+bmi2,+f16c,+movbe,+lzcnt,+popcnt,+sse4.2,"
+           "+pclmul,+cx16";
+  if (lvl == "x86-64-v4")
+    return "+avx512f,+avx512bw,+avx512cd,+avx512dq,+avx512vl,+avx2,+fma,"
+           "+bmi,+bmi2,+f16c,+movbe,+lzcnt,+popcnt,+sse4.2,+pclmul,+cx16";
+  return "";   // x86-64 baseline: the module march already says it
+}
+
 // chunk fn emission (own buffer, fresh numbering) — same instruction
-// sequence as the historical single-region lowering
+// sequence as the historical single-region lowering.  With
+// --march-levels, the SAME body is emitted once per ladder rung
+// (suffix ".L<i>", per-version "target-features") plus the baseline
+// (".L0"); the @__pf_body_N symbol itself becomes an ifunc whose
+// resolver picks the best rung the CPU supports (irgen.cpp writes the
+// ifunc + resolver lines when the chunk fns are flushed).
 static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
-                              const std::function<Type*(const std::string&)>& tyOf) {
+                              const std::function<Type*(const std::string&)>& tyOf,
+                              const std::string& suffix = "",
+                              const std::string& targetFeatures = "") {
   Stmt* pf = r.pf;
   std::string callerText = G->out.str();
   int callerTmp = G->tmp, callerBb = G->bb;
@@ -428,8 +639,12 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   // first-free stack index, threaded through frt_range_t.sp0 — every
   // chunk fn has the SAME signature, so the runtime holds one fn-ptr
   // type; regions that use no stacks simply ignore it
-  G->out << "define internal void @__pf_body_" << r.N
-         << "(i64 %lo, i64 %hi, ptr %ctx, i64 %sp) #50 {\n";
+  G->out << "define internal void @__pf_body_" << r.N << suffix
+         << "(i64 %lo, i64 %hi, ptr %ctx, i64 %sp) #50"
+         << (targetFeatures.empty()
+                 ? ""
+                 : " \"target-features\"=\"" + targetFeatures + "\"")
+         << " {\n";
   G->out << "entry:\n";
   G->curLabelTerminated = false;
 
@@ -468,7 +683,10 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
       G->varAllocas[n] = "%" + n + ".bd";
     }
   }
-  // reduction accumulator allocas (64B slots, register-promotable)
+  // reduction accumulator allocas (64B slots, register-promotable).
+  // an argmin/argmax clause gets a SECOND alloca for its index
+  // accumulator (loaded from the acc slot's +8 half; the body keeps the
+  // pair consistent by only updating both together).
   for (size_t k = 0; k < r.reds.size(); ++k) {
     const std::string& var = r.reds[k].second;
     Type* at = tyOf(var);
@@ -483,11 +701,53 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
            << "\n";
     G->out << "  store " << G->llvmType(at) << " " << v << ", ptr %" << var
            << ".acc\n";
+    if (isArgRed(r.reds[k].first)) {
+      std::string ivar = argRedIndexVar(r.pf, k, var);
+      std::string s2 = G->t();
+      G->out << "  " << s2 << " = getelementptr i8, ptr " << s
+             << ", i64 8\n";
+      std::string iv = G->t();
+      G->out << "  " << iv << " = load i64, ptr " << s2 << "\n";
+      G->out << "  %" << ivar << ".acc = alloca i64, align 8\n";
+      G->out << "  store i64 " << iv << ", ptr %" << ivar << ".acc\n";
+      G->varAllocas[ivar] = "%" + ivar + ".acc";
+    }
   }
   // induction var
+  //   positive stride: ivar = block start; header ivar < %hi; latch
+  //                    ivar += step (the runtime block partition over
+  //                    [lo,hi) is unchanged — every grid value belongs
+  //                    to exactly one block)
+  //   descending:       base = plo (from the ctx slot, one evaluation);
+  //                    the runtime range is the INDEX range [0, count);
+  //                    user value = base - index; latch ivar -= 1;
+  //                    header ivar > base - %hi (the last user value is
+  //                    phi+1 = base - count + 1)
   G->out << "  %" << pf->pvar << ".addr = alloca i64\n";
   G->varAllocas[pf->pvar] = "%" + pf->pvar + ".addr";
-  G->out << "  store i64 %lo, ptr %" << pf->pvar << ".addr\n";
+  std::string ivInit = "%lo";
+  std::string ivCmpOp = "slt";
+  std::string ivCmpRhs = "%hi";
+  std::string latchIncr = std::to_string(r.step);
+  std::string latchIsSub = "false";
+  std::string descBase;
+  if (r.descending) {
+    std::string s = G->t();
+    G->out << "  " << s << " = getelementptr i8, ptr %ctx, i64 "
+           << r.descBaseOff << "\n";
+    descBase = G->t();
+    G->out << "  " << descBase << " = load i64, ptr " << s << "\n";
+    std::string first = G->t();
+    G->out << "  " << first << " = sub i64 " << descBase << ", %lo\n";
+    ivInit = first;                        // base - blockStart
+    std::string lowv = G->t();
+    G->out << "  " << lowv << " = sub i64 " << descBase << ", %hi\n";
+    ivCmpOp = "sgt";
+    ivCmpRhs = lowv;                       // ivar > base - hi
+    latchIncr = "1";
+    latchIsSub = "true";
+  }
+  G->out << "  store i64 " << ivInit << ", ptr %" << pf->pvar << ".addr\n";
 
   // %sp threading (goose port v2): per-thread lazy stack init at the
   // chunk fn entry — a POOL WORKER may be the first stack user on its
@@ -525,7 +785,8 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->curLabelTerminated = false;
   std::string cv = G->t(), cnd = G->t();
   G->out << "  " << cv << " = load i64, ptr %" << pf->pvar << ".addr\n";
-  G->out << "  " << cnd << " = icmp slt i64 " << cv << ", %hi\n";
+  G->out << "  " << cnd << " = icmp " << ivCmpOp << " i64 " << cv << ", "
+         << ivCmpRhs << "\n";
   // §5 policy: no forced vectorise metadata by default.  (parfor
   // iterations are independent BY LANGUAGE CONTRACT, so the loop is
   // vectorisable — but forcing it would override the backend's
@@ -554,7 +815,12 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
   G->curLabelTerminated = false;
   std::string cv2 = G->t(), nv = G->t();
   G->out << "  " << cv2 << " = load i64, ptr %" << pf->pvar << ".addr\n";
-  G->out << "  " << nv << " = add i64 " << cv2 << ", 1\n";
+  if (latchIsSub == "true")
+    G->out << "  " << nv << " = sub i64 " << cv2 << ", " << latchIncr
+           << "\n";
+  else
+    G->out << "  " << nv << " = add i64 " << cv2 << ", " << latchIncr
+           << "\n";
   G->out << "  store i64 " << nv << ", ptr %" << pf->pvar << ".addr\n";
   G->out << "  br label %" << G->l(hdr) << "\n";
   G->out << G->l(exit) << ":\n";
@@ -571,6 +837,15 @@ static void parforEmitChunkFn(const PfRegion& r, FnDecl* fn, FnSema* fs,
            << ".acc\n";
     G->out << "  store " << G->llvmType(at) << " " << v << ", ptr " << s
            << "\n";
+    if (isArgRed(r.reds[k].first)) {
+      std::string ivar = argRedIndexVar(r.pf, k, var);
+      std::string s2 = G->t();
+      G->out << "  " << s2 << " = getelementptr i8, ptr " << s
+             << ", i64 8\n";
+      std::string iv = G->t();
+      G->out << "  " << iv << " = load i64, ptr %" << ivar << ".acc\n";
+      G->out << "  store i64 " << iv << ", ptr " << s2 << "\n";
+    }
   }
   G->out << "  ret void\n";
   G->out << "}\n\n";
@@ -632,14 +907,34 @@ static void parforEmitCombine(const PfRegion& r,
     std::string accv = G->t();
     G->out << "  " << accv << " = load " << G->llvmType(at) << ", ptr "
            << accA << "\n";
-    std::string res = G->t();
     // Phase 5: @reproducible combines run strict-FP in chunk order
     if (pf->reproducible) ++G->forceStrictFp;
-    combineOp(r.reds[k].first, at, accv, v, res, G->out,
-              pf->reproducible ? "" : G->fflag());
+    if (isArgRed(r.reds[k].first)) {
+      // the pair half — index loads from slot+8 / the index
+      // accumulator, then the lexicographic combine writes both back
+      std::string ivar = argRedIndexVar(r.pf, k, var);
+      std::string s2 = G->t();
+      G->out << "  " << s2 << " = getelementptr i8, ptr " << s
+             << ", i64 8\n";
+      std::string iv = G->t();
+      G->out << "  " << iv << " = load i64, ptr " << s2 << "\n";
+      std::string accAi = G->varAllocas[ivar];
+      std::string acci = G->t();
+      G->out << "  " << acci << " = load i64, ptr " << accAi << "\n";
+      std::string res, resi;
+      combineArgOp(r.reds[k].first, at, accv, acci, v, iv, G->out,
+                   pf->reproducible ? "" : G->fflag(), &res, &resi);
+      G->out << "  store " << G->llvmType(at) << " " << res << ", ptr "
+            << accA << "\n";
+      G->out << "  store i64 " << resi << ", ptr " << accAi << "\n";
+    } else {
+      std::string res = G->t();
+      combineOp(r.reds[k].first, at, accv, v, res, G->out,
+                pf->reproducible ? "" : G->fflag());
+      G->out << "  store " << G->llvmType(at) << " " << res << ", ptr "
+             << accA << "\n";
+    }
     if (pf->reproducible) --G->forceStrictFp;
-    G->out << "  store " << G->llvmType(at) << " " << res << ", ptr "
-           << accA << "\n";
   }
   G->out << "  call void @frt_free(ptr " << ctxp << ")\n";
   G->out << "  br label %" << G->l(clatch) << "\n";
@@ -716,8 +1011,28 @@ void genParfor(Stmt* pf) {
   }
 
   // ---------------- chunk fns (separate buffers)
-  parforEmitChunkFn(A, saveFn, fs, tyOf);
-  if (paired) parforEmitChunkFn(B, saveFn, fs, tyOf);
+  // one artefact, many machines — with --march-levels the hot
+  // kernel (the parfor chunk fn) is emitted once per ISA ladder rung and
+  // dispatched through an ifunc resolver backed by the runtime's CPUID
+  // probe (frt_march_level).  The baseline version ("L0") carries no
+  // extra features; every other rung adds its ISA set.  A desktop
+  // (AVX2) and a server (AVX-512) execute the SAME binary on their own
+  // best path; --report names the ladder.
+  if (g_opts.marchLevels.size() > 1) {
+    parforEmitChunkFn(A, saveFn, fs, tyOf, ".L0", "");
+    for (size_t li = 1; li < g_opts.marchLevels.size(); ++li)
+      parforEmitChunkFn(A, saveFn, fs, tyOf, ".L" + std::to_string(li),
+                        marchLevelFeatures(g_opts.marchLevels[li]));
+    if (paired) {
+      parforEmitChunkFn(B, saveFn, fs, tyOf, ".L0", "");
+      for (size_t li = 1; li < g_opts.marchLevels.size(); ++li)
+        parforEmitChunkFn(B, saveFn, fs, tyOf, ".L" + std::to_string(li),
+                          marchLevelFeatures(g_opts.marchLevels[li]));
+    }
+  } else {
+    parforEmitChunkFn(A, saveFn, fs, tyOf);
+    if (paired) parforEmitChunkFn(B, saveFn, fs, tyOf);
+  }
 
   // restore caller state (numbering continues past the dispatch part)
   G->varAllocas = saveAllocas;

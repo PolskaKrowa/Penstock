@@ -1,0 +1,20 @@
+import view;
+fn main() {
+    // 4x3x2 grid, row-major: strides [6, 2, 1]
+    let n: usize = 24;
+    let x: *f64 = malloc(f64, n);
+    defer free(x);
+    for (i in 0..n) { x[i] = (i as f64) * 0.25; }
+    let v: View<f64, 3> = view_new3(span(x, n), 4, 3, 2);
+    // at3(1, 2, 1) = offset 6+4+1 = 11 -> 2.75
+    print_f64(view_at3(v, 1, 2, 1), 2); println();
+    // plane i=1: a 3x2 view; at2(2, 1) = offset (2*2+1)+6 = 11 -> 2.75
+    let p: View<f64, 2> = view_plane(v, 1);
+    print_f64(view_at2(p, 2, 1), 2); println();
+    // interior with pad 1: shape 2x1x0 -> zero cells on axis 2; use 2D
+    let q: View<f64, 2> = view_interior2(view_new2(span(x, 24), 4, 6), 1);
+    print_u64(q.shape[0]); println();   // 2
+    print_u64(q.shape[1]); println();   // 4
+    // interior element (1,1) = parent (2,2) = offset 2*6+2 = 14 -> 3.50
+    print_f64(view_at2(q, 1, 1), 2); println();
+}

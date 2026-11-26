@@ -161,3 +161,32 @@ const char* frt_pal_env_get(const char* name) {
   return NULL;   /* knobs default silently (ch. 25 §4) */
 #endif
 }
+
+/* ---- machine query / huge-page hint / NUMA policy ----------
+ * Machine query / huge-page hint / NUMA policy for this platform: the
+ * documented "unknown" spelling.  Every field of the machine profile
+ * stays 0 (= unknown, ch. 25 §4), the huge-page hint and the NUMA
+ * policy are no-ops / refused.  A program that branches on these
+ * values degrades to the conservative path instead of failing. */
+int frt_pal_query_machine(frt_machine_t* out) {
+  if (!out) return 0;
+  memset(out, 0, sizeof *out);
+  out->threads_logical = frt_pal_ncpu();
+  out->page_bytes = 4096;          /* smallest common denominator */
+  out->numa_nodes = 1;
+  return 1;
+}
+void frt_pal_madvise_huge(void* p, uint64_t bytes) { (void)p; (void)bytes; }
+int frt_pal_numa_nodes(void) { return 1; }
+int frt_pal_cpu_node(int cpu) { (void)cpu; return -1; }
+int frt_pal_numa_policy(int mode) { (void)mode; return -1; }
+
+/* positioned I/O / mmap — unavailable on this platform: the
+ * documented fallible spellings (-1 / NULL) rather than a substitute. */
+int64_t frt_pal_pread(void* f, void* buf, uint64_t n, int64_t off) { (void)f; (void)buf; (void)n; (void)off; return -1; }
+int64_t frt_pal_pwrite(void* f, const void* buf, uint64_t n, int64_t off) { (void)f; (void)buf; (void)n; (void)off; return -1; }
+int32_t frt_pal_fsync(void* f) { (void)f; return -1; }
+int32_t frt_pal_ftruncate(void* f, int64_t size) { (void)f; (void)size; return -1; }
+void* frt_pal_mmap_ro(const char* path, uint64_t* lenOut) { (void)path; (void)lenOut; return NULL; }
+void* frt_pal_mmap_rw(const char* path, uint64_t* lenOut) { (void)path; (void)lenOut; return NULL; }
+int32_t frt_pal_munmap(void* p, uint64_t len) { (void)p; (void)len; return -1; }

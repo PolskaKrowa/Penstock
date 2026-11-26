@@ -8,4 +8,7 @@
 //   const_assert(expr)   — compile-time assertion (F0219/F0220)
 //   freshet.prefetch_r/w, freshet.clflush, freshet.pause
 //   freshet.cycles, freshet.time_ns, freshet.time_ms, freshet.threads
+//   freshet.machine_* profile intrinsics and
+//   freshet.assume_aligned (see modules/machine.fsht for the named
+//   surface)
 module core;

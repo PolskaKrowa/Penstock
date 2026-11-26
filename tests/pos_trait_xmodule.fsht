@@ -1,0 +1,26 @@
+// trait impls are resolved for generic instances regardless of
+// which module owns the generic fn.  The impl (MyOp) lives HERE; the
+// generic run<T: Op> lives in module xnum_traits (search -Itests/mods).
+// The historical behaviour resolved impls "from the module that owns the
+// generic function", so this exact shape failed with
+// F0004 "function 'Op$SMyOp$apply' lives in module ... which is not
+// imported here" — the defect that forced Freshet-Scientific to define
+// matrix-free operator types inside freshet_numerics.
+import xnum_traits;
+
+pub struct MyOp { k: f64 }
+
+pub impl Op for MyOp {
+    fn apply(a: Self, x: f64) -> f64 {
+        return a.k * x;
+    }
+}
+
+fn main() {
+    // generic instantiation whose instance body is bound under the
+    // TEMPLATE's module (xnum_traits) while the impl fn is local:
+    let r: f64 = run(MyOp { k: 2.0 }, 21.0);
+    let q: f64 = run_twice(MyOp { k: 0.5 }, 8.0);
+    print_i64(r as i64); println();   // 42
+    print_i64((q * 16.0) as i64); println();  // 0.5*0.5*8 = 2.0 -> 32
+}

@@ -1,0 +1,16 @@
+// intentional narrowing — mixed-precision storage idiom
+fn store32(borrowed mut dst: *f32, src: *f64, n: usize) {
+    for (i in 0..n) {
+        dst[i] = narrow_cast(src[i]);   // no F0211 noise
+    }
+}
+fn main() {
+    let a: *f64 = malloc(f64, 4);
+    defer free(a);
+    let mut b: *f32 = malloc(f32, 4);
+    defer free(b);
+    a[0] = 0.5; a[1] = 1.5; a[2] = 2.5; a[3] = 3.5;
+    store32(b, a, 4);
+    print_f64(b[1] as f64, 2); println();    // 1.50
+    print_f64(b[3] as f64, 2); println();    // 3.50
+}

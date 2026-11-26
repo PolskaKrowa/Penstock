@@ -337,10 +337,39 @@ static void semaParfor(FnSema* fs, Stmt* s) {
                c.loc);
         }
         if (c.redOp != "+" && c.redOp != "-" && c.redOp != "*" &&
-            c.redOp != "min" && c.redOp != "max") {
+            c.redOp != "min" && c.redOp != "max" &&
+            // value+index reductions with stable tie-breaking (the
+            // first occurrence wins a value tie)
+            c.redOp != "argmin" && c.redOp != "argmax") {
           diag(Diag::Error, Code::Parfor,
                "unsupported reduction op: " + c.redOp,
                c.loc);
+        }
+        // the index accumulator is a usize mut in the same
+        // scope; both become reduction variables (write-safe)
+        if (c.redOp == "argmin" || c.redOp == "argmax") {
+          if (c.var2.empty()) {
+            diag(Diag::Error, Code::Parfor,
+                 "reduction(" + c.redOp + ":" + c.var + ") needs an "
+                 "index accumulator: reduction(" + c.redOp + ": " +
+                 c.var + ", " + c.var + "_i)", c.loc);
+          } else {
+            Sym* iacc = fs->lookup(c.var2);
+            if (!iacc) {
+              diag(Diag::Error, Code::Parfor,
+                   "argmin/argmax index accumulator not found: " + c.var2,
+                   c.loc);
+            } else if (!iacc->mut) {
+              diag(Diag::Error, Code::Parfor,
+                   "index accumulator must be declared mut: " + c.var2,
+                   c.loc);
+            } else if (iacc->ty->k != Type::USIZE && iacc->ty->k != Type::U64) {
+              diag(Diag::Error, Code::Parfor,
+                   "argmin/argmax index accumulator must be usize: " +
+                   c.var2, c.loc);
+            }
+            if (iacc) fs->reductionVars.insert(c.var2);
+          }
         }
         fs->reductionVars.insert(c.var);
         // reduction init-value check (+ needs 0, * needs 1) is done in
@@ -873,6 +902,16 @@ bool semaProgram(Program* p, bool requireMain) {
         f->implSelfTy = selfTy;
         f->module = im->module;
         f->name = traitMethodMangle(im->traitName, selfTy, m->name);
+        // impl members are the DISPATCH surface of the trait
+        // system — they are addressed by their mangled names through
+        // trait resolution from any module that can name the trait and
+        // the target type (see pickVisible's trait-impl exemption in
+        // common.h).  Marking them pub makes an `impl LinearOperator for
+        // MyOperator` in Freshet-Mechanics usable from Freshet-Numerics'
+        // generic CG instance bodies, which bind under the template's
+        // module — the dependency direction the architecture mandates
+        // (mechanics imports numerics, never the reverse).
+        f->isPub = true;
       }
     }
     // duplicate impls of the same trait for the same type

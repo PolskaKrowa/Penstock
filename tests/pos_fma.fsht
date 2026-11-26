@@ -1,0 +1,26 @@
+// acceptance: fma builtin (exact single rounding) and the
+// @fma_contract contraction-only mode.
+// Golden: fma(0.1, 0.1, -0.005) = 0.005000000000000001 (one rounding);
+//         naive (0.1*0.1) + (-0.005) = 0.005000000000000002 (two roundings).
+@fma_contract fn kern(a: f64, b: f64, c: f64) -> f64 {
+    return a * b + c;
+}
+fn kern_strict(a: f64, b: f64, c: f64) -> f64 {
+    return a * b + c;
+}
+fn main() {
+    let x: f64 = fma(0.1, 0.1, -0.005);
+    print_f64(x, 18); println();                 // 0.005000000000000001
+    let n: f64 = kern_strict(0.1, 0.1, -0.005);
+    print_f64(n, 18); println();                 // 0.005000000000000002
+    // f32 width (through bindings — literals default to f64)
+    let a32: f32 = 0.1f32;
+    let b32: f32 = 0.1f32;
+    let c32: f32 = -0.005f32;
+    let f: f32 = fma(a32, b32, c32);
+    print_f64(f as f64, 10); println();
+    // bit-identity across the widths: fma is exact-rounding, so
+    // fma(a,b,0.0) == a*b when a*b is exact (dyadic operands)
+    let d: f64 = fma(0.25, 8.0, 0.0);
+    print_f64(d, 2); println();                  // 2.00
+}

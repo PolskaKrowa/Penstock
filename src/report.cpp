@@ -84,6 +84,12 @@ struct TimingEnt {
   uint64_t tag, cycles;
   int64_t count, nchunks;
   int pinfails;
+  // (registry 10.06.01): v2 fields — measured wall time,
+  // measured iterations, per-thread hardware-counter aggregates (0 =
+  // counters off/unavailable).  v1 files leave these zero.
+  uint64_t ns = 0;
+  int64_t iters = 0;
+  uint64_t instr = 0, llc = 0;
 };
 
 struct TimingStats {
@@ -92,6 +98,8 @@ struct TimingStats {
   // mem & vectorisation stage: SMT interleave (optional)
   int64_t smtPaired = 0, smtMemLane = 0, smtCompLane = 0;
   bool smtPresent = false;
+  // NUMA topology + the memory policy actually applied
+  int numaNodes = 0, numaPolicy = 0;
 };
 
 static std::vector<TimingEnt> readTiming(const std::string& binPath,
@@ -103,6 +111,7 @@ static std::vector<TimingEnt> readTiming(const std::string& binPath,
   std::string magic;
   std::getline(f, magic);
   if (magic.find("FRESHET-TIMING") == std::string::npos) return out;
+  bool v2 = magic.find("2") != std::string::npos;   // header
   std::string kind;
   while (f >> kind) {
     if (kind == "ST") {
@@ -115,12 +124,60 @@ static std::vector<TimingEnt> readTiming(const std::string& binPath,
         stats->smtPresent = true;
       continue;
     }
+    if (kind == "NU") {   // nodes + applied policy
+      int nodes = 0, policy = 0;
+      if (stats && (f >> nodes >> policy)) stats->numaNodes = nodes,
+                                           stats->numaPolicy = policy;
+      continue;
+    }
     if (kind != "PF") { continue; }
     TimingEnt t;
     if (!(f >> t.tag >> t.cycles >> t.count >> t.nchunks >> t.pinfails)) break;
+    if (v2 && !(f >> t.ns >> t.iters >> t.instr >> t.llc)) break;
     out.push_back(t);
   }
   return out;
+}
+
+// ---- machine profile (the bundled microbenchmark's output) ------
+// MACHINE-PROFILE 1 written by tools/machine_profile.c next to the
+// profiled binary; every field is a MEASUREMENT, never an estimate.
+struct MachineProfile {
+  bool present = false;
+  double bwTriad = 0;    // bytes/s (2 reads + 1 write per element)
+  double fmaPeak = 0;    // flop/s (16 independent fma chains)
+  int64_t l1d = 0, l2 = 0, l3 = 0, page = 0;
+  int64_t memTotal = 0, memAvail = 0;
+  int cores = 0, threads = 0, smt = 0, numa = 0;
+};
+
+static MachineProfile readMachineProfile(const std::string& binPath) {
+  MachineProfile mp;
+  std::ifstream f(binPath + ".machprof");
+  if (!f.is_open()) return mp;
+  std::string magic;
+  std::getline(f, magic);
+  if (magic.find("MACHINE-PROFILE") == std::string::npos) return mp;
+  mp.present = true;
+  std::string key;
+  double d;
+  long long v;
+  while (f >> key) {
+    if (key == "BW_TRIAD_BYTES_PER_S" && (f >> d)) mp.bwTriad = d;
+    else if (key == "FMA_PEAK_FLOP_S" && (f >> d)) mp.fmaPeak = d;
+    else if (key == "CORES_PHYSICAL" && (f >> v)) mp.cores = (int)v;
+    else if (key == "THREADS_LOGICAL" && (f >> v)) mp.threads = (int)v;
+    else if (key == "SMT" && (f >> v)) mp.smt = (int)v;
+    else if (key == "NUMA_NODES" && (f >> v)) mp.numa = (int)v;
+    else if (key == "L1D_BYTES" && (f >> v)) mp.l1d = v;
+    else if (key == "L2_BYTES" && (f >> v)) mp.l2 = v;
+    else if (key == "L3_BYTES" && (f >> v)) mp.l3 = v;
+    else if (key == "PAGE_BYTES" && (f >> v)) mp.page = v;
+    else if (key == "MEM_TOTAL_BYTES" && (f >> v)) mp.memTotal = v;
+    else if (key == "MEM_AVAILABLE_BYTES" && (f >> v)) mp.memAvail = v;
+    else { f.clear(); std::string skip; std::getline(f, skip); }
+  }
+  return mp;
 }
 
 // ---- backend optimisation-record YAML (§13.1) -----------------------------
@@ -231,6 +288,14 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
   R << "input    : " << p->file << "\n";
   R << "backend  : " << g_backend << "\n";
   R << "mode     : -O" << g_opts.optLevel << " -march=" << g_opts.march;
+  // --march-levels — the ISA rungs the hot kernels were
+  // multi-versioned over (ifunc dispatch, CPUID-resolved at load)
+  if (!g_opts.marchLevels.empty()) {
+    R << " (levels:";
+    for (size_t i = 0; i < g_opts.marchLevels.size(); ++i)
+      R << (i ? "," : "") << " " << g_opts.marchLevels[i];
+    R << ")";
+  }
   if (!g_targetTriple.empty()) R << " -target " << g_targetTriple;
   R << "  (runtime IR -O" << g_opts.runtimeOpt << ")";
   if (g_opts.forceVectorize) R << "  [forced vectorize hints]";
@@ -334,6 +399,85 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
         R << "  vectorised: " << d << "\n";
       for (auto& r : rm.missedReasons)
         R << "  missed    : " << r << "\n";
+
+      // a STABLE
+      // per-kernel verdict — the remark stream is correlated back to
+      // the parfor region registry (chunk fn __pf_body_N <-> region N,
+      // .Lk-suffixed FMV versions map to the same region) and each
+      // region gets one line: VECTORIZED / NOT VECTORIZED + the backend's
+      // own missed-remark reason + the source fn:line.  Under
+      // --strict-performance (the HPC mode; @hpc_strict per-fn is the
+      // source-level spelling) a NOT-VECTORIZED verdict is a hard
+      // F0930 error instead of a table row.
+      if (G && !G->parforTags.empty()) {
+        // collect per chunk-fn verdicts from the remark stream
+        std::map<std::string, std::string> fnVerdict, fnReason;
+        std::ifstream rf(binPath + ".opt-records.yaml");
+        (void)rf;   // already parsed by readOptRecords; reuse its walks:
+        // (the two-pass shape keeps readOptRecords untouched)
+        struct V {
+          std::map<std::string, std::pair<int, std::string>> tab;
+        } v;
+        {
+          std::ifstream f(binPath + ".opt-records.yaml");
+          if (f.is_open()) {
+            std::string line, tag, pass, name, fn;
+            auto flush = [&]() {
+              if (tag.empty() || fn.empty() || pass.empty()) return;
+              if (pass.find("vectorize") == std::string::npos) return;
+              bool passed = tag == "!Passed";
+              auto& slot = v.tab[fn];
+              if (passed) slot.first = 1;
+              else if (slot.first != 1) slot.first = -1, slot.second = name;
+              tag = pass = name = fn = "";
+            };
+            while (std::getline(f, line)) {
+              std::string t = trim2(line);
+              if (t.rfind("--- !", 0) == 0) { flush(); tag = t.substr(4); continue; }
+              if (t.rfind("Pass:", 0) == 0) pass = unquote(trim2(t.substr(5)));
+              else if (t.rfind("Name:", 0) == 0) name = unquote(trim2(t.substr(5)));
+              else if (t.rfind("Function:", 0) == 0)
+                fn = unquote(trim2(t.substr(9)));
+            }
+            flush();
+          }
+        }
+        if (!v.tab.empty()) {
+          R << "\n  ---- [2b+] parfor vectorisation verdicts ----\n";
+          R << "  region (fn:line)               verdict    reason\n";
+          int nNot = 0;
+          for (size_t N = 0; N < G->parforTags.size(); ++N) {
+            auto& pt = G->parforTags[N];
+            // strip a .Lk FMV suffix from the chunk fn name
+            std::string base = "__pf_body_" + std::to_string(N);
+            std::string verdict = "no remark";
+            std::string reason;
+            int any = 0;
+            for (auto& [fn, vr] : v.tab) {
+              if (fn.rfind(base, 0) != 0) continue;
+              if (fn.size() > base.size() &&
+                  fn[base.size()] != '.')
+                continue;   // __pf_body_12 not of __pf_body_1
+              any = vr.first;
+              if (vr.first < 0) reason = vr.second;
+              if (vr.first > 0) { any = 1; break; }
+            }
+            if (any > 0) verdict = "VECTORIZED";
+            else if (any < 0) { verdict = "NOT VECTORIZED"; ++nNot; }
+            R << "  " << pt.fn << ":" << pt.line
+              << std::string(30 - std::min<size_t>(29, pt.fn.size() + 6), ' ')
+              << verdict << (reason.empty() ? "" : "   " + reason) << "\n";
+          }
+          if (nNot && g_opts.strictPerformance) {
+            // the HPC mode: a not-vectorised hot kernel is a hard error
+            diag(Diag::Error, Code::VecVerdict,
+                 std::to_string(nNot) + " parfor kernel(s) were not "
+                 "vectorised (--strict-performance: F0930); the verdict "
+                 "table above names the reason and source line",
+                 "", 0, 0);
+          }
+        }
+      }
     } else {
       R << "\n(no backend remark data — rebuild with --opt-remarks to see "
          "actual vectorisation/inlining results)\n";
@@ -349,8 +493,12 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
   } else {
     // correlate tags
     std::map<uint64_t, std::pair<std::string, int>> tagMap;
+    std::map<uint64_t, std::pair<int64_t, int64_t>> tagCensus;
     if (G)
-      for (auto& [tag, fn, line] : G->parforTags) tagMap[tag] = {fn, line};
+      for (auto& pt : G->parforTags) {
+        tagMap[pt.tag] = {pt.fn, pt.line};
+        tagCensus[pt.tag] = {pt.flopsPerIter, pt.bytesPerIter};
+      }
     R << "  fn:line                 calls     cycles       chunks  pinfails\n";
     for (auto& t : timing) {
       std::string where = "unknown";
@@ -380,6 +528,85 @@ void mergeAndPrintReport(Program* p, const std::string& irPath,
         << " paired dispatch(es), " << tstats.smtMemLane
         << " memory-lane chunk(s), " << tstats.smtCompLane
         << " compute-lane chunk(s)\n";
+    }
+    if (tstats.numaNodes > 0) {
+      R << "  numa [runtime]: " << tstats.numaNodes << " node(s), policy ";
+      const char* pol = tstats.numaPolicy == 0 ? "off"
+                        : tstats.numaPolicy == 1 ? "local"
+                        : tstats.numaPolicy == 2 ? "interleave"
+                        : "refused";
+      R << pol << "\n";
+    }
+
+    // ---------------- measured per-region throughput --------------
+    // registry fsht-03:04-10.06.01 (numerical profiling): measured
+    // wall time x the compiler's static per-iteration census ->
+    // per-region FLOP/s and bytes/s.  Every number is labelled with
+    // where it came from: [runtime] measured time/iterations, [static]
+    // the front-end flops/bytes-per-iteration model, [hw] the hardware
+    // counters when the PMU was available.  The roofline compares the
+    // achieved rate against the machine profile's measured peaks.
+    bool anyRate = false;
+    for (auto& t : timing)
+      if (t.ns > 0 && t.iters > 0) { anyRate = true; break; }
+    if (anyRate) {
+      MachineProfile mp = readMachineProfile(binPath);
+      R << "\n  ---- [3b] measured per-region throughput (registry 10.06.01)\n";
+      R << "  fn:line                 iters      wall-ns    GFLOP/s    GB/s"
+           "      hw-instr/s  hw-LLC-B/s\n";
+      double bestG = 0, bestB = 0;
+      for (auto& t : timing) {
+        if (t.ns == 0 || t.iters == 0) continue;
+        std::string where = "unknown";
+        std::pair<int64_t, int64_t> cen{0, 0};
+        if (tagMap.count(t.tag)) {
+          where = tagMap[t.tag].first + ":" +
+                  std::to_string(tagMap[t.tag].second);
+          cen = tagCensus.count(t.tag) ? tagCensus[t.tag] : cen;
+        }
+        double gflops = (double)cen.first * (double)t.iters /
+                        (double)t.ns;                 // flops/ns = GFLOP/s
+        double gbs = (double)cen.second * (double)t.iters /
+                     (double)t.ns;                    // bytes/ns = GB/s
+        double ips = t.instr ? (double)t.instr / (double)t.ns : 0;
+        double llcB = t.llc ? (double)t.llc * 64.0 / (double)t.ns : 0;
+        if (gflops > bestG) bestG = gflops;
+        if (gbs > bestB) bestB = gbs;
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "  %-24s %9lld %12llu %10.3f %10.3f %10.3e %10.3e\n",
+                 where.c_str(), (long long)t.iters,
+                 (unsigned long long)t.ns, gflops, gbs, ips, llcB);
+        R << buf;
+      }
+      R << "  (rate = [static] flops/bytes per iteration x [runtime] "
+           "measured iterations / [runtime] measured wall-ns;\n"
+           "   hw columns are [hw] per-thread counter aggregates — 0 "
+           "means the PMU was off/unavailable, never an estimate)\n";
+      // roofline-style summary against the machine profile's peaks
+      if (mp.present && (mp.bwTriad > 0 || mp.fmaPeak > 0)) {
+        R << "\n  roofline (machine profile " << binPath << ".machprof)\n";
+        if (mp.bwTriad > 0)
+          R << "    bandwidth peak  : " << mp.bwTriad / 1e9 << " GB/s"
+               " (triad, best of 5)\n";
+        if (mp.fmaPeak > 0)
+          R << "    fma peak         : " << mp.fmaPeak / 1e9
+               << " GFLOP/s (16 independent chains)\n";
+        if (bestB > 0 && mp.bwTriad > 0)
+          R << "    best region BW   : " << bestB << " GB/s = "
+               << 100.0 * bestB / (mp.bwTriad / 1e9) << "% of peak\n";
+        if (bestG > 0 && mp.fmaPeak > 0)
+          R << "    best region FLOP : " << bestG << " GFLOP/s = "
+               << 100.0 * bestG / (mp.fmaPeak / 1e9) << "% of peak\n";
+        R << "    (a region's ceiling is min(fma peak, AI x bandwidth "
+               "peak); re-run tools/machine_profile.c after hardware "
+               "changes)\n";
+      } else {
+        R << "\n  (no machine profile at " << binPath << ".machprof — "
+             "run `cc -O2 tools/machine_profile.c runtime/frt_rt.c -lm "
+             "-lpthread && ./a.out <exe>.machprof` for the roofline "
+             "comparison)\n";
+      }
     }
   }
 

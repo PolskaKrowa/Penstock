@@ -128,6 +128,58 @@ std::string genCall(Expr* e) {
     G->out << "  " << r << " = sext i32 " << r32 << " to i64\n";
     return r;
   }
+  // machine-query
+  // intrinsics — one runtime accessor each (cached frt_machine_t in the
+  // runtime core; 0 = unknown on platforms without the probe)
+  if (n == "freshet.cores_physical" || n == "freshet.threads_logical" ||
+      n == "freshet.smt" || n == "freshet.numa_nodes" ||
+      n == "freshet.l1d_bytes" || n == "freshet.l2_bytes" ||
+      n == "freshet.l3_bytes" || n == "freshet.page_bytes" ||
+      n == "freshet.mem_total_bytes" || n == "freshet.mem_available_bytes") {
+    std::string sym =
+        n == "freshet.cores_physical" ? "frt_cores_physical"
+        : n == "freshet.threads_logical" ? "frt_threads_logical"
+        : n == "freshet.smt" ? "frt_smt_on"
+        : n == "freshet.numa_nodes" ? "frt_numa_nodes"
+        : n == "freshet.l1d_bytes" ? "frt_l1d_bytes"
+        : n == "freshet.l2_bytes" ? "frt_l2_bytes"
+        : n == "freshet.l3_bytes" ? "frt_l3_bytes"
+        : n == "freshet.page_bytes" ? "frt_page_bytes"
+        : n == "freshet.mem_total_bytes" ? "frt_mem_total_bytes"
+        : "frt_mem_available_bytes";
+    std::string r = G->t();
+    G->out << "  " << r << " = call i64 @" << sym << "()\n";
+    return r;
+  }
+  // freshet.assume_aligned(p, A) — llvm.assume of the alignment
+  // predicate; the backend's value-tracking derives the alignment and the
+  // vectoriser drops peel/remainder code for the promised width
+  if (n == "freshet.assume_aligned") {
+    std::string p = genExpr(e->args[0]);
+    // the alignment must be a compile-time power of two >= 16 (validated
+    // here on the folded value: sema sees the args before they are typed)
+    if (e->args.size() < 2 || !e->args[1]->constant) {
+      diag(Diag::Error, Code::Args,
+           "freshet.assume_aligned's alignment must be a compile-time "
+           "constant (16, 32, 64, ...)", e->loc);
+      return "";
+    }
+    int64_t al = (int64_t)e->args[1]->ival;
+    if (al < 16 || (al & (al - 1)) != 0) {
+      diag(Diag::Error, Code::Args,
+           "freshet.assume_aligned's alignment must be a power of two "
+           ">= 16, got " + std::to_string(al), e->loc);
+      return "";
+    }
+    std::string i = G->t();
+    G->out << "  " << i << " = ptrtoint ptr " << p << " to i64\n";
+    std::string m = G->t();
+    G->out << "  " << m << " = and i64 " << i << ", " << (al - 1) << "\n";
+    std::string c = G->t();
+    G->out << "  " << c << " = icmp eq i64 " << m << ", 0\n";
+    G->out << "  call void @llvm.assume(i1 " << c << ")\n";
+    return "";
+  }
 
   // ---------------- memory
   if (n == "malloc") {
@@ -146,6 +198,76 @@ std::string genCall(Expr* e) {
     G->out << "  " << r << " = call ptr @frt_malloc(i64 " << bytes << ", i64 "
            << al << ")\n";
     return r;
+  }
+  // malloc_aligned(T, n, A) — same shape as malloc, carrying the
+  // caller's compile-time alignment promise (sema validated pow2 >= 16)
+  if (n == "malloc_aligned") {
+    Type* elem = e->mallocElem;
+    uint64_t sz = typeSizeOf(elem);
+    std::string cnt = genExpr(e->args[1]);
+    if (e->args[1]->ty && e->args[1]->ty->bits() < 64)
+      cnt = genCastInline(e->args[1], Type::simple(Type::USIZE), cnt);
+    int64_t al = e->args.size() > 2 ? (int64_t)e->args[2]->ival : 16;
+    if (al < 16) al = 16;
+    std::string bytes = G->t();
+    if (sz == 1)
+      G->out << "  " << bytes << " = mul i64 " << cnt << ", 1\n";
+    else
+      G->out << "  " << bytes << " = mul i64 " << cnt << ", " << sz << "\n";
+    std::string r = G->t();
+    G->out << "  " << r << " = call ptr @frt_malloc_aligned(i64 " << bytes
+           << ", i64 " << al << ")\n";
+    return r;
+  }
+  // try_malloc(T, n) -> Option<*T>: call frt_try_malloc, then
+  // build the Option from the non-nil predicate (the same tag+payload
+  // shape vec_pop/get/remove buildOption uses).
+  if (n == "try_malloc") {
+    Type* elem = e->mallocElem;
+    uint64_t sz = typeSizeOf(elem);
+    uint64_t al = std::max<uint64_t>(16, typeAlignOf(elem));
+    std::string cnt = genExpr(e->args[1]);
+    if (e->args[1]->ty && e->args[1]->ty->bits() < 64)
+      cnt = genCastInline(e->args[1], Type::simple(Type::USIZE), cnt);
+    std::string bytes = G->t();
+    if (sz == 1)
+      G->out << "  " << bytes << " = mul i64 " << cnt << ", 1\n";
+    else
+      G->out << "  " << bytes << " = mul i64 " << cnt << ", " << sz << "\n";
+    std::string r = G->t();
+    G->out << "  " << r << " = call ptr @frt_try_malloc(i64 " << bytes
+           << ", i64 " << al << ")\n";
+    // Option<*T> construction (Some -> tag someIdx + payload = ptr;
+    // None -> tag noneIdx)
+    Type* ot = e->ty;
+    EnumDef* ed = ot && ot->k == Type::ENUM ? ot->edef : nullptr;
+    if (!ed) return r;   // degenerate: return the raw pointer
+    int someIdx = 0, noneIdx = 1;
+    for (auto& v : ed->variants) {
+      if (v.name == "Some") someIdx = v.idx;
+      if (v.name == "None") noneIdx = v.idx;
+    }
+    std::string slot = G->t();
+    G->out << "  " << slot << " = alloca " << G->llvmType(ot) << ", align "
+           << ed->align << "\n";
+    std::string nz = G->t();
+    G->out << "  " << nz << " = icmp ne ptr " << r << ", null\n";
+    std::string tag = G->t();
+    G->out << "  " << tag << " = select i1 " << nz << ", i64 " << someIdx
+           << ", i64 " << noneIdx << "\n";
+    G->out << "  store i64 " << tag << ", ptr " << slot << "\n";
+    const EnumVariant& sv = ed->variants[someIdx];
+    if (!sv.fields.empty()) {
+      Type* ft = sv.fields[0].ty;
+      std::string pay = G->t();
+      G->out << "  " << pay << " = getelementptr i8, ptr " << slot
+             << ", i64 " << (8 + sv.offsets[0]) << "\n";
+      G->out << "  store " << G->llvmType(ft) << " " << r << ", ptr " << pay
+             << "\n";
+    }
+    // ENUM values are ADDRESSES in Freshet's value representation
+    // (isAddrValueTy) — return the Option's slot, never a loaded value
+    return slot;
   }
   if (n == "free") {
     std::string p = genExpr(e->args[0]);
@@ -344,19 +466,58 @@ std::string genCall(Expr* e) {
     return r;
   }
 
+  // ---------------- intentional narrowing cast --------------------
+  // narrow_cast(x) is the `as` conversion with the F0211 warning
+  // switched off: the destination is the context type sema resolved
+  // (trySetCastTarget), falling back to the operand's own type
+  if (n == "narrow_cast" && e->args.size() == 1) {
+    std::string v = genExpr(e->args[0]);
+    Type* dst = e->castTargetTy;
+    if (!dst || !dst->isNum() || typesEquivalent(dst, e->args[0]->ty)) {
+      return v;   // no narrowing to do (or unresolved: value identity)
+    }
+    return genCastInline(e->args[0], dst, v);
+  }
+
+  // ---------------- exact fused multiply-add ---------------------
+  // fma(a, b, c) lowers to llvm.fma.fXX — one rounding, deterministic,
+  // strict-compatible (no reassociation, no NaN/signed-zero relaxation;
+  // ch. 13's mode table gains the @fma_contract row separately).
+  if (n == "fma" && e->args.size() == 3) {
+    Type* at = e->args[0]->ty;
+    if (at && (at->k == Type::F32 || at->k == Type::F64)) {
+      std::string ty = G->llvmType(at);
+      std::string a = genExpr(e->args[0]);
+      std::string b = genExpr(e->args[1]);
+      std::string c = genExpr(e->args[2]);
+      std::string r = G->t();
+      G->out << "  " << r << " = call " << G->fflag() << " " << ty
+             << " @llvm.fma." << (at->k == Type::F32 ? "f32" : "f64")
+             << "(" << ty << " " << a << ", " << ty << " " << b << ", "
+             << ty << " " << c << ")  ; fma\n";
+      return r;
+    }
+  }
+
   // ---------------- math via llvm intrinsics / libm
+  // fmin/fmax map DIRECTLY to llvm.minnum/llvm.maxnum — the
+  // spelling that exists on every LLVM 19..23.  (The historical table
+  // listed "llvm.fmin"/"llvm.fmax" and relied on the runtime remap below;
+  // with the corrected common.h both agree, and the table is now the
+  // single place the spelling is written for builtins.)
   static const std::map<std::string, std::string> llvmMath = {
     {"sqrt", "llvm.sqrt"}, {"fabs", "llvm.fabs"}, {"floor", "llvm.floor"},
-    {"ceil", "llvm.ceil"}, {"round", "llvm.round"}, {"fmin", "llvm.fmin"},
-    {"fmax", "llvm.fmax"}, {"pow", "llvm.pow"}, {"exp", "llvm.exp"},
+    {"ceil", "llvm.ceil"}, {"round", "llvm.round"}, {"fmin", "llvm.minnum"},
+    {"fmax", "llvm.maxnum"}, {"pow", "llvm.pow"}, {"exp", "llvm.exp"},
     {"log", "llvm.log"},
   };
   auto it = llvmMath.find(n);
-  // backend matrix LLVM 19-23: FP min/max spellings differ (common.h
-  // llvmFminBase/llvmFmaxBase) — resolve at emission time, not table time
+  // backend matrix LLVM 19-23: every entry above is spelling-stable;
+  // the defensive remap stays (cost-free) in case a future spelling
+  // split needs a version switch again
   std::string intrBase = it != llvmMath.end() ? it->second : "";
-  if (intrBase == "llvm.fmin") intrBase = llvmFminBase();
-  if (intrBase == "llvm.fmax") intrBase = llvmFmaxBase();
+  if (intrBase == "llvm.fmin") intrBase = llvmFminBase();   // unreachable today
+  if (intrBase == "llvm.fmax") intrBase = llvmFmaxBase();   // unreachable today
   if (it != llvmMath.end() && e->args.size() >= 1) {
     Type* at = e->args[0]->ty;
     if (at && (at->k == Type::F32 || at->k == Type::F64)) {

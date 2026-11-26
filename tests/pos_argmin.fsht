@@ -1,0 +1,38 @@
+// argmin/argmax value+index reductions with stable tie-breaking
+fn pick(a: f64, b: f64, which: i64) -> f64 {
+    if (which == 1) { return a; }
+    return b;
+}
+fn main() {
+    // argmin over a crafted array with a tie: values [5, 1, 1, 3, 0]
+    // min = 0 @4; ties at value 1 -> first index (1) wins
+    let n: u64 = 5;
+    let x: *f64 = malloc(f64, n);
+    defer free(x);
+    x[0] = 5.0; x[1] = 1.0; x[2] = 1.0; x[3] = 3.0; x[4] = 0.0;
+    let mut best: f64 = 100.0;
+    let mut best_i: u64 = 0;
+    parfor (i in 0..n) [reduction(argmin: best, best_i)] {
+        let v: f64 = x[i];
+        if (v < best) { best = v; best_i = i; }
+    }
+    print_f64(best, 2); println();          // 0.00
+    print_u64(best_i); println();           // 4
+    // tie: two chunks may hold the same min 1.0 -> smaller index wins
+    let mut m2: f64 = 100.0;
+    let mut m2i: u64 = 0;
+    parfor (i in 0..3) [reduction(argmin: m2, m2i)] {
+        let v: f64 = pick(1.0, x[i], i as i64);
+        if (v < m2) { m2 = v; m2i = i; }
+    }
+    print_u64(m2i); println();              // 1 (first occurrence of 1.0)
+    // argmax: values above -> max 5.0 @0
+    let mut big: f64 = -100.0;
+    let mut big_i: u64 = 0;
+    parfor (i in 0..n) [reduction(argmax: big, big_i)] {
+        let v: f64 = x[i];
+        if (v > big) { big = v; big_i = i; }
+    }
+    print_f64(big, 2); println();           // 5.00
+    print_u64(big_i); println();            // 0
+}

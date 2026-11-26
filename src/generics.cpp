@@ -726,6 +726,7 @@ static Stmt* cloneStmt(Stmt* s) {
   n->tyName = s->tyName;
   n->op2 = s->op2;
   n->pDescending = s->pDescending;
+  n->pstep = s->pstep;   // stride carries through instances
   n->var = s->var; n->annTy = s->annTy; n->mut = s->mut; n->hasAnn = s->hasAnn;
   n->init = cloneExpr(s->init);
   n->lhs = cloneExpr(s->lhs); n->rhs = cloneExpr(s->rhs);
@@ -1105,6 +1106,7 @@ FnDecl* instantiateGenericFn(Program* prog, FnDecl* tmpl,
   inst->isTest = false;
   inst->strictfp = tmpl->strictfp;
   inst->fastmath = tmpl->fastmath;
+  inst->fmaContract = tmpl->fmaContract;   // contraction mode carries over
   inst->userPure = tmpl->userPure;
   inst->exported = tmpl->exported;
   inst->imported = tmpl->imported;

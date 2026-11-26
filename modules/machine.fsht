@@ -1,0 +1,49 @@
+// machine — the machine-profile query surface: the compiler-known
+// freshet.machine_* intrinsics re-exported with library names.  Every
+// value comes from the runtime's cached machine profile
+// (frt_machine_t); 0 is the documented "unknown on this platform"
+// spelling (ch. 25 §4 — a query never aborts a program).
+//
+// The planned TopOpt workspace_requirement refusal and the
+// machine-profile file gate on exactly these values.
+module machine;
+
+pub fn cores_physical() -> u64 {
+    return freshet.cores_physical();
+}
+
+pub fn threads_logical() -> u64 {
+    return freshet.threads_logical();
+}
+
+pub fn smt() -> u64 {
+    return freshet.smt();
+}
+
+pub fn numa_nodes() -> u64 {
+    return freshet.numa_nodes();
+}
+
+pub fn l1d_bytes() -> u64 {
+    return freshet.l1d_bytes();
+}
+
+pub fn l2_bytes() -> u64 {
+    return freshet.l2_bytes();
+}
+
+pub fn l3_bytes() -> u64 {
+    return freshet.l3_bytes();
+}
+
+pub fn page_bytes() -> u64 {
+    return freshet.page_bytes();
+}
+
+pub fn mem_total_bytes() -> u64 {
+    return freshet.mem_total_bytes();
+}
+
+pub fn mem_available_bytes() -> u64 {
+    return freshet.mem_available_bytes();
+}

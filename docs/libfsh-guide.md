@@ -205,7 +205,7 @@ surface:
 | implemented, documented fallback | `fsh_reduce` | both deterministic and fast modes run **sequentially** in the MVP; results are correct, the parallel path is future work |
 | partially implemented | `fsh_thread_id` | returns `0` in the MVP (only the main caller is distinguishable) |
 | implemented with documented fallback | fast math variants | call the same scalar libm routines as the accurate variants |
-| implemented, scalar default | SIMD helpers | the portable scalar fallback is the default; native backends (`libfsh_simd_x86.c` / `libfsh_simd_arm.c`) are future work |
+| implemented, native backends | SIMD helpers | `libfsh_simd_x86.c` (scalar/SSE2/AVX2+FMA/AVX-512, ifunc-dispatched, per-function `target` attributes) and `libfsh_simd_arm.c` (NEON) link beside libfsh.c on matching hosts; the vector TYPES are unconditional structs so the ABI never depends on compile flags; conformance test: `tests/libfsh_simd_test.c` |
 | partially implemented | binary file writes | the requested endianness conversion is ignored on write; host byte order is emitted |
 | implemented | `fsh_last_errno` | returns (and resets) the calling thread's `errno` snapshot; not a durable error slot — read it first after a failure |
 | forward-looking | `fsh_parallel_for` scheduling | range/chunk/thread/affinity arguments are passed through, but not every advertised scheduling choice maps to a distinct runtime schedule yet |

@@ -1,0 +1,17 @@
+fn main() {
+    let mut s: u64 = 0;
+    parfor (i in 1..8 by 2) [reduction(+:s)] {
+        s = s + 1;
+    }
+    print_u64(s); println();
+    let mut t: u64 = 0;
+    parfor (i in 7..0 by -1) [reduction(+:t)] {
+        t = t + 1;
+    }
+    print_u64(t); println();
+    let mut c: u64 = 0;
+    parfor (i in 1..16 by 3) [reduction(+:c)] {
+        c = c + i;
+    }
+    print_u64(c); println();
+}

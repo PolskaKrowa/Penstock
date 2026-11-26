@@ -1041,15 +1041,21 @@ struct Parser {
         s->phi = parseExpr();
         if (accept("by")) {
           Expr* step = parseExpr();
-          // descending: by -1 → set pDescending; IRgen flips the bound
-          // test and step sign
-          if (!(step->k == Expr::UN && step->op == "-" &&
-                step->rhs->k == Expr::INT && step->rhs->ival == 1)) {
-            diag(Diag::Error, Code::Parfor,
-                 "parfor supports only unit step (by -1 for descending)",
-                 l);
-          } else {
+          // `by <positive constant>` strides the induction
+          // variable (e in c..n by 2 — the eight-colour smoother's
+          // shape); `by -1` keeps its historical descending meaning
+          // (IRgen now lowers it through a descending base value in the
+          // region context instead of the historical parsed-but-unused
+          // flag).
+          if (step->k == Expr::INT && step->ival > 0) {
+            s->pstep = step;
+          } else if (step->k == Expr::UN && step->op == "-" &&
+                     step->rhs->k == Expr::INT && step->rhs->ival == 1) {
             s->pDescending = true;
+          } else {
+            diag(Diag::Error, Code::Parfor,
+                 "parfor steps must be a positive compile-time constant "
+                 "(by 2) or by -1 for descending", l);
           }
         }
         expect(")", "parfor");
@@ -1064,7 +1070,9 @@ struct Parser {
             if (cname == "reduction") {
               c.k = ParForClause::REDUCTION;
               expect("(", "reduction");
-              // op: + - * (punct) or min max (ident)
+              // op: + - * (punct) or min max (ident) — argmin/argmax,
+              // whose clause carries a SECOND
+              // accumulator (the index): reduction(argmin: v, vi)
               if (at("+") || at("-") || at("*")) {
                 c.redOp = cur().text;
                 advance();
@@ -1073,6 +1081,10 @@ struct Parser {
               }
               expect(":", "reduction");
               c.var = expectIdent("accumulator");
+              if ((c.redOp == "argmin" || c.redOp == "argmax") &&
+                  accept(",")) {
+                c.var2 = expectIdent("index accumulator");
+              }
               expect(")", "reduction");
             } else if (cname == "threads") {
               c.k = ParForClause::THREADS;
@@ -1479,12 +1491,14 @@ struct Parser {
       // (back-compat with any code using the historical form).
       bool preInline = false, preNoinline = false, preStrictfp = false;
       bool prePure = false, preFastmath = false, preHpcStrict = false;
+      bool preFmaContract = false;   // contraction-only FP mode
       bool preUnsafe = false, preCheckfree = false;
       std::vector<std::pair<std::string,std::string>> preAliasPairs;
       while (at("@")) {
         advance();
         std::string attr = expectIdent("attribute");
         if (attr == "strictfp") preStrictfp = true;
+        else if (attr == "fma_contract") preFmaContract = true;
         else if (attr == "pure") prePure = true;
         else if (attr == "inline") preInline = true;
         else if (attr == "noinline") preNoinline = true;
@@ -1525,6 +1539,7 @@ struct Parser {
         f->isConst = constFn;
         // merge pending attributes (pre-fn form)
         f->strictfp = preStrictfp;
+        f->fmaContract = preFmaContract;
         f->userPure = prePure;
         f->userInline = preInline;
         f->userNoinline = preNoinline;
@@ -1614,6 +1629,7 @@ struct Parser {
           advance();
           std::string attr = expectIdent("attribute");
           if (attr == "strictfp") f->strictfp = true;
+          else if (attr == "fma_contract") f->fmaContract = true;
           else if (attr == "pure") f->userPure = true;
           else if (attr == "inline") f->userInline = true;
           else if (attr == "noinline") f->userNoinline = true;

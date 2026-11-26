@@ -568,6 +568,7 @@ Stmt* cloneStmt(const Stmt* s, const std::map<Sym*, Expr*>& substBySym) {
   n->tyName = s->tyName;
   n->op2 = s->op2;
   n->pDescending = s->pDescending;
+  n->pstep = s->pstep;   // stride carries through clones
   n->var = s->var; n->annTy = s->annTy; n->mut = s->mut; n->hasAnn = s->hasAnn;
   n->init = cloneExpr(s->init, substBySym);
   n->lhs = cloneExpr(s->lhs, substBySym);

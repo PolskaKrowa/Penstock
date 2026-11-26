@@ -137,6 +137,17 @@ static bool isBuiltinCall(const std::string& n) {
     "sm64_next",
     // fsht-03:01 (ch. 23 §5): alloc module
     "page_size",
+    // fallible +
+    // explicitly-aligned allocation.  try_malloc(T, n) -> Option<*T>
+    // (None on exhaustion); malloc_aligned(T, n, A) -> *T with the
+    // caller's alignment promise (constant power-of-two >= 16).
+    "try_malloc", "malloc_aligned",
+    // the INTENTIONAL narrowing cast — mixed-precision code
+    // says what it means (no F0211 noise): narrow_cast(x) narrows to
+    // the context type the same way `as` does, silence included
+    "narrow_cast",
+    // exact single-rounding fused multiply-add
+    "fma",
     // fsht-03:02 (registry 02.06.01 update, ch. 24 §4): the String
     // migration's new builtins — deep copy and clear
     "string_clone", "string_clear",
@@ -154,7 +165,10 @@ void trySetCastTarget(FnSema* fs, Expr* e, Type* expected) {
   (void)fs;
   if (!e || !expected) return;
   bool isCast = e->k == Expr::CALL &&
-                (e->name == "checked_cast" || e->name == "saturating_cast");
+                (e->name == "checked_cast" || e->name == "saturating_cast" ||
+                 // the intentional narrowing cast resolves its
+                 // destination from the context the same way
+                 e->name == "narrow_cast");
   if (!isCast || e->castTargetTy) return;
   Type* u = expected;
   if (expected->k == Type::ENUM) {
@@ -254,6 +268,124 @@ static Type* typeBuiltin(FnSema* fs, Expr* e) {
     }
     e->mallocElem = elem;
     return Type::ptr(elem);
+  }
+  // malloc_aligned(T, n, align) — the alignment-controlled form
+  // of malloc.  The alignment must be a compile-time power of two >= 16
+  // (AVX2 = 32, AVX-512/streaming = 64; ch. 7 gives soa() planes 64).
+  if (n == "malloc_aligned") {
+    if (!need(3)) return Type::ptr(Type::simple(Type::U8));
+    Expr* tArg = e->args[0];
+    Type* elem = nullptr;
+    if (tArg->k == Expr::IDENT) {
+      elem = typeFromIdent(tArg->name);
+      if (!elem) {
+        StructDef* sd = findStructDef(tArg->name);
+        if (sd) elem = Type::structOf(sd);
+      }
+    }
+    if (!elem) {
+      diag(Diag::Error, Code::Args,
+           "malloc_aligned's first argument must be a type", e->loc);
+      return Type::ptr(Type::simple(Type::U8));
+    }
+    if (elem->k == Type::VOID || elem->k == Type::SOA) {
+      diag(Diag::Error, Code::Args,
+           "cannot malloc_aligned " + typeToString(elem), e->loc);
+    }
+    if (!argT(1) || !argT(1)->isInt()) {
+      diag(Diag::Error, Code::Args,
+           "malloc_aligned count must be integer", e->loc);
+    }
+    if (!argT(2) || !argT(2)->isInt() || !e->args[2]->constant) {
+      diag(Diag::Error, Code::Args,
+           "malloc_aligned's alignment must be a compile-time constant "
+           "(16, 32, 64, ...)",
+           e->loc);
+    } else {
+      int64_t a = (int64_t)e->args[2]->ival;
+      if (a < 16 || (a & (a - 1)) != 0)
+        diag(Diag::Error, Code::Args,
+             "malloc_aligned's alignment must be a power of two >= 16, got "
+             + std::to_string(a), e->loc);
+    }
+    e->mallocElem = elem;
+    return Type::ptr(elem);
+  }
+  // try_malloc(T, n) -> Option<*T>.  The Option payload is the
+  // ownership-tracked pointer the caller frees through free() after a
+  // Some match; a None result is the documented refusal to run against
+  // an oversized workload (the workspace_requirement-then-refuse shape).
+  if (n == "try_malloc") {
+    if (!need(2)) return Type::ptr(Type::simple(Type::U8));
+    Expr* tArg = e->args[0];
+    Type* elem = nullptr;
+    if (tArg->k == Expr::IDENT) {
+      elem = typeFromIdent(tArg->name);
+      if (!elem) {
+        StructDef* sd = findStructDef(tArg->name);
+        if (sd) elem = Type::structOf(sd);
+      }
+    }
+    if (!elem) {
+      diag(Diag::Error, Code::Args,
+           "try_malloc's first argument must be a type", e->loc);
+      return Type::ptr(Type::simple(Type::U8));
+    }
+    if (elem->k == Type::VOID || elem->k == Type::SOA) {
+      diag(Diag::Error, Code::Args,
+           "cannot try_malloc " + typeToString(elem), e->loc);
+    }
+    if (!argT(1) || !argT(1)->isInt()) {
+      diag(Diag::Error, Code::Args,
+           "try_malloc count must be integer", e->loc);
+    }
+    e->mallocElem = elem;
+    Program* prog = currentProgram();
+    ensurePreludeEnumType("Option");
+    EnumDef* opt = findEnumDef("Option");
+    if (opt)
+      return Type::enumOf(instantiateEnum(prog, opt, {Type::ptr(elem)},
+                                           e->loc));
+    return Type::ptr(elem);
+  }
+  // narrow_cast(x) — the explicit intentional narrowing form.
+  // The destination comes from the CONTEXT (a binding's annTy, a call
+  // parameter, an Option payload) exactly like checked_cast; the value
+  // conversion itself is the plain `as` narrowing — only the F0211
+  // warning is absent, because the program SAYS it is narrowing.
+  // Narrowing to f32 from f64 is the mixed-precision storage idiom.
+  if (n == "narrow_cast") {
+    if (!need(1)) return Type::simple(Type::F64);
+    Type* t = argT(0);
+    if (!t || !t->isNum()) {
+      diag(Diag::Error, Code::Args,
+           "narrow_cast expects a numeric operand", e->loc);
+      return Type::simple(Type::F64);
+    }
+    // trySetCastTarget (called at binding/assign/call/return sites
+    // BEFORE typeBuiltin) has resolved the destination: the expression's
+    // type IS the narrowed type so the assignment checks clean
+    if (e->castTargetTy && e->castTargetTy->isNum() &&
+        e->castTargetTy->bits() < t->bits())
+      return e->castTargetTy;
+    e->ty = t;
+    return e->ty;
+  }
+  // fma(a, b, c) — exact single-rounding a*b+c; identical float
+  // operand widths (f32 or f64) enforced like the other math builtins
+  if (n == "fma") {
+    if (!need(3)) return Type::simple(Type::F64);
+    Type* t = argT(0);
+    if (!t || !(t->k == Type::F32 || t->k == Type::F64)) {
+      diag(Diag::Error, Code::Args,
+           "fma expects f32/f64 operands", e->loc);
+      return Type::simple(Type::F64);
+    }
+    if ((argT(1) && argT(1)->k != t->k) || (argT(2) && argT(2)->k != t->k))
+      diag(Diag::Error, Code::Args,
+           "fma operands must share one float width (fma(f64, f64, f64) "
+           "or fma(f32, f32, f32))", e->loc);
+    return t;
   }
   if (n == "stack_alloc") {
     // data stacks (goose port): stack_alloc(T, n) — like malloc's first
@@ -1035,6 +1167,11 @@ static Type* typeIntrinsic(FnSema* fs, Expr* e) {
   if (n == "freshet.prefetch_r" || n == "freshet.prefetch_w" ||
       n == "freshet.clflush") {
     need(1);
+    // args are typed HERE: the intrinsic path returns before the
+    // caller's argument typing, so an untyped pointer operand would
+    // reach IRgen and lower to an empty operand (follow-on: the
+    // same gap affected freshet.assume_aligned)
+    for (auto* a : e->args) typeExpr(fs, a);
     Type* a = e->args.empty() ? nullptr : e->args[0]->ty;
     if (a && !a->isPtr()) {
       diag(Diag::Error, Code::Args, n + " expects a pointer",
@@ -1048,6 +1185,41 @@ static Type* typeIntrinsic(FnSema* fs, Expr* e) {
   }
   if (n == "freshet.pause") { need(0); return Type::simple(Type::VOID); }
   if (n == "freshet.threads") { need(0); return Type::simple(Type::USIZE); }
+  // the machine-query
+  // intrinsics — the runtime's cached frt_machine_t (0 = unknown, ch. 25
+  // §4: a query never aborts a program).  These are the values the
+  // planned machine-profile file and workspace_requirement refusal gate
+  // on.
+  if (n == "freshet.cores_physical" || n == "freshet.threads_logical" ||
+      n == "freshet.smt" || n == "freshet.numa_nodes" ||
+      n == "freshet.l1d_bytes" || n == "freshet.l2_bytes" ||
+      n == "freshet.l3_bytes" || n == "freshet.page_bytes" ||
+      n == "freshet.mem_total_bytes" ||
+      n == "freshet.mem_available_bytes") {
+    need(0);
+    return Type::simple(Type::USIZE);
+  }
+  // freshet.assume_aligned(p, A) — a promise the caller asserts
+  // about an already-allocated buffer; lowering emits
+  // llvm.assume((ptr & (A-1)) == 0) so the vectoriser drops peel/remainder
+  // code for the promised alignment.  A is a compile-time power of two.
+  if (n == "freshet.assume_aligned") {
+    if (!need(2)) return Type::simple(Type::VOID);
+    // type args here (see the prefetch note above): the pointer operand
+    // must carry its sema type when IRgen lowers it
+    for (auto* a : e->args) typeExpr(fs, a);
+    Type* a = e->args.empty() ? nullptr : e->args[0]->ty;
+    if (a && !a->isPtr()) {
+      diag(Diag::Error, Code::Args,
+           "freshet.assume_aligned expects a pointer", e->loc);
+    }
+    // NOTE: typeIntrinsic runs BEFORE the args are expression-typed, so
+    // the constant/power-of-two validation of the alignment happens in
+    // IRgen on the folded value; here only the syntactic shape is checked
+    // (the arg exists).  IRgen diagnoses F0202-style when the value is
+    // not a literal constant.
+    return Type::simple(Type::VOID);
+  }
   return nullptr;
 }
 
@@ -1331,8 +1503,12 @@ Type* typeExpr(FnSema* fs, Expr* e) {
       if (isBuiltinCall(e->name)) {
         // malloc(T, n) / soa_new(Struct, n) / stack_alloc(T, n) / vec_new(T, cap):
         // first arg is a type name, not an expression — skip expression typing for it
+        // try_malloc / malloc_aligned carry a type name first
+        // argument exactly like malloc (the count is expression-typed)
         size_t skipTypeArg = (e->name == "malloc" || e->name == "soa_new" ||
-                              e->name == "stack_alloc" || e->name == "vec_new") ? 1 : 0;
+                              e->name == "stack_alloc" || e->name == "vec_new" ||
+                              e->name == "try_malloc" ||
+                              e->name == "malloc_aligned") ? 1 : 0;
         for (size_t ai = 0; ai < e->args.size(); ++ai) {
           if (ai < skipTypeArg) {
             e->args[ai]->ty = Type::simple(Type::U64);

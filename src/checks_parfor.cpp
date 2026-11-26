@@ -166,6 +166,17 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
   // reduction init values: '+':0, '*':1, min/max: any
   for (auto& c : pf->clauses) {
     if (c.k != ParForClause::REDUCTION) continue;
+    // argmin/argmax accumulate (value, index) pairs — the
+    // clause must name the index accumulator, and it is write-safe
+    // exactly like the value accumulator
+    if (c.redOp == "argmin" || c.redOp == "argmax") {
+      if (c.var2.empty()) {
+        diag(Diag::Error, Code::Parfor,
+             "reduction(" + c.redOp + ":" + c.var +
+             ") needs an index accumulator: reduction(" + c.redOp +
+             ": " + c.var + ", " + c.var + "_i)", c.loc);
+      }
+    }
     if (c.redOp == "+" || c.redOp == "-") {
       // find let-init of the accumulator
       bool foundZero = false;
@@ -204,7 +215,10 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
   // the parfor body, (c) it's the parfor induction var.
   std::set<std::string> safe;
   for (auto& c : pf->clauses)
-    if (c.k == ParForClause::REDUCTION) safe.insert(c.var);
+    if (c.k == ParForClause::REDUCTION) {
+      safe.insert(c.var);
+      if (!c.var2.empty()) safe.insert(c.var2);   // index acc
+    }
   safe.insert(pf->pvar);
 
   // collapsed inner parfor: serialised inside the outer chunk fn, so the
@@ -215,7 +229,10 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
       if (q->k == Stmt::PARFOR) {
         safe.insert(q->pvar);
         for (auto& c : q->clauses)
-          if (c.k == ParForClause::REDUCTION) safe.insert(c.var);
+          if (c.k == ParForClause::REDUCTION) {
+      safe.insert(c.var);
+      if (!c.var2.empty()) safe.insert(c.var2);   // index acc
+    }
       }
       q = q->parent;
     }
@@ -228,7 +245,10 @@ static void checkParfor(FnSema* fs, Stmt* pf) {
     if (s->k == Stmt::PARFOR) {
       safe.insert(s->pvar);
       for (auto& c : s->clauses)
-        if (c.k == ParForClause::REDUCTION) safe.insert(c.var);
+        if (c.k == ParForClause::REDUCTION) {
+      safe.insert(c.var);
+      if (!c.var2.empty()) safe.insert(c.var2);   // index acc
+    }
       // inner parfors have their own body locals
       collectLocals(s->body);
       return;

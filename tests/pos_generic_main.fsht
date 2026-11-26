@@ -1,0 +1,31 @@
+// fn main() directly instantiating a generic fn — the shape the
+// Freshet-Scientific 0.2.1 validation record reported as a compiler crash
+// ("generic calls are issued from ordinary functions" was the workaround).
+// The crash class was the sema p->fns range-for dangling on the vector
+// growth that a mid-body generic instantiation causes (fixed by the
+// snapshot-count iteration in sema.cpp's step 5); this test locks the
+// behaviour in: main itself is the instantiating caller.
+pub trait Scal { fn s(a: Self) -> f64; }
+
+pub struct U1 { v: f64 }
+
+pub impl Scal for U1 {
+    fn s(a: Self) -> f64 { return a.v * 2.0; }
+}
+
+fn apply_s<T: Scal>(a: T) -> f64 {
+    return Scal::s(a);
+}
+
+fn plain<T: Float>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn main() {
+    // trait-generic instantiation directly from main
+    let r: f64 = apply_s(U1 { v: 21.0 });
+    // builtin-constraint generic instantiation directly from main
+    let q: f64 = plain(1.5, 2.5);
+    print_i64(r as i64); println();   // 42
+    print_i64(q as i64); println();   // 4
+}
